@@ -1,0 +1,57 @@
+# Talyvor Docs — local + self-hosted compose stack.
+#
+# Three services:
+#   docs       Go API server (port 4000)
+#   frontend   nginx serving the built SPA (port 4001)
+#   postgres   pgvector-flavoured Postgres for full-text + semantic search
+#
+# Postgres init bootstraps the schema via the migrations directory —
+# files in /docker-entrypoint-initdb.d run in lexical order on first
+# boot, so the 000N_*.sql ordering is preserved automatically.
+
+services:
+  docs:
+    build: .
+    ports:
+      - "4000:4000"
+    environment:
+      - DOCS_DATABASE_URL=postgres://docs:${POSTGRES_PASSWORD:-changeme}@postgres:5432/talyvor_docs?sslmode=disable
+      - DOCS_LENS_URL=${DOCS_LENS_URL:-}
+      - DOCS_LENS_API_KEY=${DOCS_LENS_API_KEY:-}
+      - DOCS_TRACK_URL=${DOCS_TRACK_URL:-}
+      - DOCS_TRACK_API_KEY=${DOCS_TRACK_API_KEY:-}
+      - DOCS_LOG_LEVEL=${DOCS_LOG_LEVEL:-info}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/healthz"]
+      interval: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+    ports:
+      - "4001:80"
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: talyvor_docs
+      POSTGRES_USER: docs
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docs -d talyvor_docs"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  pgdata:

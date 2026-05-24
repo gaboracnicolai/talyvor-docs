@@ -26,6 +26,7 @@ import (
 	"github.com/talyvor/docs/internal/config"
 	"github.com/talyvor/docs/internal/db"
 	"github.com/talyvor/docs/internal/freshness"
+	"github.com/talyvor/docs/internal/importer"
 	"github.com/talyvor/docs/internal/lensintegration"
 	"github.com/talyvor/docs/internal/mcp"
 	"github.com/talyvor/docs/internal/metrics"
@@ -106,6 +107,11 @@ func main() {
 	analyticsStore := analytics.NewStore(pool)
 	analyticsHandler := analytics.NewHandler(analyticsStore)
 
+	// Importer (Notion markdown / Confluence HTML) — multipart
+	// upload surface so users can migrate off legacy wikis.
+	importerSvc := importer.New(pageStore, spaceStore)
+	importerHandler := importer.NewHandler(importerSvc)
+
 	// MCP server. Agents (Claude Code, Cursor, etc.) connect to the
 	// public /mcp endpoints and call the 10 documented tools. The
 	// server keeps zero state of its own — it composes the existing
@@ -182,6 +188,7 @@ func main() {
 		permHandler.Mount(r)
 		shareHandler.Mount(r)
 		shareHandler.MountPublic(r)
+		importerHandler.Mount(r)
 	})
 
 	srv := &http.Server{
