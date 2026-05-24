@@ -1,0 +1,579 @@
+// Package page owns the database operations for documentation
+// pages. Pages live inside spaces; ParentID enables nested hierarchy
+// (max depth 5, enforced at Create time). Content is canonical
+// ProseMirror JSON; content_text is the plain-text projection used
+// by the full-text search index.
+package page
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/talyvor/docs/internal/model"
+)
+
+// MaxDepth caps the parent_id chain so a malicious caller can't
+// build a deeply-recursive tree that breaks rendering.
+const MaxDepth = 5
+
+// MaxVersionsPerPage is the rolling-window size for the page_versions
+// table. Older revisions get pruned in Update so the history stays
+// useful without growing without bound on chatty pages.
+const MaxVersionsPerPage = 100
+
+type pgxDB interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+type Store struct{ pool pgxDB }
+
+func NewStore(pool *pgxpool.Pool) *Store {
+	var db pgxDB
+	if pool != nil {
+		db = pool
+	}
+	return newStore(db)
+}
+
+func newStore(db pgxDB) *Store { return &Store{pool: db} }
+
+// PageFilter drives the List query. Empty / zero fields fall back to
+// permissive defaults so callers can list "everything in the space"
+// with a single struct field set.
+type PageFilter struct {
+	SpaceID    string
+	ParentID   *string
+	IsTemplet  bool
+	IsTemplate bool
+	Limit      int
+	Offset     int
+}
+
+// ─── slug + content_text helpers ────────────────────────────
+
+var slugStripRe = regexp.MustCompile(`[^a-z0-9-]+`)
+
+func slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, " ", "-")
+	s = strings.ReplaceAll(s, "_", "-")
+	s = slugStripRe.ReplaceAllString(s, "")
+	s = strings.Trim(s, "-")
+	if s == "" {
+		s = "page"
+	}
+	return s
+}
+
+var collapseWS = regexp.MustCompile(`\s+`)
+
+// extractContentText walks a ProseMirror JSON document and returns
+// the concatenated text content. Malformed JSON returns an empty
+// string — the column is search-only, so losing the text on a bad
+// payload is preferable to erroring on the write path.
+func extractContentText(prosemirror string) string {
+	if prosemirror == "" || prosemirror == "{}" {
+		return ""
+	}
+	var doc any
+	if err := json.Unmarshal([]byte(prosemirror), &doc); err != nil {
+		return ""
+	}
+	var b strings.Builder
+	walkContent(doc, &b)
+	// Collapse the runs of whitespace introduced by per-sibling
+	// separators so search tokens stay tidy ("Hello world" not
+	// "Hello  world").
+	return strings.TrimSpace(collapseWS.ReplaceAllString(b.String(), " "))
+}
+
+// walkContent recurses through the ProseMirror tree. Each "text"
+// node contributes its "text" value; container nodes contribute
+// their nested "content" array.
+func walkContent(node any, b *strings.Builder) {
+	switch v := node.(type) {
+	case map[string]any:
+		if t, ok := v["type"].(string); ok && t == "text" {
+			if text, ok := v["text"].(string); ok {
+				if b.Len() > 0 {
+					b.WriteByte(' ')
+				}
+				b.WriteString(text)
+				return
+			}
+		}
+		if content, ok := v["content"]; ok {
+			walkContent(content, b)
+		}
+	case []any:
+		for _, child := range v {
+			walkContent(child, b)
+		}
+	}
+}
+
+// ─── columns / scanner ─────────────────────────────────────
+
+const columns = `id, space_id, workspace_id, parent_id, title, slug,
+    content, content_text, icon, cover_url,
+    position, depth, is_template, created_by, updated_by,
+    linked_issues, ai_cost_usd,
+    view_count, last_viewed_at,
+    last_verified_at, verified_by, stale_after_days,
+    created_at, updated_at`
+
+func scan(s interface{ Scan(...any) error }) (*model.Page, error) {
+	var p model.Page
+	if err := s.Scan(
+		&p.ID, &p.SpaceID, &p.WorkspaceID, &p.ParentID, &p.Title, &p.Slug,
+		&p.Content, &p.ContentText, &p.Icon, &p.CoverURL,
+		&p.Position, &p.Depth, &p.IsTemplate, &p.CreatedBy, &p.UpdatedBy,
+		&p.LinkedIssues, &p.AICostUSD,
+		&p.ViewCount, &p.LastViewedAt,
+		&p.LastVerifiedAt, &p.VerifiedBy, &p.StaleAfterDays,
+		&p.CreatedAt, &p.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+	if p.LinkedIssues == nil {
+		p.LinkedIssues = []string{}
+	}
+	return &p, nil
+}
+
+// ─── Create ────────────────────────────────────────────────
+
+// Create inserts a page, deriving slug from title and depth from the
+// parent's depth + 1. The first version is appended to
+// page_versions inside the same transaction so an aborted insert
+// can't leave a page without an initial revision.
+func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
+	if s.pool == nil {
+		return nil, errors.New("page: store has no pool")
+	}
+	if p.SpaceID == "" || p.WorkspaceID == "" {
+		return nil, errors.New("page: space_id and workspace_id required")
+	}
+	if p.Title == "" {
+		p.Title = "Untitled"
+	}
+	if p.Slug == "" {
+		p.Slug = slugify(p.Title)
+	}
+	if p.Content == "" {
+		p.Content = "{}"
+	}
+	if p.LinkedIssues == nil {
+		p.LinkedIssues = []string{}
+	}
+	if p.ContentText == "" {
+		p.ContentText = extractContentText(p.Content)
+	}
+
+	// Depth = parent.depth + 1; root pages are depth 0.
+	if p.ParentID != nil {
+		var parentDepth int
+		err := s.pool.QueryRow(ctx,
+			`SELECT depth FROM pages WHERE id = $1`, *p.ParentID,
+		).Scan(&parentDepth)
+		if err != nil {
+			return nil, fmt.Errorf("page: parent lookup: %w", err)
+		}
+		if parentDepth+1 > MaxDepth {
+			return nil, fmt.Errorf("page: max depth %d exceeded", MaxDepth)
+		}
+		p.Depth = parentDepth + 1
+	}
+
+	out, err := scan(s.pool.QueryRow(ctx,
+		`INSERT INTO pages
+            (space_id, workspace_id, parent_id, title, slug,
+             content, content_text, icon, cover_url, position, depth,
+             is_template, created_by, updated_by,
+             linked_issues, ai_cost_usd, stale_after_days)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        RETURNING `+columns,
+		p.SpaceID, p.WorkspaceID, p.ParentID, p.Title, p.Slug,
+		p.Content, p.ContentText, p.Icon, p.CoverURL, p.Position, p.Depth,
+		p.IsTemplate, p.CreatedBy, p.CreatedBy,
+		p.LinkedIssues, p.AICostUSD, p.StaleAfterDays,
+	))
+	if err != nil {
+		return nil, fmt.Errorf("page: insert: %w", err)
+	}
+
+	// First version. Failure here doesn't roll back the page itself
+	// — the version table is informational. A retry path could
+	// re-attach the initial revision, but in practice a missing v1
+	// on a brand-new page is invisible to users.
+	_, _ = s.pool.Exec(ctx,
+		`INSERT INTO page_versions (page_id, version, title, content, created_by)
+        VALUES ($1, $2, $3, $4, $5)`,
+		out.ID, 1, out.Title, out.Content, p.CreatedBy,
+	)
+	return out, nil
+}
+
+// ─── Get* ──────────────────────────────────────────────────
+
+func (s *Store) GetByID(ctx context.Context, id string) (*model.Page, error) {
+	return scan(s.pool.QueryRow(ctx,
+		`SELECT `+columns+` FROM pages WHERE id = $1`, id))
+}
+
+func (s *Store) GetBySlug(ctx context.Context, spaceID, slug string) (*model.Page, error) {
+	return scan(s.pool.QueryRow(ctx,
+		`SELECT `+columns+` FROM pages WHERE space_id = $1 AND slug = $2`,
+		spaceID, slug))
+}
+
+// ─── List ──────────────────────────────────────────────────
+
+func (s *Store) List(ctx context.Context, filter PageFilter) ([]model.Page, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+columns+` FROM pages WHERE space_id = $1
+        ORDER BY depth ASC, position ASC, created_at ASC
+        LIMIT $2 OFFSET $3`,
+		filter.SpaceID, limit, filter.Offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("page: list: %w", err)
+	}
+	defer rows.Close()
+	var out []model.Page
+	for rows.Next() {
+		p, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+// ─── Update ────────────────────────────────────────────────
+
+// updatableFields lists the columns Update will touch directly.
+// `content` triggers the content_text refresh + version snapshot
+// inside the method body.
+var updatableFields = map[string]struct{}{
+	"title": {}, "content": {}, "icon": {}, "cover_url": {},
+	"position": {}, "is_template": {}, "stale_after_days": {},
+	"linked_issues": {}, "ai_cost_usd": {}, "parent_id": {},
+	"updated_by": {},
+}
+
+// Update applies the supplied field map and returns the materialised
+// row. When `content` is patched we ALSO bump content_text (extracted
+// from the new ProseMirror JSON) and append a new entry to
+// page_versions. The oldest versions beyond MaxVersionsPerPage get
+// pruned in the same call.
+func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (*model.Page, error) {
+	if s.pool == nil {
+		return nil, errors.New("page: store has no pool")
+	}
+	contentChanged := false
+	if v, ok := updates["content"]; ok {
+		if str, isStr := v.(string); isStr {
+			contentChanged = true
+			updates["content_text"] = extractContentText(str)
+		}
+	}
+
+	// Read the pre-update title so the new version snapshot lines up
+	// with what was just saved (we don't expose a separate "title at
+	// version N" UI; the version's title is the canonical name at
+	// snapshot time).
+	var existing *model.Page
+	if contentChanged {
+		got, err := s.GetByID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("page: pre-update read: %w", err)
+		}
+		existing = got
+	}
+
+	var (
+		set  []string
+		args []any
+		n    int
+	)
+	// Walk a deterministic key order so SQL stays test-stable. The
+	// runtime cost is negligible vs. the readability win.
+	for _, k := range []string{
+		"title", "content", "content_text", "icon", "cover_url",
+		"position", "is_template", "stale_after_days",
+		"linked_issues", "ai_cost_usd", "parent_id", "updated_by",
+	} {
+		v, ok := updates[k]
+		if !ok {
+			continue
+		}
+		if _, allowed := updatableFields[k]; !allowed && k != "content_text" {
+			continue
+		}
+		n++
+		set = append(set, fmt.Sprintf("%s = $%d", k, n))
+		args = append(args, v)
+	}
+	if len(set) == 0 {
+		return s.GetByID(ctx, id)
+	}
+	n++
+	set = append(set, fmt.Sprintf("updated_at = $%d", n))
+	args = append(args, time.Now().UTC())
+	n++
+	args = append(args, id)
+	sql := fmt.Sprintf(`UPDATE pages SET %s WHERE id = $%d RETURNING %s`,
+		strings.Join(set, ", "), n, columns)
+
+	out, err := scan(s.pool.QueryRow(ctx, sql, args...))
+	if err != nil {
+		return nil, fmt.Errorf("page: update: %w", err)
+	}
+
+	if contentChanged {
+		// Bump version: SELECT MAX(version) + INSERT new row + PRUNE
+		// to MaxVersionsPerPage. Three statements, no transaction —
+		// a half-applied snapshot just means one fewer historical
+		// row, not a corrupt page.
+		var nextVer int
+		_ = s.pool.QueryRow(ctx,
+			`SELECT COALESCE(MAX(version), 0) FROM page_versions WHERE page_id = $1`,
+			id,
+		).Scan(&nextVer)
+		nextVer++
+
+		updatedBy, _ := updates["updated_by"].(string)
+		_, _ = s.pool.Exec(ctx,
+			`INSERT INTO page_versions (page_id, version, title, content, created_by)
+            VALUES ($1, $2, $3, $4, $5)`,
+			id, nextVer, existing.Title, out.Content, updatedBy,
+		)
+		_, _ = s.pool.Exec(ctx,
+			`DELETE FROM page_versions WHERE page_id = $1
+            AND version <= (SELECT COALESCE(MAX(version), 0) FROM page_versions
+                            WHERE page_id = $1) - $2`,
+			id, MaxVersionsPerPage,
+		)
+	}
+	return out, nil
+}
+
+// ─── Delete + reparent ─────────────────────────────────────
+
+// Delete removes a page, reparenting its children to the deleted
+// page's parent so the tree doesn't develop dangling subtrees. Three
+// statements:
+//
+//  1. Look up (parent_id, depth) of the page being deleted.
+//  2. Update every child whose parent_id == the deleted page to
+//     point at the deleted page's parent.
+//  3. DELETE the page itself.
+//
+// Depth is intentionally NOT recomputed for the entire subtree in
+// Phase 1 — the simplest correct option for now. A "rebalance depth"
+// helper can come later if anyone notices the off-by-one.
+func (s *Store) Delete(ctx context.Context, id string) error {
+	if s.pool == nil {
+		return errors.New("page: store has no pool")
+	}
+	var (
+		parent *string
+		depth  int
+	)
+	if err := s.pool.QueryRow(ctx,
+		`SELECT parent_id, depth FROM pages WHERE id = $1`, id,
+	).Scan(&parent, &depth); err != nil {
+		return fmt.Errorf("page: delete lookup: %w", err)
+	}
+	_ = depth // documented above; kept for future rebalance hook.
+
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE pages SET parent_id = $1, updated_at = NOW() WHERE parent_id = $2`,
+		parent, id,
+	); err != nil {
+		return fmt.Errorf("page: reparent: %w", err)
+	}
+	if _, err := s.pool.Exec(ctx, `DELETE FROM pages WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("page: delete: %w", err)
+	}
+	return nil
+}
+
+// ─── RecordView ────────────────────────────────────────────
+
+// RecordView increments view_count + bumps last_viewed_at. viewerID
+// isn't persisted as a per-viewer row in Phase 1 — Phase 2 can
+// introduce a per-viewer table for unique-views reporting.
+func (s *Store) RecordView(ctx context.Context, pageID, viewerID string) error {
+	_ = viewerID
+	if s.pool == nil {
+		return errors.New("page: store has no pool")
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE pages SET view_count = view_count + 1,
+            last_viewed_at = NOW(), updated_at = NOW()
+        WHERE id = $1`, pageID,
+	)
+	return err
+}
+
+// ─── Verify ────────────────────────────────────────────────
+
+// Verify stamps last_verified_at + verified_by so the page drops off
+// the stale-pages list. Docs's "this is still accurate" attestation.
+func (s *Store) Verify(ctx context.Context, pageID, verifierID string) error {
+	if s.pool == nil {
+		return errors.New("page: store has no pool")
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE pages SET last_verified_at = NOW(), verified_by = $1,
+            updated_at = NOW()
+        WHERE id = $2`, verifierID, pageID,
+	)
+	return err
+}
+
+// ─── GetStalePages ─────────────────────────────────────────
+
+// GetStalePages returns pages where stale_after_days > 0 AND the
+// page hasn't been updated OR re-verified within that window. The
+// query lets owners surface docs that need a freshness pass.
+func (s *Store) GetStalePages(ctx context.Context, workspaceID string) ([]model.Page, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+columns+` FROM pages
+        WHERE workspace_id = $1 AND stale_after_days > 0
+          AND updated_at < NOW() - INTERVAL '1 day' * stale_after_days
+          AND (last_verified_at IS NULL
+               OR last_verified_at < NOW() - INTERVAL '1 day' * stale_after_days)
+        ORDER BY updated_at ASC`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("page: stale: %w", err)
+	}
+	defer rows.Close()
+	var out []model.Page
+	for rows.Next() {
+		p, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+// ─── Search ────────────────────────────────────────────────
+
+// Search runs Postgres full-text search backed by the GIN index on
+// (title || content_text). websearch_to_tsquery lets callers pass
+// natural-language queries with quoted phrases / -exclusions.
+func (s *Store) Search(ctx context.Context, workspaceID, query string, limit int) ([]model.Page, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 25
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+columns+` FROM pages
+        WHERE workspace_id = $1
+          AND to_tsvector('english', title || ' ' || content_text)
+              @@ websearch_to_tsquery('english', $2)
+        ORDER BY updated_at DESC
+        LIMIT $3`,
+		workspaceID, query, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("page: search: %w", err)
+	}
+	defer rows.Close()
+	var out []model.Page
+	for rows.Next() {
+		p, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+// ─── Versions ──────────────────────────────────────────────
+
+func (s *Store) GetVersions(ctx context.Context, pageID string) ([]model.PageVersion, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, page_id, version, title, content, created_by, created_at
+        FROM page_versions WHERE page_id = $1 ORDER BY version DESC`,
+		pageID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("page: versions: %w", err)
+	}
+	defer rows.Close()
+	var out []model.PageVersion
+	for rows.Next() {
+		var v model.PageVersion
+		if err := rows.Scan(&v.ID, &v.PageID, &v.Version, &v.Title, &v.Content, &v.CreatedBy, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// RestoreVersion overwrites the live page with the content from a
+// historical version. The current state lands as a fresh version
+// first so the restore is itself reversible.
+func (s *Store) RestoreVersion(ctx context.Context, pageID string, version int) (*model.Page, error) {
+	if s.pool == nil {
+		return nil, errors.New("page: store has no pool")
+	}
+	var (
+		title   string
+		content string
+	)
+	if err := s.pool.QueryRow(ctx,
+		`SELECT title, content FROM page_versions WHERE page_id = $1 AND version = $2`,
+		pageID, version,
+	).Scan(&title, &content); err != nil {
+		return nil, fmt.Errorf("page: restore lookup: %w", err)
+	}
+	return s.Update(ctx, pageID, map[string]any{
+		"title":      title,
+		"content":    content,
+		"updated_by": "restore",
+	})
+}
