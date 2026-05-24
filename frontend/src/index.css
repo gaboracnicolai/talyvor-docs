@@ -172,6 +172,28 @@
   color: #d4d8e2;
 }
 
+/* Remote-cursor decorations rendered by the collab plugin. */
+.remote-cursor {
+  position: relative;
+  display: inline-block;
+  width: 0;
+  height: 1.1em;
+  vertical-align: text-bottom;
+}
+.remote-cursor-label {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  white-space: nowrap;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 4px;
+  border-radius: 3px;
+  color: #0c0e12;
+  transform: translateY(2px);
+  pointer-events: none;
+}
+
 /* Scrollbars match the dark theme. */
 ::-webkit-scrollbar {
   width: 10px;

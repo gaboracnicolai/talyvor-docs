@@ -20,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/talyvor/docs/internal/block"
+	"github.com/talyvor/docs/internal/collab"
 	"github.com/talyvor/docs/internal/config"
 	"github.com/talyvor/docs/internal/db"
 	"github.com/talyvor/docs/internal/metrics"
@@ -55,6 +56,18 @@ func main() {
 	pageHandler := page.NewHandler(pageStore, pool)
 	blockHandler := block.NewHandler(blockStore)
 
+	// Collaborative editing engine. The engine is WebSocket-agnostic;
+	// the handler layer below upgrades the HTTP request and shuttles
+	// frames through the engine's per-client send channels.
+	otEngine := collab.NewOTEngine()
+	collabHandler := collab.NewHandler(otEngine)
+	saver := collab.NewAutoSaver(otEngine,
+		func(ctx context.Context, pageID, content string) error {
+			_, err := pageStore.Update(ctx, pageID, map[string]any{"content": content})
+			return err
+		})
+	go saver.Start(ctx)
+
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
@@ -68,6 +81,12 @@ func main() {
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
 	r.Handle("/metrics", metrics.Handler())
+
+	// Collab WS lives at the same /v1 prefix as the REST API so a
+	// reverse-proxy doesn't need a special rule. The chi middleware
+	// Timeout above does NOT apply because chi disables it for
+	// hijacked connections.
+	r.Get("/v1/collab/{pageID}/ws", collabHandler.ServeWS)
 
 	r.Route("/v1", func(r chi.Router) {
 		spaceHandler.Mount(r)

@@ -6,6 +6,11 @@ import { schema } from "~/components/editor/schema";
 import { buildPlugins } from "~/components/editor/extensions";
 import { slashPlugin } from "~/components/editor/extensions/slash-commands";
 import { codeHighlightPlugin } from "~/components/editor/extensions/code-highlight";
+import {
+  remoteCursorPlugin,
+  setRemoteCursors,
+  type RemoteCursor,
+} from "~/components/editor/extensions/remote-cursors";
 
 export interface UseEditorOptions {
   initialContent: string;
@@ -42,7 +47,11 @@ export function useEditor({ initialContent, readOnly, onChange }: UseEditorOptio
     const state = EditorState.create({
       doc,
       schema,
-      plugins: buildPlugins([slashPlugin(), codeHighlightPlugin()]),
+      plugins: buildPlugins([
+        slashPlugin(),
+        codeHighlightPlugin(),
+        remoteCursorPlugin(),
+      ]),
     });
     const view = new EditorView(mountRef.current, {
       state,
@@ -50,7 +59,11 @@ export function useEditor({ initialContent, readOnly, onChange }: UseEditorOptio
       dispatchTransaction(tr: Transaction) {
         const newState = view.state.apply(tr);
         view.updateState(newState);
-        if (tr.docChanged && onChange) {
+        // Skip the onChange callback for transactions tagged as
+        // remote — they came in from the WebSocket, so re-emitting
+        // would create an echo loop.
+        const isRemote = tr.getMeta("remote") === true;
+        if (tr.docChanged && onChange && !isRemote) {
           const json = JSON.stringify(newState.doc.toJSON());
           onChange(json, newState.doc.textContent);
         }
@@ -76,7 +89,38 @@ export function useEditor({ initialContent, readOnly, onChange }: UseEditorOptio
     if (viewRef.current) fn(viewRef.current);
   }, []);
 
-  return { mountRef, view: viewRef.current, execute };
+  // applyRemoteSnapshot replaces the entire document with a fresh
+  // ProseMirror JSON payload. Phase 3 uses this as the "good
+  // enough" merge path: when a remote change arrives we accept the
+  // client's complete post-change snapshot and let ProseMirror
+  // adapt the local selection through tr.mapping.
+  const applyRemoteSnapshot = useCallback((json: string) => {
+    const view = viewRef.current;
+    if (!view) return;
+    const doc = parseDoc(json);
+    if (!doc) return;
+    const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, doc.content);
+    // tag the transaction so the local onChange path doesn't echo
+    // it back to the network — we just received it from there.
+    tr.setMeta("remote", true);
+    view.dispatch(tr);
+  }, []);
+
+  // updateRemoteCursors pushes the latest presence cursors into the
+  // remote-cursor plugin's state via a meta-only transaction.
+  const updateRemoteCursors = useCallback((cursors: RemoteCursor[]) => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch(setRemoteCursors(view.state, cursors));
+  }, []);
+
+  return {
+    mountRef,
+    view: viewRef.current,
+    execute,
+    applyRemoteSnapshot,
+    updateRemoteCursors,
+  };
 }
 
 // parseDoc handles both empty and malformed content. ProseMirror

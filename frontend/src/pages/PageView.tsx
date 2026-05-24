@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Eye, Sparkles, FileText, Link2 } from "lucide-react";
 import { Editor } from "~/components/editor/Editor";
+import { PresenceBar } from "~/components/editor/PresenceBar";
 import { Input } from "~/components/ui/Input";
 import { Button } from "~/components/ui/Button";
 import { usePage, useUpdatePage } from "~/hooks/usePage";
 import { pagesApi } from "~/api/pages";
 import type { Space } from "~/api/types";
+import type { PresenceInfo } from "~/hooks/useCollab";
 
 interface PageViewProps {
   space: Space;
@@ -23,6 +25,16 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
   const updateMutation = useUpdatePage(space.id, pageID);
   const [title, setTitle] = useState(page?.title ?? "");
   const [showPanel, setShowPanel] = useState(true);
+  const [presence, setPresence] = useState<PresenceInfo[]>([]);
+  const [selfClientID, setSelfClientID] = useState<string>("");
+
+  const handlePresence = useCallback(
+    (next: PresenceInfo[], clientID: string) => {
+      setPresence(next);
+      setSelfClientID(clientID);
+    },
+    [],
+  );
 
   // Sync title state with the loaded page. We treat the title input
   // as a controlled component — saves flow through the same hook as
@@ -101,10 +113,13 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
             />
           </div>
 
-          {/* breadcrumb */}
-          <nav className="text-[10px] text-muted">
-            {space.name} {page.parent_id ? "› …" : ""}
-          </nav>
+          {/* breadcrumb + live presence */}
+          <div className="flex items-center justify-between">
+            <nav className="text-[10px] text-muted">
+              {space.name} {page.parent_id ? "› …" : ""}
+            </nav>
+            <PresenceBar presence={presence} selfClientID={selfClientID} />
+          </div>
 
           {/* editor */}
           <Editor
@@ -112,6 +127,7 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
             initialContent={page.content}
             readOnly={readOnly}
             onSave={onSaveBody}
+            onPresence={handlePresence}
           />
 
           {/* footer */}
