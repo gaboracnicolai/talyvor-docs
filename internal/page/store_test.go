@@ -287,6 +287,87 @@ func TestSearch_FullTextMatch(t *testing.T) {
 	}
 }
 
+// ─── 10b. SearchWithRank ───────────────────────────────────
+
+func TestSearchWithRank_ReturnsRankedResultsWithHeadline(t *testing.T) {
+	store, pool := newMockStore(t)
+
+	cols := append(pageCols(), "space_name", "rank", "headline")
+	now := time.Now().UTC()
+	row1 := []driverValue{
+		"pg-1", "sp-1", "ws-1", (*string)(nil), "Auth flow", "auth-flow",
+		"{}", "auth flow body", "", "",
+		float64(0), 0, false, "creator", "creator",
+		[]string{}, float64(0),
+		0, (*time.Time)(nil),
+		(*time.Time)(nil), (*string)(nil), 0,
+		now, now,
+		"Engineering", float64(0.93), "Some <mark>auth</mark> flow excerpt",
+	}
+	row2 := []driverValue{
+		"pg-2", "sp-1", "ws-1", (*string)(nil), "OAuth design", "oauth",
+		"{}", "oauth doc", "", "",
+		float64(0), 0, false, "creator", "creator",
+		[]string{}, float64(0),
+		0, (*time.Time)(nil),
+		(*time.Time)(nil), (*string)(nil), 0,
+		now, now,
+		"Engineering", float64(0.42), "<mark>OAuth</mark> design",
+	}
+
+	pool.ExpectQuery(`ts_rank.*setweight.*websearch_to_tsquery`).
+		WithArgs("ws-1", "auth flow", (*string)(nil), 10, 0).
+		WillReturnRows(pgxmock.NewRows(cols).AddRow(row1...).AddRow(row2...))
+
+	out, err := store.SearchWithRank(context.Background(), "ws-1", "auth flow", nil, 10, 0)
+	if err != nil {
+		t.Fatalf("SearchWithRank: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("want 2 results, got %d", len(out))
+	}
+	if out[0].Page.ID != "pg-1" || out[0].Rank < out[1].Rank {
+		t.Fatalf("expected rank-sorted results: %+v", out)
+	}
+	if out[0].SpaceName != "Engineering" {
+		t.Fatalf("space_name not surfaced: %q", out[0].SpaceName)
+	}
+	if !strings.Contains(out[0].Headline, "<mark>") {
+		t.Fatalf("headline missing highlight: %q", out[0].Headline)
+	}
+}
+
+func TestSearchWithRank_AppliesSpaceFilter(t *testing.T) {
+	store, pool := newMockStore(t)
+	sp := "sp-9"
+	cols := append(pageCols(), "space_name", "rank", "headline")
+	now := time.Now().UTC()
+	pool.ExpectQuery(`ts_rank`).
+		WithArgs("ws-1", "deploy", &sp, 5, 0).
+		WillReturnRows(pgxmock.NewRows(cols))
+
+	out, err := store.SearchWithRank(context.Background(), "ws-1", "deploy", &sp, 5, 0)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("expected empty, got %+v", out)
+	}
+	_ = now
+}
+
+func TestSearchWithRank_ClampsLimit(t *testing.T) {
+	store, pool := newMockStore(t)
+	cols := append(pageCols(), "space_name", "rank", "headline")
+	pool.ExpectQuery(`ts_rank`).
+		WithArgs("ws-1", "x", (*string)(nil), 50, 0).
+		WillReturnRows(pgxmock.NewRows(cols))
+
+	if _, err := store.SearchWithRank(context.Background(), "ws-1", "x", nil, 9999, 0); err != nil {
+		t.Fatalf("SearchWithRank: %v", err)
+	}
+}
+
 // ─── content_text extractor (unit) ─────────────────────────
 
 func TestExtractContentText_FromProseMirror(t *testing.T) {

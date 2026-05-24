@@ -28,6 +28,7 @@ import (
 	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/page"
 	"github.com/talyvor/docs/internal/pagelink"
+	"github.com/talyvor/docs/internal/search"
 	"github.com/talyvor/docs/internal/space"
 	"github.com/talyvor/docs/internal/trackintegration"
 )
@@ -54,10 +55,15 @@ func main() {
 
 	spaceStore := space.NewStore(pool)
 	linkStore := pagelink.NewStore(pool)
-	// pageStore reconciles its page_links via the linkStore on
-	// every content save. Best-effort: a sync failure logs but
-	// doesn't fail the save.
-	pageStore := page.NewStore(pool).WithLinker(linkStore)
+	// Phase 6 wires the semantic-search indexer to fire after every
+	// page save. Both linker and indexer are best-effort and run
+	// without blocking the save itself (indexer detaches into a
+	// goroutine inside the store).
+	lensClient := lensintegration.New(cfg.LensURL, cfg.LensAPIKey)
+	semSearch := search.New(lensClient, pool).WithLensCreds(cfg.LensURL, cfg.LensAPIKey)
+	pageStore := page.NewStore(pool).
+		WithLinker(linkStore).
+		WithIndexer(semSearch)
 	blockStore := block.NewStore(pool)
 
 	spaceHandler := space.NewHandler(spaceStore)
@@ -75,9 +81,12 @@ func main() {
 	// Lens integration. Every AI call routes through here; an empty
 	// DOCS_LENS_URL/API key flips IsAvailable() off and the handler
 	// returns 503 with a friendly message instead of erroring.
-	lensClient := lensintegration.New(cfg.LensURL, cfg.LensAPIKey)
 	aiEngine := ai.New(lensClient)
 	aiHandler := ai.NewHandler(aiEngine, pageStore)
+
+	// Unified search handler. Semantic-side falls back to empty when
+	// Lens is unconfigured; full-text always works.
+	searchHandler := search.NewHandler(pageStore, semSearch)
 
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
@@ -118,6 +127,7 @@ func main() {
 		trackHandler.Mount(r)
 		linkHandler.Mount(r)
 		aiHandler.Mount(r)
+		searchHandler.Mount(r)
 	})
 
 	srv := &http.Server{

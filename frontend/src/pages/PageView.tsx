@@ -10,6 +10,7 @@ import { Button } from "~/components/ui/Button";
 import { usePage, useUpdatePage } from "~/hooks/usePage";
 import { pagesApi } from "~/api/pages";
 import { linksApi } from "~/api/links";
+import { pushRecentPage } from "~/hooks/useSearch";
 import type { Space } from "~/api/types";
 import type { PresenceInfo } from "~/hooks/useCollab";
 
@@ -47,11 +48,18 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
     if (page) setTitle(page.title);
   }, [page?.id, page?.title]);
 
-  // Record a view exactly once per page load.
+  // Record a view exactly once per page load, and remember it as
+  // a recent for the SearchModal's empty state.
   useEffect(() => {
     if (!page) return;
     void pagesApi.recordView(space.id, page.id).catch(() => undefined);
-  }, [page?.id, space.id]);
+    pushRecentPage({
+      page_id: page.id,
+      page_title: page.title,
+      space_name: space.name || "",
+      url: `/spaces/${space.id}/pages/${page.id}`,
+    });
+  }, [page?.id, space.id, space.name, page?.title]);
 
   const onSaveBody = useCallback(
     (content: string, contentText: string) => {

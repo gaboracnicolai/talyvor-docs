@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Sidebar } from "./components/layout/Sidebar";
 import { Header } from "./components/layout/Header";
 import { AskAI } from "./components/AskAI";
+import { SearchModal } from "./components/SearchModal";
 import { HomePage } from "./pages/Home";
 import { SpaceViewPage } from "./pages/SpaceView";
 import { PageViewPage } from "./pages/PageView";
@@ -18,12 +19,26 @@ type Route =
 
 export function App() {
   const [route, setRoute] = useState<Route>({ kind: "home" });
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
 
   const goHome = () => setRoute({ kind: "home" });
   const goSpace = (space: Space) => setRoute({ kind: "space", space });
   const goPage = (space: Space, page: Page) =>
     setRoute({ kind: "page", space, pageID: page.id });
+
+  // Cmd/Ctrl+K toggles the global search modal. Bound at the App
+  // level so the shortcut works regardless of focus.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        setSearchOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const breadcrumbs = (() => {
     if (route.kind === "home") return [];
@@ -35,6 +50,9 @@ export function App() {
       { label: "Page" }, // resolved title lives in PageViewPage
     ];
   })();
+
+  const workspaceID =
+    route.kind === "home" ? "default" : route.space.workspace_id || "default";
 
   return (
     <div className="flex h-screen w-full bg-bg text-text">
@@ -48,31 +66,28 @@ export function App() {
         activePageID={route.kind === "page" ? route.pageID : null}
       />
       <div className="flex flex-1 flex-col overflow-hidden">
-        <Header breadcrumbs={breadcrumbs} onSearch={setSearchQuery} />
-        <AskAI
-          workspaceId={
-            route.kind === "home"
-              ? "default"
-              : route.space.workspace_id || "default"
-          }
+        <Header breadcrumbs={breadcrumbs} onOpenSearch={() => setSearchOpen(true)} />
+        <AskAI workspaceId={workspaceID} />
+        <SearchModal
+          workspaceId={workspaceID}
+          open={searchOpen}
+          onClose={() => setSearchOpen(false)}
+          onOpenPage={(r) => {
+            // SearchModal hands back the chosen page; if we know the
+            // space ID we can route fully. Otherwise we use a minimal
+            // Space stub — PageView reads the real record from its
+            // own cache.
+            const stubSpace: Space = {
+              id: r.spaceID ?? "",
+              workspace_id: workspaceID,
+              name: r.spaceName,
+            } as Space;
+            setRoute({ kind: "page", space: stubSpace, pageID: r.pageID });
+          }}
         />
         {route.kind === "home" ? (
           <main className="flex-1 overflow-y-auto">
-            <HomePage
-              searchQuery={searchQuery}
-              onOpenSpace={goSpace}
-              onOpenPageById={(spaceID, pageID) => {
-                // The Home page searches by workspace and only knows
-                // the space ID; we synthesise a minimal Space stub so
-                // the route can render until SpaceView reads the real
-                // record from the cache.
-                setRoute({
-                  kind: "page",
-                  space: { id: spaceID } as Space,
-                  pageID,
-                });
-              }}
-            />
+            <HomePage onOpenSpace={goSpace} />
           </main>
         ) : route.kind === "space" ? (
           <main className="flex-1 overflow-y-auto">

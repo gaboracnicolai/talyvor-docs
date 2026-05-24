@@ -44,9 +44,18 @@ type linkSyncer interface {
 	SyncLinks(ctx context.Context, pageID, workspaceID, content, createdBy string) error
 }
 
+// searchIndexer is the Phase-6 hook that pushes a freshly-saved page
+// through the semantic indexer. Best-effort and asynchronous: the
+// store fires it in a goroutine after a successful content save so
+// a slow Lens never blocks the editor's debounce.
+type searchIndexer interface {
+	IndexPage(ctx context.Context, pageID, workspaceID, text string) error
+}
+
 type Store struct {
-	pool   pgxDB
-	linker linkSyncer
+	pool    pgxDB
+	linker  linkSyncer
+	indexer searchIndexer
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
@@ -63,6 +72,15 @@ func newStore(db pgxDB) *Store { return &Store{pool: db} }
 // it, content saves don't reconcile embed → issue links.
 func (s *Store) WithLinker(l linkSyncer) *Store {
 	s.linker = l
+	return s
+}
+
+// WithIndexer attaches the semantic-search indexer. Optional —
+// without it, content saves don't refresh embeddings. The store
+// detaches indexing into a goroutine so a slow Lens never blocks
+// the save.
+func (s *Store) WithIndexer(i searchIndexer) *Store {
+	s.indexer = i
 	return s
 }
 
@@ -402,6 +420,19 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 			updatedBy, _ := updates["updated_by"].(string)
 			_ = s.linker.SyncLinks(ctx, id, out.WorkspaceID, out.Content, updatedBy)
 		}
+		// Refresh the semantic embedding asynchronously — the call
+		// is slow (Lens round-trip) and we never want to block the
+		// editor's save debounce on it. Templates skip indexing.
+		if s.indexer != nil && !out.IsTemplate {
+			pageID := out.ID
+			workspaceID := out.WorkspaceID
+			text := out.ContentText
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				_ = s.indexer.IndexPage(ctx, pageID, workspaceID, text)
+			}()
+		}
 	}
 	return out, nil
 }
@@ -515,6 +546,118 @@ func (s *Store) GetStalePages(ctx context.Context, workspaceID string) ([]model.
 }
 
 // ─── Search ────────────────────────────────────────────────
+
+// SearchResult is the rich projection returned by SearchWithRank.
+// It carries the Page, the joined space name, the ranking score
+// (Postgres ts_rank), and a ts_headline excerpt with <mark> tags
+// flagging the matched terms. Headlines are server-rendered HTML —
+// the frontend sanitises to allow ONLY <mark> tags.
+type SearchResult struct {
+	Page      model.Page `json:"page"`
+	SpaceName string     `json:"space_name"`
+	Rank      float64    `json:"rank"`
+	Headline  string     `json:"headline"`
+}
+
+// SearchWithRank is the ranked, paginated, space-scoped successor to
+// Search. Templates are excluded server-side so the user never sees
+// boilerplate in search results.
+func (s *Store) SearchWithRank(ctx context.Context, workspaceID, query string, spaceID *string, limit, offset int) ([]SearchResult, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+prefixedColumns("p")+`, sp.name AS space_name,
+            ts_rank(
+                setweight(to_tsvector('english', p.title), 'A') ||
+                setweight(to_tsvector('english', p.content_text), 'B'),
+                websearch_to_tsquery('english', $2)
+            ) AS rank,
+            ts_headline('english', p.content_text,
+                websearch_to_tsquery('english', $2),
+                'MaxWords=35,MinWords=15,StartSel=<mark>,StopSel=</mark>'
+            ) AS headline
+        FROM pages p
+        JOIN spaces sp ON sp.id = p.space_id
+        WHERE p.workspace_id = $1
+          AND (
+              setweight(to_tsvector('english', p.title), 'A') ||
+              setweight(to_tsvector('english', p.content_text), 'B')
+          ) @@ websearch_to_tsquery('english', $2)
+          AND ($3::text IS NULL OR p.space_id = $3)
+          AND p.is_template = false
+        ORDER BY rank DESC
+        LIMIT $4 OFFSET $5`,
+		workspaceID, query, spaceID, limit, offset,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("page: search-rank: %w", err)
+	}
+	defer rows.Close()
+	var out []SearchResult
+	for rows.Next() {
+		var (
+			r        SearchResult
+			rawSpace string
+			rank     float64
+			headline string
+		)
+		// pgx supports scanning into the page struct fields directly,
+		// but we already have a scan() helper that pulls every Page
+		// column. To keep the column list in lock-step with that
+		// helper we hand-list extras here.
+		p, err := scanPlus(rows, &rawSpace, &rank, &headline)
+		if err != nil {
+			return nil, err
+		}
+		r.Page = *p
+		r.SpaceName = rawSpace
+		r.Rank = rank
+		r.Headline = headline
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// scanPlus scans a pages-row plus trailing extras (space_name, rank,
+// headline). Keeping it next to SearchWithRank keeps the column
+// ordering obvious. Future callers that need the same shape should
+// declare new SELECTs through this helper rather than inlining their
+// own scanning.
+func scanPlus(s interface{ Scan(...any) error }, extras ...any) (*model.Page, error) {
+	var p model.Page
+	pageDest := []any{
+		&p.ID, &p.SpaceID, &p.WorkspaceID, &p.ParentID, &p.Title, &p.Slug,
+		&p.Content, &p.ContentText, &p.Icon, &p.CoverURL,
+		&p.Position, &p.Depth, &p.IsTemplate, &p.CreatedBy, &p.UpdatedBy,
+		&p.LinkedIssues, &p.AICostUSD,
+		&p.ViewCount, &p.LastViewedAt,
+		&p.LastVerifiedAt, &p.VerifiedBy, &p.StaleAfterDays,
+		&p.CreatedAt, &p.UpdatedAt,
+	}
+	dest := append(pageDest, extras...)
+	if err := s.Scan(dest...); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func prefixedColumns(alias string) string {
+	parts := strings.Split(columns, ", ")
+	for i, p := range parts {
+		parts[i] = alias + "." + p
+	}
+	return strings.Join(parts, ", ")
+}
 
 // Search runs Postgres full-text search backed by the GIN index on
 // (title || content_text). websearch_to_tsquery lets callers pass
