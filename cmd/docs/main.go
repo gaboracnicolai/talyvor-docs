@@ -30,7 +30,9 @@ import (
 	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/page"
 	"github.com/talyvor/docs/internal/pagelink"
+	"github.com/talyvor/docs/internal/permission"
 	"github.com/talyvor/docs/internal/search"
+	"github.com/talyvor/docs/internal/sharing"
 	"github.com/talyvor/docs/internal/space"
 	"github.com/talyvor/docs/internal/trackintegration"
 )
@@ -103,6 +105,25 @@ func main() {
 	analyticsStore := analytics.NewStore(pool)
 	analyticsHandler := analytics.NewHandler(analyticsStore)
 
+	// Permissions + public sharing.
+	permStore := permission.NewStore(pool)
+	permHandler := permission.NewHandler(permStore)
+	shareStore := sharing.NewStore(pool)
+	shareHandler := sharing.NewHandler(shareStore, func(ctx context.Context, pageID string) (*sharing.PublicPage, error) {
+		p, err := pageStore.GetByID(ctx, pageID)
+		if err != nil || p == nil {
+			return nil, err
+		}
+		return &sharing.PublicPage{
+			ID:          p.ID,
+			Title:       p.Title,
+			Icon:        p.Icon,
+			Content:     p.Content,
+			ContentText: p.ContentText,
+			UpdatedAt:   p.UpdatedAt.Format(time.RFC3339),
+		}, nil
+	})
+
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
 	// frames through the engine's per-client send channels.
@@ -145,6 +166,9 @@ func main() {
 		searchHandler.Mount(r)
 		freshHandler.Mount(r)
 		analyticsHandler.Mount(r)
+		permHandler.Mount(r)
+		shareHandler.Mount(r)
+		shareHandler.MountPublic(r)
 	})
 
 	srv := &http.Server{

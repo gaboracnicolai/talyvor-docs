@@ -10,6 +10,7 @@ import {
   FileText,
   BarChart3,
   AlertTriangle,
+  Lock,
 } from "lucide-react";
 import clsx from "clsx";
 import { useSpaces, useCreateSpace } from "~/hooks/useSpaces";
@@ -171,6 +172,7 @@ function SpaceRow({
         <button onClick={onOpenSpace} className="flex flex-1 items-center gap-1 truncate text-left">
           <span>{space.icon}</span>
           <span className="truncate">{space.name}</span>
+          {space.private ? <Lock size={10} className="text-muted" /> : null}
         </button>
       </div>
       {open ? (

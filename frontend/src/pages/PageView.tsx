@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CheckCircle2, Eye, Sparkles, FileText, X, Plus } from "lucide-react";
+import { CheckCircle2, Eye, Sparkles, FileText, X, Plus, Link2 } from "lucide-react";
 import { Editor } from "~/components/editor/Editor";
 import { PresenceBar } from "~/components/editor/PresenceBar";
 import { IssueSearchDialog } from "~/components/editor/IssueSearchDialog";
 import { IssueEmbed } from "~/components/editor/blocks/IssueEmbed";
 import { FreshnessBadge } from "~/components/FreshnessBadge";
 import { FreshnessPanel } from "~/components/FreshnessPanel";
+import { SharePanel } from "~/components/SharePanel";
 import { Input } from "~/components/ui/Input";
 import { Button } from "~/components/ui/Button";
 import { usePage, useUpdatePage } from "~/hooks/usePage";
@@ -104,6 +105,7 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
     staleTime: 60_000,
   });
   const [freshnessOpen, setFreshnessOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
 
   const onSaveBody = useCallback(
     (content: string, contentText: string) => {
@@ -180,6 +182,13 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
                 daysSinceEdit={freshness.data?.days_since_edit}
                 onClick={() => setFreshnessOpen((v) => !v)}
               />
+              <button
+                onClick={() => setShareOpen(true)}
+                className="inline-flex items-center gap-1 rounded border border-border bg-bg px-1.5 py-0.5 text-[10px] text-muted hover:border-accent hover:text-text"
+                title="Share this page"
+              >
+                <Link2 size={10} /> Share
+              </button>
               <PresenceBar presence={presence} selfClientID={selfClientID} />
             </div>
             {freshnessOpen ? (
@@ -192,6 +201,14 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
               />
             ) : null}
           </div>
+          <SharePanel
+            spaceID={space.id}
+            pageID={page.id}
+            workspaceID={page.workspace_id}
+            spacePrivate={(space as { private?: boolean }).private}
+            open={shareOpen}
+            onClose={() => setShareOpen(false)}
+          />
 
           {/* editor */}
           <Editor

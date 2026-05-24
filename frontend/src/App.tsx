@@ -8,6 +8,7 @@ import { SpaceViewPage } from "./pages/SpaceView";
 import { PageViewPage } from "./pages/PageView";
 import { AnalyticsPage } from "./pages/Analytics";
 import { StalePagesPage } from "./pages/StalePages";
+import { SharedPage } from "./pages/SharedPage";
 import type { Page, Space } from "./api/types";
 
 // Routes are modelled as a discriminated union held in App state.
@@ -22,6 +23,15 @@ type Route =
   | { kind: "stale" };
 
 export function App() {
+  // /s/:token is handled before any other routing — the public
+  // viewer renders without the sidebar / header chrome.
+  const sharedMatch = typeof window !== "undefined"
+    ? window.location.pathname.match(/^\/s\/([A-Za-z0-9]+)$/)
+    : null;
+  if (sharedMatch) {
+    return <SharedPage token={sharedMatch[1]} />;
+  }
+
   const [route, setRoute] = useState<Route>({ kind: "home" });
   const [searchOpen, setSearchOpen] = useState(false);
 

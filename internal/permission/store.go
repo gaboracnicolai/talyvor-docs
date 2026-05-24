@@ -1,0 +1,277 @@
+// Package permission is Docs's access-control surface. The Store
+// owns the permissions table; the resolveAccess evaluator is the
+// pure rule engine used by Check() and exposed for unit testing.
+//
+// Roles in a workspace are intentionally NOT modelled here — Docs
+// treats workspace_id as an opaque tenant key (see migrations/0001).
+// Two practical consequences:
+//
+//  1. "Workspace owner" can't be derived; we honour the contract by
+//     treating the resource's creator as admin.
+//  2. Team membership lookups would require an upstream service.
+//     The team subject type is supported in the data model but the
+//     evaluator only matches by exact subject ID — host services
+//     wishing to expand a member-to-teams set must hydrate the team
+//     IDs before calling Check.
+package permission
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+type ResourceType string
+
+const (
+	ResourceSpace ResourceType = "space"
+	ResourcePage  ResourceType = "page"
+)
+
+type AccessLevel string
+
+const (
+	AccessNone    AccessLevel = "none"
+	AccessView    AccessLevel = "view"
+	AccessComment AccessLevel = "comment"
+	AccessEdit    AccessLevel = "edit"
+	AccessAdmin   AccessLevel = "admin"
+)
+
+// validAccessForGrant enumerates the levels callers may persist.
+// AccessNone is not a grant — revoking is done via Revoke().
+var validAccessForGrant = map[AccessLevel]bool{
+	AccessView: true, AccessComment: true, AccessEdit: true, AccessAdmin: true,
+}
+
+type Permission struct {
+	ID           string       `json:"id"`
+	ResourceType ResourceType `json:"resource_type"`
+	ResourceID   string       `json:"resource_id"`
+	SubjectType  string       `json:"subject_type"`
+	SubjectID    string       `json:"subject_id"`
+	Access       AccessLevel  `json:"access"`
+	WorkspaceID  string       `json:"workspace_id"`
+	GrantedBy    string       `json:"granted_by"`
+	CreatedAt    time.Time    `json:"created_at"`
+}
+
+type pgxDB interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+type Store struct{ pool pgxDB }
+
+func NewStore(pool *pgxpool.Pool) *Store {
+	var db pgxDB
+	if pool != nil {
+		db = pool
+	}
+	return newStore(db)
+}
+
+func newStore(db pgxDB) *Store { return &Store{pool: db} }
+
+const cols = `id, resource_type, resource_id, subject_type, subject_id, access, workspace_id, granted_by, created_at`
+
+func scan(s interface{ Scan(...any) error }) (*Permission, error) {
+	var p Permission
+	if err := s.Scan(
+		&p.ID, &p.ResourceType, &p.ResourceID, &p.SubjectType, &p.SubjectID,
+		&p.Access, &p.WorkspaceID, &p.GrantedBy, &p.CreatedAt,
+	); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// Grant inserts or updates a permission. UNIQUE on (resource,
+// subject) collapses duplicates so re-granting becomes an access
+// upgrade rather than a duplicate row.
+func (s *Store) Grant(ctx context.Context, p Permission) error {
+	if s.pool == nil {
+		return errors.New("permission: no pool")
+	}
+	if !validAccessForGrant[p.Access] {
+		return fmt.Errorf("permission: invalid access %q", p.Access)
+	}
+	if p.SubjectType == "" || p.SubjectID == "" {
+		return errors.New("permission: subject required")
+	}
+	_, err := s.pool.Exec(ctx,
+		`INSERT INTO permissions (resource_type, resource_id, subject_type, subject_id, access, workspace_id, granted_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (resource_type, resource_id, subject_type, subject_id)
+        DO UPDATE SET access = EXCLUDED.access, granted_by = EXCLUDED.granted_by`,
+		string(p.ResourceType), p.ResourceID, p.SubjectType, p.SubjectID, string(p.Access), p.WorkspaceID, p.GrantedBy,
+	)
+	if err != nil {
+		return fmt.Errorf("permission: grant: %w", err)
+	}
+	return nil
+}
+
+// Revoke removes the (resource, subject) permission. A revoke of a
+// non-existent grant is a no-op.
+func (s *Store) Revoke(ctx context.Context, resourceType ResourceType, resourceID, subjectType, subjectID string) error {
+	if s.pool == nil {
+		return errors.New("permission: no pool")
+	}
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM permissions
+        WHERE resource_type = $1 AND resource_id = $2
+          AND subject_type = $3 AND subject_id = $4`,
+		string(resourceType), resourceID, subjectType, subjectID,
+	)
+	return err
+}
+
+// RevokeByID removes a single grant by its primary key. Used by the
+// REST handler that exposes permission IDs.
+func (s *Store) RevokeByID(ctx context.Context, id string) error {
+	if s.pool == nil {
+		return errors.New("permission: no pool")
+	}
+	_, err := s.pool.Exec(ctx, `DELETE FROM permissions WHERE id = $1`, id)
+	return err
+}
+
+// ListForResource returns every grant attached to the given resource.
+// The result is sorted by created_at so the UI shows the original
+// owner first.
+func (s *Store) ListForResource(ctx context.Context, resourceType ResourceType, resourceID string) ([]Permission, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+cols+` FROM permissions WHERE resource_type = $1 AND resource_id = $2
+        ORDER BY created_at ASC`,
+		string(resourceType), resourceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("permission: list: %w", err)
+	}
+	defer rows.Close()
+	var out []Permission
+	for rows.Next() {
+		p, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+// ─── Resource context + rule engine ─────────────────────
+
+// resourceContext carries the per-resource metadata the rule
+// evaluator needs. The store's Check() hydrates this from pages /
+// spaces; the evaluator below is pure so it can be unit-tested
+// without DB fixtures.
+type resourceContext struct {
+	Type    ResourceType
+	ID      string
+	SpaceID string
+	// CreatedBy is the resource's author. Phase 8 honours the spec's
+	// "owner always admin" contract via this — Docs has no
+	// workspace-roles table.
+	CreatedBy string
+	// Private flips the default-deny / default-view behaviour.
+	// Public spaces give workspace members at least view; private
+	// require an explicit grant.
+	Private bool
+	// SpacePerms is the inherited-from-space permission list when
+	// Type == ResourcePage. Always nil for ResourceSpace.
+	SpacePerms []Permission
+}
+
+// rank turns an AccessLevel into a comparable integer. Anywhere the
+// resolver picks between candidates it keeps the higher rank.
+func rank(a AccessLevel) int {
+	switch a {
+	case AccessAdmin:
+		return 4
+	case AccessEdit:
+		return 3
+	case AccessComment:
+		return 2
+	case AccessView:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// resolveAccess is the pure rule engine. Order of precedence:
+//
+//  1. If memberID == res.CreatedBy → admin.
+//  2. Highest matching grant in (page-level + space-level) perms.
+//  3. If still none and !res.Private → view default for members.
+//  4. Otherwise none.
+//
+// "Highest" means the AccessLevel with the largest rank() value;
+// explicit member grants and "everyone" grants both contribute.
+func resolveAccess(res resourceContext, memberID string, perms []Permission) AccessLevel {
+	if memberID != "" && memberID == res.CreatedBy {
+		return AccessAdmin
+	}
+	best := AccessNone
+	consider := func(p Permission) {
+		// "member" must match exactly; "everyone" always matches.
+		// "team" matches by exact subject_id — the host is expected
+		// to expand a member's team membership before calling Check.
+		switch p.SubjectType {
+		case "member":
+			if p.SubjectID != memberID {
+				return
+			}
+		case "everyone":
+			// match
+		case "team":
+			// Phase 8 store cannot resolve team membership directly.
+			// Treat as not-applicable to a per-member Check.
+			return
+		default:
+			return
+		}
+		if rank(p.Access) > rank(best) {
+			best = p.Access
+		}
+	}
+	for _, p := range perms {
+		consider(p)
+	}
+	for _, p := range res.SpacePerms {
+		consider(p)
+	}
+	if best != AccessNone {
+		return best
+	}
+	// No explicit grant. Public space → workspace members get view;
+	// private → none.
+	if !res.Private {
+		return AccessView
+	}
+	return AccessNone
+}
+
+// Check resolves the effective access for memberID against the
+// resource. Callers prepare a resourceContext (typically from a
+// space / page lookup) and pass it alongside the resource's own
+// grants. Storing the lookup outside this package means handlers
+// can wire any storage layer.
+func (s *Store) Check(ctx context.Context, memberID string, res resourceContext) (AccessLevel, error) {
+	perms, err := s.ListForResource(ctx, res.Type, res.ID)
+	if err != nil {
+		return AccessNone, err
+	}
+	return resolveAccess(res, memberID, perms), nil
+}
