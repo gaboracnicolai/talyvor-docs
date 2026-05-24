@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Sidebar } from "./components/layout/Sidebar";
 import { Header } from "./components/layout/Header";
+import { AskAI } from "./components/AskAI";
 import { HomePage } from "./pages/Home";
 import { SpaceViewPage } from "./pages/SpaceView";
 import { PageViewPage } from "./pages/PageView";
@@ -48,6 +49,13 @@ export function App() {
       />
       <div className="flex flex-1 flex-col overflow-hidden">
         <Header breadcrumbs={breadcrumbs} onSearch={setSearchQuery} />
+        <AskAI
+          workspaceId={
+            route.kind === "home"
+              ? "default"
+              : route.space.workspace_id || "default"
+          }
+        />
         {route.kind === "home" ? (
           <main className="flex-1 overflow-y-auto">
             <HomePage

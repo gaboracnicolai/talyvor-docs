@@ -128,6 +128,7 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
           {/* editor */}
           <Editor
             pageId={page.id}
+            workspaceId={page.workspace_id}
             initialContent={page.content}
             readOnly={readOnly}
             onSave={onSaveBody}
@@ -197,10 +198,12 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
 
           <LinkedIssuesSection pageID={page.id} workspaceID={page.workspace_id} />
           {page.ai_cost_usd > 0 ? (
-            <PanelSection title="Spec cost">
+            <PanelSection title="AI cost">
               <div className="flex items-center gap-1 text-accent">
-                <Sparkles size={10} />
-                ${page.ai_cost_usd.toFixed(2)} from linked Track issues
+                <Sparkles size={10} />✨ AI writing cost: ${page.ai_cost_usd.toFixed(2)}
+              </div>
+              <div className="mt-0.5 text-muted">
+                Includes Lens writing + Track implementation spend.
               </div>
             </PanelSection>
           ) : null}

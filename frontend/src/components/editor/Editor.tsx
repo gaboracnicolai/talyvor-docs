@@ -7,9 +7,11 @@ import { IssueSearchDialog } from "./IssueSearchDialog";
 import { schema } from "./schema";
 import type { RemoteCursor } from "./extensions/remote-cursors";
 import type { TrackIssue } from "~/api/track";
+import { callAI, type AIAction } from "./extensions/ai-assist";
 
 interface EditorProps {
   pageId: string;
+  workspaceId: string;
   initialContent: string;
   readOnly?: boolean;
   // onSave fires after the 2-second debounce. Receives the
@@ -42,6 +44,7 @@ function getClientID(): string {
 
 export function Editor({
   pageId,
+  workspaceId,
   initialContent,
   readOnly,
   onSave,
@@ -188,6 +191,81 @@ export function Editor({
     [view],
   );
 
+  // AI loading state + toast surface. We show a small "✨ Generating…"
+  // chip near the selection while the call is in flight; on error we
+  // surface a friendly toast (no raw API messages).
+  const [aiLoading, setAILoading] = useState(false);
+  const [aiToast, setAIToast] = useState<string | null>(null);
+  useEffect(() => {
+    if (!aiToast) return;
+    const id = setTimeout(() => setAIToast(null), 4000);
+    return () => clearTimeout(id);
+  }, [aiToast]);
+
+  // Slash-menu AI commands all dispatch "docs:ai-command" with an
+  // action ID. We capture the current selection text, ask the user
+  // for any missing inputs (write prompt, target language), call the
+  // engine, then replace the selection with the result.
+  useEffect(() => {
+    if (!view) return;
+    const onCmd = async (ev: Event) => {
+      const detail = (ev as CustomEvent<{ id: AIAction }>).detail;
+      if (!detail) return;
+      const action = detail.id;
+      const state = view.state;
+      const { from, to } = state.selection;
+      const selectionText = from === to ? "" : state.doc.textBetween(from, to, "\n");
+      // For ai-write the slash trigger doesn't carry a selection, so
+      // we prompt for the user's instruction. For ai-translate we
+      // prompt for the target language. UX polish for both lands in
+      // Phase 6 as inline dialogs; window.prompt is the Phase-5
+      // shipping shim.
+      let prompt: string | undefined;
+      let language: string | undefined;
+      if (action === "ai-write") {
+        prompt = window.prompt("What should I write?") ?? "";
+        if (!prompt.trim()) return;
+      }
+      if (action === "ai-translate") {
+        language = window.prompt("Translate to (language)?", "Spanish") ?? "";
+        if (!language.trim()) return;
+      }
+      const context = state.doc.textBetween(
+        Math.max(0, from - 500),
+        Math.min(state.doc.content.size, to + 500),
+        "\n",
+      );
+      setAILoading(true);
+      try {
+        const { text } = await callAI({
+          action,
+          text: selectionText,
+          context,
+          workspaceId,
+          pageId,
+          prompt,
+          language,
+        });
+        const tr = view.state.tr;
+        // Replace the current selection (if any) with the result;
+        // for ai-write (empty selection) we insert at the cursor.
+        if (from === to) {
+          tr.insertText(text, from);
+        } else {
+          tr.replaceWith(from, to, view.state.schema.text(text));
+        }
+        view.dispatch(tr);
+        view.focus();
+      } catch {
+        setAIToast("AI unavailable. Is Lens configured?");
+      } finally {
+        setAILoading(false);
+      }
+    };
+    window.addEventListener("docs:ai-command", onCmd as EventListener);
+    return () => window.removeEventListener("docs:ai-command", onCmd as EventListener);
+  }, [view, workspaceId, pageId]);
+
   return (
     <div className="relative" data-page-id={pageId}>
       <SaveBadge state={saveState} connected={collab.connected} />
@@ -202,6 +280,16 @@ export function Editor({
         onPick={insertEmbed}
         onClose={() => setEmbedOpen(false)}
       />
+      {aiLoading ? (
+        <div className="pointer-events-none absolute right-0 top-4 rounded bg-surface px-2 py-0.5 text-[10px] text-muted shadow-sm">
+          ✨ Generating…
+        </div>
+      ) : null}
+      {aiToast ? (
+        <div className="pointer-events-none fixed bottom-6 left-1/2 -translate-x-1/2 rounded bg-callout-warning px-3 py-1.5 text-xs text-text shadow-lg">
+          {aiToast}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -19,10 +19,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/talyvor/docs/internal/ai"
 	"github.com/talyvor/docs/internal/block"
 	"github.com/talyvor/docs/internal/collab"
 	"github.com/talyvor/docs/internal/config"
 	"github.com/talyvor/docs/internal/db"
+	"github.com/talyvor/docs/internal/lensintegration"
 	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/page"
 	"github.com/talyvor/docs/internal/pagelink"
@@ -70,6 +72,13 @@ func main() {
 	trackSyncer := trackintegration.NewSyncer(trackClient, pageStore, linkStore, cfg.DefaultWorkspaceID)
 	go trackSyncer.Start(ctx, 15*time.Minute)
 
+	// Lens integration. Every AI call routes through here; an empty
+	// DOCS_LENS_URL/API key flips IsAvailable() off and the handler
+	// returns 503 with a friendly message instead of erroring.
+	lensClient := lensintegration.New(cfg.LensURL, cfg.LensAPIKey)
+	aiEngine := ai.New(lensClient)
+	aiHandler := ai.NewHandler(aiEngine, pageStore)
+
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
 	// frames through the engine's per-client send channels.
@@ -108,6 +117,7 @@ func main() {
 		blockHandler.Mount(r)
 		trackHandler.Mount(r)
 		linkHandler.Mount(r)
+		aiHandler.Mount(r)
 	})
 
 	srv := &http.Server{

@@ -23,6 +23,7 @@ type Config struct {
 	TrackURL    string
 	TrackAPIKey string
 	LensURL     string
+	LensAPIKey  string
 
 	// DefaultWorkspaceID is the tenant the cost syncer operates
 	// against. Phase 4 supports a single workspace per Docs
@@ -38,6 +39,7 @@ func Load() (*Config, error) {
 		TrackURL:           os.Getenv("DOCS_TRACK_URL"),
 		TrackAPIKey:        os.Getenv("DOCS_TRACK_API_KEY"),
 		LensURL:            os.Getenv("DOCS_LENS_URL"),
+		LensAPIKey:         os.Getenv("DOCS_LENS_API_KEY"),
 		DefaultWorkspaceID: getEnv("DOCS_DEFAULT_WORKSPACE", "default"),
 	}
 	if cfg.DatabaseURL == "" {
