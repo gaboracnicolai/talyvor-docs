@@ -1,15 +1,19 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Eye, Sparkles, FileText, X, Plus } from "lucide-react";
 import { Editor } from "~/components/editor/Editor";
 import { PresenceBar } from "~/components/editor/PresenceBar";
 import { IssueSearchDialog } from "~/components/editor/IssueSearchDialog";
 import { IssueEmbed } from "~/components/editor/blocks/IssueEmbed";
+import { FreshnessBadge } from "~/components/FreshnessBadge";
+import { FreshnessPanel } from "~/components/FreshnessPanel";
 import { Input } from "~/components/ui/Input";
 import { Button } from "~/components/ui/Button";
 import { usePage, useUpdatePage } from "~/hooks/usePage";
 import { pagesApi } from "~/api/pages";
 import { linksApi } from "~/api/links";
+import { freshnessApi } from "~/api/freshness";
+import { analyticsApi } from "~/api/analytics";
 import { pushRecentPage } from "~/hooks/useSearch";
 import type { Space } from "~/api/types";
 import type { PresenceInfo } from "~/hooks/useCollab";
@@ -60,6 +64,46 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
       url: `/spaces/${space.id}/pages/${page.id}`,
     });
   }, [page?.id, space.id, space.name, page?.title]);
+
+  // Phase-7 view-duration tracker. We start a wall-clock on mount
+  // (and on every page navigation) and POST the elapsed seconds on
+  // unmount + beforeunload. The server drops views under 3s so
+  // accidental clicks don't pollute analytics. Self-views (the
+  // page author) are still recorded — the server handles the
+  // "never read" exclusion separately.
+  const viewStart = useRef<number>(Date.now());
+  useEffect(() => {
+    if (!page) return;
+    viewStart.current = Date.now();
+    const flush = () => {
+      const seconds = Math.round((Date.now() - viewStart.current) / 1000);
+      if (seconds < 3) return;
+      const viewerID = localStorage.getItem("docs_member_id") || "anonymous";
+      const viewerName = localStorage.getItem("docs_member_name") || "";
+      void analyticsApi
+        .recordView(space.id, page.id, {
+          viewer_id: viewerID,
+          viewer_name: viewerName,
+          duration_sec: seconds,
+          workspace_id: page.workspace_id,
+        })
+        .catch(() => undefined);
+    };
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      flush();
+      window.removeEventListener("beforeunload", flush);
+    };
+  }, [page?.id, page?.workspace_id, space.id]);
+
+  // Freshness query + popover open state.
+  const freshness = useQuery({
+    queryKey: ["freshness", page?.id],
+    queryFn: () => freshnessApi.forPage(space.id, page!.id),
+    enabled: !!page,
+    staleTime: 60_000,
+  });
+  const [freshnessOpen, setFreshnessOpen] = useState(false);
 
   const onSaveBody = useCallback(
     (content: string, contentText: string) => {
@@ -125,12 +169,28 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
             />
           </div>
 
-          {/* breadcrumb + live presence */}
-          <div className="flex items-center justify-between">
+          {/* breadcrumb + freshness + live presence */}
+          <div className="relative flex items-center justify-between">
             <nav className="text-[10px] text-muted">
               {space.name} {page.parent_id ? "› …" : ""}
             </nav>
-            <PresenceBar presence={presence} selfClientID={selfClientID} />
+            <div className="flex items-center gap-2">
+              <FreshnessBadge
+                status={freshness.data?.status ?? "unknown"}
+                daysSinceEdit={freshness.data?.days_since_edit}
+                onClick={() => setFreshnessOpen((v) => !v)}
+              />
+              <PresenceBar presence={presence} selfClientID={selfClientID} />
+            </div>
+            {freshnessOpen ? (
+              <FreshnessPanel
+                spaceID={space.id}
+                pageID={page.id}
+                report={freshness.data ?? null}
+                isLoading={freshness.isLoading}
+                onClose={() => setFreshnessOpen(false)}
+              />
+            ) : null}
           </div>
 
           {/* editor */}

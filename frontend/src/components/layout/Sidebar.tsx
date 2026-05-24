@@ -1,8 +1,20 @@
 import { useState } from "react";
-import { Home, FolderOpen, Search, Plus, ChevronRight, ChevronDown, FileText } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import {
+  Home,
+  FolderOpen,
+  Search,
+  Plus,
+  ChevronRight,
+  ChevronDown,
+  FileText,
+  BarChart3,
+  AlertTriangle,
+} from "lucide-react";
 import clsx from "clsx";
 import { useSpaces, useCreateSpace } from "~/hooks/useSpaces";
 import { usePages } from "~/hooks/usePage";
+import { freshnessApi } from "~/api/freshness";
 import type { Page, Space } from "~/api/types";
 import { Input } from "~/components/ui/Input";
 
@@ -12,6 +24,9 @@ interface SidebarProps {
   onHome: () => void;
   onOpenSpace: (space: Space) => void;
   onOpenPage: (space: Space, page: Page) => void;
+  onOpenAnalytics: () => void;
+  onOpenStale: () => void;
+  workspaceID: string;
   activeSpaceID: string | null;
   activePageID: string | null;
 }
@@ -20,12 +35,25 @@ export function Sidebar({
   onHome,
   onOpenSpace,
   onOpenPage,
+  onOpenAnalytics,
+  onOpenStale,
+  workspaceID,
   activeSpaceID,
   activePageID,
 }: SidebarProps) {
   const spaces = useSpaces();
   const create = useCreateSpace();
   const [newSpaceName, setNewSpaceName] = useState("");
+
+  // Surface the stale-doc badge count next to the "Needs Review" row.
+  // Cheap query — the response is small and we cache for 5 minutes.
+  const stale = useQuery({
+    queryKey: ["workspace-freshness", workspaceID],
+    queryFn: () => freshnessApi.forWorkspace(workspaceID),
+    staleTime: 5 * 60_000,
+  });
+  const needsReview =
+    stale.data?.filter((r) => r.status === "stale" || r.status === "warning").length ?? 0;
 
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col border-r border-border bg-surface">
@@ -39,10 +67,29 @@ export function Sidebar({
       <nav className="flex-1 overflow-y-auto p-2">
         <button
           onClick={onHome}
-          className="mb-2 flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:bg-bg hover:text-text"
+          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:bg-bg hover:text-text"
         >
           <Home size={14} />
           Home
+        </button>
+        <button
+          onClick={onOpenAnalytics}
+          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:bg-bg hover:text-text"
+        >
+          <BarChart3 size={14} />
+          Analytics
+        </button>
+        <button
+          onClick={onOpenStale}
+          className="mb-2 flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:bg-bg hover:text-text"
+        >
+          <AlertTriangle size={14} />
+          <span className="flex-1 text-left">Needs review</span>
+          {needsReview > 0 ? (
+            <span className="rounded bg-callout-warning/30 px-1.5 py-px text-[10px] text-callout-warning">
+              {needsReview}
+            </span>
+          ) : null}
         </button>
 
         <div className="mb-1 flex items-center justify-between px-2 text-[10px] font-semibold uppercase tracking-wider text-muted">

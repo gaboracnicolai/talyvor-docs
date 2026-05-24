@@ -6,6 +6,8 @@ import { SearchModal } from "./components/SearchModal";
 import { HomePage } from "./pages/Home";
 import { SpaceViewPage } from "./pages/SpaceView";
 import { PageViewPage } from "./pages/PageView";
+import { AnalyticsPage } from "./pages/Analytics";
+import { StalePagesPage } from "./pages/StalePages";
 import type { Page, Space } from "./api/types";
 
 // Routes are modelled as a discriminated union held in App state.
@@ -15,7 +17,9 @@ import type { Page, Space } from "./api/types";
 type Route =
   | { kind: "home" }
   | { kind: "space"; space: Space }
-  | { kind: "page"; space: Space; pageID: string };
+  | { kind: "page"; space: Space; pageID: string }
+  | { kind: "analytics" }
+  | { kind: "stale" };
 
 export function App() {
   const [route, setRoute] = useState<Route>({ kind: "home" });
@@ -25,6 +29,8 @@ export function App() {
   const goSpace = (space: Space) => setRoute({ kind: "space", space });
   const goPage = (space: Space, page: Page) =>
     setRoute({ kind: "page", space, pageID: page.id });
+  const goAnalytics = () => setRoute({ kind: "analytics" });
+  const goStale = () => setRoute({ kind: "stale" });
 
   // Cmd/Ctrl+K toggles the global search modal. Bound at the App
   // level so the shortcut works regardless of focus.
@@ -42,6 +48,8 @@ export function App() {
 
   const breadcrumbs = (() => {
     if (route.kind === "home") return [];
+    if (route.kind === "analytics") return [{ label: "Analytics" }];
+    if (route.kind === "stale") return [{ label: "Needs review" }];
     if (route.kind === "space") {
       return [{ label: route.space.name, onClick: () => goSpace(route.space) }];
     }
@@ -52,7 +60,9 @@ export function App() {
   })();
 
   const workspaceID =
-    route.kind === "home" ? "default" : route.space.workspace_id || "default";
+    route.kind === "page" || route.kind === "space"
+      ? route.space.workspace_id || "default"
+      : "default";
 
   return (
     <div className="flex h-screen w-full bg-bg text-text">
@@ -60,6 +70,9 @@ export function App() {
         onHome={goHome}
         onOpenSpace={goSpace}
         onOpenPage={goPage}
+        onOpenAnalytics={goAnalytics}
+        onOpenStale={goStale}
+        workspaceID={workspaceID}
         activeSpaceID={
           route.kind === "space" || route.kind === "page" ? route.space.id : null
         }
@@ -92,6 +105,23 @@ export function App() {
         ) : route.kind === "space" ? (
           <main className="flex-1 overflow-y-auto">
             <SpaceViewPage space={route.space} onOpenPage={(p) => goPage(route.space, p)} />
+          </main>
+        ) : route.kind === "analytics" ? (
+          <main className="flex-1 overflow-y-auto">
+            <AnalyticsPage workspaceID={workspaceID} />
+          </main>
+        ) : route.kind === "stale" ? (
+          <main className="flex-1 overflow-y-auto">
+            <StalePagesPage
+              workspaceID={workspaceID}
+              onOpenPage={(spaceID, pageID) =>
+                setRoute({
+                  kind: "page",
+                  space: { id: spaceID, workspace_id: workspaceID, name: "" } as Space,
+                  pageID,
+                })
+              }
+            />
           </main>
         ) : (
           <PageViewPage space={route.space} pageID={route.pageID} />

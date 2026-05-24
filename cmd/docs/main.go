@@ -20,10 +20,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/talyvor/docs/internal/ai"
+	"github.com/talyvor/docs/internal/analytics"
 	"github.com/talyvor/docs/internal/block"
 	"github.com/talyvor/docs/internal/collab"
 	"github.com/talyvor/docs/internal/config"
 	"github.com/talyvor/docs/internal/db"
+	"github.com/talyvor/docs/internal/freshness"
 	"github.com/talyvor/docs/internal/lensintegration"
 	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/page"
@@ -88,6 +90,19 @@ func main() {
 	// Lens is unconfigured; full-text always works.
 	searchHandler := search.NewHandler(pageStore, semSearch)
 
+	// Freshness engine + 9am-UTC stale-doc digest. Engine reads
+	// pages + linked-issue closure to surface "this spec needs a
+	// look" badges. The daily digest is currently log-only; future
+	// phases will ship Slack / email.
+	freshEngine := freshness.New(pageStore, linkStore, trackClient)
+	freshHandler := freshness.NewHandler(freshEngine)
+	freshEngine.Start(ctx, cfg.DefaultWorkspaceID)
+
+	// Analytics store + handler. View recording is best-effort —
+	// failures are logged on the client side rather than retried.
+	analyticsStore := analytics.NewStore(pool)
+	analyticsHandler := analytics.NewHandler(analyticsStore)
+
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
 	// frames through the engine's per-client send channels.
@@ -128,6 +143,8 @@ func main() {
 		linkHandler.Mount(r)
 		aiHandler.Mount(r)
 		searchHandler.Mount(r)
+		freshHandler.Mount(r)
+		analyticsHandler.Mount(r)
 	})
 
 	srv := &http.Server{
