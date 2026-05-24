@@ -36,7 +36,18 @@ type pgxDB interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-type Store struct{ pool pgxDB }
+// linkSyncer is the Track-integration hook the page store fires on
+// every content-changing Update. Wired by main.go via WithLinker.
+// Best-effort: a sync failure must never fail the save itself, so
+// the call site swallows errors and logs.
+type linkSyncer interface {
+	SyncLinks(ctx context.Context, pageID, workspaceID, content, createdBy string) error
+}
+
+type Store struct {
+	pool   pgxDB
+	linker linkSyncer
+}
 
 func NewStore(pool *pgxpool.Pool) *Store {
 	var db pgxDB
@@ -47,6 +58,13 @@ func NewStore(pool *pgxpool.Pool) *Store {
 }
 
 func newStore(db pgxDB) *Store { return &Store{pool: db} }
+
+// WithLinker attaches the page-link sync hook. Optional — without
+// it, content saves don't reconcile embed → issue links.
+func (s *Store) WithLinker(l linkSyncer) *Store {
+	s.linker = l
+	return s
+}
 
 // PageFilter drives the List query. Empty / zero fields fall back to
 // permissive defaults so callers can list "everything in the space"
@@ -377,6 +395,13 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
                             WHERE page_id = $1) - $2`,
 			id, MaxVersionsPerPage,
 		)
+		// Reconcile page_links → Track issue embeds. Best-effort:
+		// a sync failure shouldn't fail the page save. The next
+		// content edit will reconcile again.
+		if s.linker != nil {
+			updatedBy, _ := updates["updated_by"].(string)
+			_ = s.linker.SyncLinks(ctx, id, out.WorkspaceID, out.Content, updatedBy)
+		}
 	}
 	return out, nil
 }
@@ -576,4 +601,47 @@ func (s *Store) RestoreVersion(ctx context.Context, pageID string, version int) 
 		"content":    content,
 		"updated_by": "restore",
 	})
+}
+
+// ─── Track integration helpers ────────────────────────────
+
+// WorkspacePageIDs returns every page ID in a workspace. Used by
+// the AI-cost syncer to enumerate pages in one pass instead of
+// paging through List(). Excludes templates so the sync loop
+// doesn't churn on un-released specs.
+func (s *Store) WorkspacePageIDs(ctx context.Context, workspaceID string) ([]string, error) {
+	if s.pool == nil {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT id FROM pages WHERE workspace_id = $1 AND is_template = false`,
+		workspaceID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("page: workspace ids: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// UpdateAICost is the syncer's narrow write — bypasses the Update
+// allowlist (which doesn't include ai_cost_usd) so a noisy embed
+// can't drive a full page-version snapshot per sync tick.
+func (s *Store) UpdateAICost(ctx context.Context, pageID string, costUSD float64) error {
+	if s.pool == nil {
+		return errors.New("page: store has no pool")
+	}
+	_, err := s.pool.Exec(ctx,
+		`UPDATE pages SET ai_cost_usd = $1 WHERE id = $2`,
+		costUSD, pageID,
+	)
+	return err
 }

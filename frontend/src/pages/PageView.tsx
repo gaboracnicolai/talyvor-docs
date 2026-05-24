@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Eye, Sparkles, FileText, Link2 } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CheckCircle2, Eye, Sparkles, FileText, X, Plus } from "lucide-react";
 import { Editor } from "~/components/editor/Editor";
 import { PresenceBar } from "~/components/editor/PresenceBar";
+import { IssueSearchDialog } from "~/components/editor/IssueSearchDialog";
+import { IssueEmbed } from "~/components/editor/blocks/IssueEmbed";
 import { Input } from "~/components/ui/Input";
 import { Button } from "~/components/ui/Button";
 import { usePage, useUpdatePage } from "~/hooks/usePage";
 import { pagesApi } from "~/api/pages";
+import { linksApi } from "~/api/links";
 import type { Space } from "~/api/types";
 import type { PresenceInfo } from "~/hooks/useCollab";
 
@@ -191,23 +195,15 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
             </Button>
           </PanelSection>
 
-          <PanelSection title="Linked issues">
-            {(page.linked_issues ?? []).length === 0 ? (
-              <span className="text-muted">None yet — embed an issue from the slash menu.</span>
-            ) : (
-              <div className="flex flex-wrap gap-1">
-                {page.linked_issues!.map((id) => (
-                  <span
-                    key={id}
-                    className="inline-flex items-center gap-1 rounded border border-border bg-bg px-1.5 py-0.5 font-mono text-[10px]"
-                  >
-                    <Link2 size={10} />
-                    {id.slice(0, 8)}
-                  </span>
-                ))}
+          <LinkedIssuesSection pageID={page.id} workspaceID={page.workspace_id} />
+          {page.ai_cost_usd > 0 ? (
+            <PanelSection title="Spec cost">
+              <div className="flex items-center gap-1 text-accent">
+                <Sparkles size={10} />
+                ${page.ai_cost_usd.toFixed(2)} from linked Track issues
               </div>
-            )}
-          </PanelSection>
+            </PanelSection>
+          ) : null}
 
           <button
             onClick={() => setShowPanel(false)}
@@ -244,4 +240,76 @@ function PanelSection({ title, children }: { title: string; children: React.Reac
 // re-renders when the user is just typing inside a paragraph.
 function jsonEq(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+// LinkedIssuesSection lists the Track issues attached to this page
+// — both embedded inline (via the slash command) and manually
+// linked from the panel "Link issue" affordance.
+function LinkedIssuesSection({
+  pageID,
+  workspaceID,
+}: {
+  pageID: string;
+  workspaceID: string;
+}) {
+  const qc = useQueryClient();
+  const links = useQuery({
+    queryKey: ["page-links", pageID],
+    queryFn: () => linksApi.list(pageID),
+  });
+  const create = useMutation({
+    mutationFn: (issueID: string) =>
+      linksApi.create(pageID, {
+        issue_id: issueID,
+        workspace_id: workspaceID,
+        link_type: "mention",
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["page-links", pageID] }),
+  });
+  const remove = useMutation({
+    mutationFn: (issueID: string) => linksApi.remove(pageID, issueID),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["page-links", pageID] }),
+  });
+  const [picker, setPicker] = useState(false);
+
+  return (
+    <PanelSection title="Linked issues">
+      {links.isLoading ? (
+        <span className="text-muted">Loading…</span>
+      ) : (links.data ?? []).length === 0 ? (
+        <span className="text-muted">
+          None yet — embed an issue from the slash menu or click + below.
+        </span>
+      ) : (
+        <div className="flex flex-wrap gap-1">
+          {links.data!.map((l) => (
+            <span key={l.id} className="inline-flex items-center gap-0.5">
+              <IssueEmbed issueID={l.issue_id} />
+              <button
+                onClick={() => remove.mutate(l.issue_id)}
+                className="text-muted hover:text-callout-error"
+                title="Remove link"
+              >
+                <X size={10} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <button
+        onClick={() => setPicker(true)}
+        className="mt-2 flex w-full items-center justify-center gap-1 rounded border border-dashed border-border py-1 text-[10px] text-muted hover:border-accent hover:text-text"
+      >
+        <Plus size={10} /> Link issue
+      </button>
+      <IssueSearchDialog
+        open={picker}
+        onPick={(issue) => {
+          create.mutate(issue.id);
+          setPicker(false);
+        }}
+        onClose={() => setPicker(false)}
+      />
+    </PanelSection>
+  );
 }

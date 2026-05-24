@@ -25,7 +25,9 @@ import (
 	"github.com/talyvor/docs/internal/db"
 	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/page"
+	"github.com/talyvor/docs/internal/pagelink"
 	"github.com/talyvor/docs/internal/space"
+	"github.com/talyvor/docs/internal/trackintegration"
 )
 
 func main() {
@@ -49,12 +51,24 @@ func main() {
 	defer pool.Close()
 
 	spaceStore := space.NewStore(pool)
-	pageStore := page.NewStore(pool)
+	linkStore := pagelink.NewStore(pool)
+	// pageStore reconciles its page_links via the linkStore on
+	// every content save. Best-effort: a sync failure logs but
+	// doesn't fail the save.
+	pageStore := page.NewStore(pool).WithLinker(linkStore)
 	blockStore := block.NewStore(pool)
 
 	spaceHandler := space.NewHandler(spaceStore)
 	pageHandler := page.NewHandler(pageStore, pool)
 	blockHandler := block.NewHandler(blockStore)
+
+	// Track integration. Empty trackURL / API key gracefully
+	// no-op every endpoint and skip the cost syncer.
+	trackClient := trackintegration.New(cfg.TrackURL, cfg.TrackAPIKey)
+	trackHandler := trackintegration.NewHandler(trackClient)
+	linkHandler := pagelink.NewHandler(linkStore)
+	trackSyncer := trackintegration.NewSyncer(trackClient, pageStore, linkStore, cfg.DefaultWorkspaceID)
+	go trackSyncer.Start(ctx, 15*time.Minute)
 
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
@@ -92,6 +106,8 @@ func main() {
 		spaceHandler.Mount(r)
 		pageHandler.Mount(r)
 		blockHandler.Mount(r)
+		trackHandler.Mount(r)
+		linkHandler.Mount(r)
 	})
 
 	srv := &http.Server{

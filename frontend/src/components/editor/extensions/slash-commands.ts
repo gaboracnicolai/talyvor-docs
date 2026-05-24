@@ -181,15 +181,19 @@ export const slashCommands: SlashCommand[] = [
     label: "🔗 Embed issue",
     keywords: ["issue", "track", "link"],
     apply: (view, from, to) => {
-      const id = window.prompt("Issue identifier or ID:");
-      if (!id) return;
-      const node = schema.nodes.issue_embed.create({
-        issue_id: id,
-        identifier: id,
-        title: "",
-      });
-      const tr = view.state.tr.delete(from, to).replaceSelectionWith(node);
-      view.dispatch(tr);
+      // Phase 4: open the modal IssueSearchDialog rather than
+      // window.prompt. The dialog lives in Editor.tsx; we emit a
+      // custom event with the slash-command range so the dialog can
+      // insert the chosen issue_embed at the right spot. The
+      // trigger characters are deleted up-front so the editor
+      // doesn't keep "/embed issue" in the doc if the user closes
+      // the picker without selecting anything.
+      view.dispatch(view.state.tr.delete(from, to));
+      window.dispatchEvent(
+        new CustomEvent("docs:embed-issue", {
+          detail: { from, to: from },
+        }),
+      );
       view.focus();
     },
   },

@@ -3,7 +3,10 @@ import { useEditor } from "~/hooks/useEditor";
 import { useCollab, type Change, type PresenceInfo } from "~/hooks/useCollab";
 import { FloatingToolbar } from "./toolbar/FloatingToolbar";
 import { BlockMenu } from "./toolbar/BlockMenu";
+import { IssueSearchDialog } from "./IssueSearchDialog";
+import { schema } from "./schema";
 import type { RemoteCursor } from "./extensions/remote-cursors";
+import type { TrackIssue } from "~/api/track";
 
 interface EditorProps {
   pageId: string;
@@ -160,6 +163,31 @@ export function Editor({
     return () => clearInterval(id);
   }, [view, collab]);
 
+  // Issue-embed picker. The slash command emits a
+  // "docs:embed-issue" event with the trigger range; we open the
+  // dialog and insert an issue_embed node when the user selects.
+  const [embedOpen, setEmbedOpen] = useState(false);
+  useEffect(() => {
+    const onOpen = () => setEmbedOpen(true);
+    window.addEventListener("docs:embed-issue", onOpen as EventListener);
+    return () => window.removeEventListener("docs:embed-issue", onOpen as EventListener);
+  }, []);
+
+  const insertEmbed = useCallback(
+    (issue: TrackIssue) => {
+      if (!view) return;
+      const node = schema.nodes.issue_embed.create({
+        issue_id: issue.id,
+        identifier: issue.identifier,
+        title: issue.title,
+      });
+      view.dispatch(view.state.tr.replaceSelectionWith(node));
+      setEmbedOpen(false);
+      view.focus();
+    },
+    [view],
+  );
+
   return (
     <div className="relative" data-page-id={pageId}>
       <SaveBadge state={saveState} connected={collab.connected} />
@@ -169,6 +197,11 @@ export function Editor({
       />
       <FloatingToolbar view={view} />
       <BlockMenu view={view} />
+      <IssueSearchDialog
+        open={embedOpen}
+        onPick={insertEmbed}
+        onClose={() => setEmbedOpen(false)}
+      />
     </div>
   );
 }
