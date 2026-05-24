@@ -27,6 +27,7 @@ import (
 	"github.com/talyvor/docs/internal/db"
 	"github.com/talyvor/docs/internal/freshness"
 	"github.com/talyvor/docs/internal/lensintegration"
+	"github.com/talyvor/docs/internal/mcp"
 	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/page"
 	"github.com/talyvor/docs/internal/pagelink"
@@ -105,6 +106,12 @@ func main() {
 	analyticsStore := analytics.NewStore(pool)
 	analyticsHandler := analytics.NewHandler(analyticsStore)
 
+	// MCP server. Agents (Claude Code, Cursor, etc.) connect to the
+	// public /mcp endpoints and call the 10 documented tools. The
+	// server keeps zero state of its own — it composes the existing
+	// stores via narrow interfaces.
+	mcpServer := mcp.New(pageStore, spaceStore, analyticsStore, aiEngine, freshEngine, "0.1.0")
+
 	// Permissions + public sharing.
 	permStore := permission.NewStore(pool)
 	permHandler := permission.NewHandler(permStore)
@@ -155,6 +162,12 @@ func main() {
 	// Timeout above does NOT apply because chi disables it for
 	// hijacked connections.
 	r.Get("/v1/collab/{pageID}/ws", collabHandler.ServeWS)
+
+	// MCP server is a public surface (no auth) — agent clients
+	// connect over JSON-RPC and SSE. Live on the top-level router
+	// so the /v1 group's middleware doesn't intercept it.
+	r.Post("/mcp", mcpServer.HandleRPC)
+	r.Get("/mcp/sse", mcpServer.HandleSSE)
 
 	r.Route("/v1", func(r chi.Router) {
 		spaceHandler.Mount(r)
