@@ -11,6 +11,9 @@ import { SharePanel } from "~/components/SharePanel";
 import { ExportMenu } from "~/components/ExportMenu";
 import { DocStatusBadge } from "~/components/DocStatusBadge";
 import { ApprovalPanel } from "~/components/ApprovalPanel";
+import { LockBadge } from "~/components/LockBadge";
+import { LockBanner } from "~/components/LockBanner";
+import { usePageLock } from "~/hooks/usePageLock";
 import { Input } from "~/components/ui/Input";
 import { Button } from "~/components/ui/Button";
 import { usePage, useUpdatePage } from "~/hooks/usePage";
@@ -111,6 +114,13 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
   const [freshnessOpen, setFreshnessOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
 
+  // Page locks. Returns the live state + lock/unlock mutations so
+  // the header badge, banner, and editor read-only flag all stay
+  // in sync without separate queries.
+  const lockHook = usePageLock(space.id, pageID);
+  const lockedByOther =
+    !!lockHook.state?.locked && !lockHook.lockedByMe;
+
   const onSaveBody = useCallback(
     (content: string, contentText: string) => {
       updateMutation.mutate({ content, content_text: contentText });
@@ -195,6 +205,13 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
               </button>
               <ExportMenu spaceID={space.id} pageID={page.id} />
               <DocStatusBadge status={page.doc_status ?? "draft"} />
+              <LockBadge
+                state={lockHook.state}
+                lockedByMe={lockHook.lockedByMe}
+                onLock={() => lockHook.lock.mutate()}
+                onUnlock={() => lockHook.unlock.mutate({})}
+                busy={lockHook.lock.isPending || lockHook.unlock.isPending}
+              />
               <PresenceBar presence={presence} selfClientID={selfClientID} />
             </div>
             {freshnessOpen ? (
@@ -227,12 +244,18 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
             </div>
           ) : null}
 
+          <LockBanner
+            state={lockHook.state}
+            lockedByMe={lockHook.lockedByMe}
+            onUnlock={() => lockHook.unlock.mutate({})}
+          />
+
           {/* editor */}
           <Editor
             pageId={page.id}
             workspaceId={page.workspace_id}
             initialContent={page.content}
-            readOnly={readOnly || page.doc_status === "approved"}
+            readOnly={readOnly || page.doc_status === "approved" || lockedByOther}
             onSave={onSaveBody}
             onPresence={handlePresence}
           />

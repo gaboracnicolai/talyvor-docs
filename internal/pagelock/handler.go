@@ -1,0 +1,94 @@
+package pagelock
+
+import (
+	"encoding/json"
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+)
+
+type Handler struct{ store *Store }
+
+func NewHandler(store *Store) *Handler { return &Handler{store: store} }
+
+func (h *Handler) Mount(r chi.Router) {
+	r.Post("/spaces/{spaceID}/pages/{pageID}/lock", h.Lock)
+	r.Delete("/spaces/{spaceID}/pages/{pageID}/lock", h.Unlock)
+	r.Get("/spaces/{spaceID}/pages/{pageID}/lock", h.Get)
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func writeErr(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+type lockBody struct {
+	MemberID string `json:"member_id"`
+}
+
+type unlockBody struct {
+	MemberID string `json:"member_id"`
+	IsAdmin  bool   `json:"is_admin"`
+}
+
+func memberFromReq(r *http.Request, fallback string) string {
+	if v := r.Header.Get("X-Member-Id"); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func (h *Handler) Lock(w http.ResponseWriter, r *http.Request) {
+	pageID := chi.URLParam(r, "pageID")
+	var in lockBody
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		// Body is optional — fall back to the header.
+		in = lockBody{}
+	}
+	memberID := memberFromReq(r, in.MemberID)
+	if memberID == "" {
+		writeErr(w, http.StatusBadRequest, "member_id or X-Member-Id required")
+		return
+	}
+	state, err := h.store.Lock(r.Context(), pageID, memberID)
+	if err != nil {
+		// Lock conflicts map to 423 (Locked) so the frontend can
+		// surface a specific "already locked" affordance vs a
+		// generic failure.
+		writeErr(w, http.StatusLocked, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, state)
+}
+
+func (h *Handler) Unlock(w http.ResponseWriter, r *http.Request) {
+	pageID := chi.URLParam(r, "pageID")
+	var in unlockBody
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		in = unlockBody{}
+	}
+	memberID := memberFromReq(r, in.MemberID)
+	if memberID == "" {
+		writeErr(w, http.StatusBadRequest, "member_id or X-Member-Id required")
+		return
+	}
+	if err := h.store.Unlock(r.Context(), pageID, memberID, in.IsAdmin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
+	state, err := h.store.GetLockState(r.Context(), chi.URLParam(r, "pageID"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, state)
+}

@@ -230,6 +230,9 @@ function SpaceRow({
               >
                 <FileText size={10} />
                 <span className="truncate">{p.icon ? `${p.icon} ${p.title}` : p.title}</span>
+                {p.locked ? (
+                  <Lock size={10} className="ml-auto shrink-0 text-muted" />
+                ) : null}
               </button>
             ))
           )}

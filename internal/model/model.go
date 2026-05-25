@@ -70,6 +70,12 @@ type Page struct {
 	// — approval is the single writer.
 	DocStatus string `json:"doc_status,omitempty" db:"doc_status"`
 
+	// Soft locks. Owned by internal/pagelock — page.Store reads the
+	// columns but won't mutate them outside the lock path.
+	Locked   bool       `json:"locked"                db:"locked"`
+	LockedBy *string    `json:"locked_by,omitempty"   db:"locked_by"`
+	LockedAt *time.Time `json:"locked_at,omitempty"   db:"locked_at"`
+
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }

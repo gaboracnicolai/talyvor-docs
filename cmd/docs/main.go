@@ -35,6 +35,7 @@ import (
 	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/page"
 	"github.com/talyvor/docs/internal/pagelink"
+	"github.com/talyvor/docs/internal/pagelock"
 	"github.com/talyvor/docs/internal/permission"
 	"github.com/talyvor/docs/internal/search"
 	"github.com/talyvor/docs/internal/sharing"
@@ -115,6 +116,15 @@ func main() {
 	approvalStore := approval.NewStore(pool)
 	approvalHandler := approval.NewHandler(approvalStore)
 
+	// Page locks — soft locks that survive restarts. The CanEdit
+	// rule composes locks + approval state, so the lock store reads
+	// pages.doc_status too. Wired into page.Store as the edit guard
+	// so REST writes honour the lock; the collab handler picks it
+	// up further down (after its own NewHandler call).
+	lockStore := pagelock.NewStore(pool)
+	lockHandler := pagelock.NewHandler(lockStore)
+	pageStore = pageStore.WithGuard(lockStore)
+
 	// Export (markdown / HTML / PDF / DOCX) — buffered through a
 	// 50MB-capped writer in the handler.
 	exporter := export.New(pageStore, spaceStore)
@@ -166,7 +176,7 @@ func main() {
 	// the handler layer below upgrades the HTTP request and shuttles
 	// frames through the engine's per-client send channels.
 	otEngine := collab.NewOTEngine()
-	collabHandler := collab.NewHandler(otEngine)
+	collabHandler := collab.NewHandler(otEngine).WithGuard(lockStore)
 	saver := collab.NewAutoSaver(otEngine,
 		func(ctx context.Context, pageID, content string) error {
 			_, err := pageStore.Update(ctx, pageID, map[string]any{"content": content})
@@ -218,6 +228,7 @@ func main() {
 		tmplHandler.Mount(r)
 		exportHandler.Mount(r)
 		approvalHandler.Mount(r)
+		lockHandler.Mount(r)
 	})
 
 	srv := &http.Server{

@@ -40,6 +40,9 @@ export interface Page {
   verified_by?: string;
   stale_after_days: number;
   doc_status?: "draft" | "in_review" | "approved" | "rejected" | "archived";
+  locked: boolean;
+  locked_by?: string;
+  locked_at?: string;
   created_at: string;
   updated_at: string;
 }

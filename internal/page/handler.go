@@ -128,8 +128,21 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_JSON", err.Error())
 		return
 	}
+	// Propagate the caller's member identity for the lock guard.
+	if _, set := updates["updated_by"]; !set {
+		if v := r.Header.Get("X-Member-Id"); v != "" {
+			updates["updated_by"] = v
+		}
+	}
 	out, err := h.store.Update(r.Context(), chi.URLParam(r, "pageID"), updates)
 	if err != nil {
+		// 423 Locked is the precise signal for lock conflicts so the
+		// frontend can render a specific banner; everything else is
+		// a generic 400 because it's caller-supplied bad input.
+		if errors.Is(err, ErrLocked) {
+			writeErr(w, http.StatusLocked, "LOCKED", err.Error())
+			return
+		}
 		writeErr(w, http.StatusBadRequest, "UPDATE_FAILED", err.Error())
 		return
 	}

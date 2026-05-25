@@ -33,9 +33,28 @@ const (
 	writeWait = 10 * time.Second
 )
 
-type Handler struct{ engine *OTEngine }
+// LockGuard is the narrow lock-check the collab handler delegates
+// to before persisting any inbound change. internal/pagelock
+// satisfies this; tests can stub it.
+type LockGuard interface {
+	CanEdit(ctx context.Context, pageID, memberID string, isAdmin bool) (bool, string, error)
+}
+
+type Handler struct {
+	engine *OTEngine
+	guard  LockGuard
+}
 
 func NewHandler(engine *OTEngine) *Handler { return &Handler{engine: engine} }
+
+// WithGuard attaches the lock-aware guard. When set, the WebSocket
+// loop drops "change" frames from clients that can't edit (a
+// foreign lock or approved doc_status). Cursor + presence frames
+// still flow so viewers can see what's happening.
+func (h *Handler) WithGuard(g LockGuard) *Handler {
+	h.guard = g
+	return h
+}
 
 // ServeWS upgrades the connection and runs the read+write pumps for
 // one client. Each pump owns one goroutine; the engine sees an
@@ -123,7 +142,7 @@ func (h *Handler) readPump(ctx context.Context, conn *websocket.Conn, pageID str
 // dispatch routes one inbound JSON frame into the engine. Returns
 // false to signal the read pump to tear down (e.g. an unrecoverable
 // protocol error); true to continue.
-func (h *Handler) dispatch(_ context.Context, pageID string, c *CollabClient, raw []byte) bool {
+func (h *Handler) dispatch(ctx context.Context, pageID string, c *CollabClient, raw []byte) bool {
 	var env struct {
 		Type   string          `json:"type"`
 		Change *Change         `json:"change,omitempty"`
@@ -137,6 +156,21 @@ func (h *Handler) dispatch(_ context.Context, pageID string, c *CollabClient, ra
 	case "change":
 		if env.Change == nil {
 			return true
+		}
+		// Lock guard. A foreign lock or approved doc_status blocks
+		// the change at the WebSocket boundary so the engine never
+		// even sees it. We don't disconnect the client — they may
+		// still want to read + watch presence.
+		if h.guard != nil {
+			ok, reason, gErr := h.guard.CanEdit(ctx, pageID, c.MemberID, false)
+			if gErr == nil && !ok {
+				rejected, _ := json.Marshal(map[string]any{
+					"type":   "change_rejected",
+					"reason": reason,
+				})
+				trySend(c.send, rejected)
+				return true
+			}
 		}
 		env.Change.ClientID = c.ID
 		env.Change.PageID = pageID

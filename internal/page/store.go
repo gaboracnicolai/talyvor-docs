@@ -52,10 +52,19 @@ type searchIndexer interface {
 	IndexPage(ctx context.Context, pageID, workspaceID, text string) error
 }
 
+// editGuard checks whether a member is allowed to mutate the page.
+// internal/pagelock satisfies this — we accept a narrow interface
+// rather than importing the package so the dep graph stays
+// one-directional (pagelock reads pages, not the reverse).
+type editGuard interface {
+	CanEdit(ctx context.Context, pageID, memberID string, isAdmin bool) (bool, string, error)
+}
+
 type Store struct {
 	pool    pgxDB
 	linker  linkSyncer
 	indexer searchIndexer
+	guard   editGuard
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
@@ -83,6 +92,18 @@ func (s *Store) WithIndexer(i searchIndexer) *Store {
 	s.indexer = i
 	return s
 }
+
+// WithGuard attaches the lock-aware edit gate. When set, Update
+// consults CanEdit before persisting. Optional — useful in tests
+// + early Phase-1 deployments without locks.
+func (s *Store) WithGuard(g editGuard) *Store {
+	s.guard = g
+	return s
+}
+
+// ErrLocked is the sentinel Update returns when the lock guard
+// rejects an edit. Handlers map this to HTTP 423.
+var ErrLocked = errors.New("page: locked")
 
 // PageFilter drives the List query. Empty / zero fields fall back to
 // permissive defaults so callers can list "everything in the space"
@@ -168,6 +189,7 @@ const columns = `id, space_id, workspace_id, parent_id, title, slug,
     view_count, last_viewed_at,
     last_verified_at, verified_by, stale_after_days,
     doc_status,
+    locked, locked_by, locked_at,
     created_at, updated_at`
 
 func scan(s interface{ Scan(...any) error }) (*model.Page, error) {
@@ -180,6 +202,7 @@ func scan(s interface{ Scan(...any) error }) (*model.Page, error) {
 		&p.ViewCount, &p.LastViewedAt,
 		&p.LastVerifiedAt, &p.VerifiedBy, &p.StaleAfterDays,
 		&p.DocStatus,
+		&p.Locked, &p.LockedBy, &p.LockedAt,
 		&p.CreatedAt, &p.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -331,6 +354,23 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	if s.pool == nil {
 		return nil, errors.New("page: store has no pool")
 	}
+	// Lock + approval gate. updates["updated_by"] is the canonical
+	// editor identity propagated from the handler; admin-bypass is
+	// communicated via updates["is_admin"] (handler-injected, never
+	// trusted from request bodies).
+	if s.guard != nil {
+		memberID, _ := updates["updated_by"].(string)
+		isAdmin, _ := updates["is_admin"].(bool)
+		ok, reason, err := s.guard.CanEdit(ctx, id, memberID, isAdmin)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("%w: %s", ErrLocked, reason)
+		}
+	}
+	// is_admin is a gate-only flag — never persist it.
+	delete(updates, "is_admin")
 	contentChanged := false
 	if v, ok := updates["content"]; ok {
 		if str, isStr := v.(string); isStr {
@@ -645,6 +685,7 @@ func scanPlus(s interface{ Scan(...any) error }, extras ...any) (*model.Page, er
 		&p.ViewCount, &p.LastViewedAt,
 		&p.LastVerifiedAt, &p.VerifiedBy, &p.StaleAfterDays,
 		&p.DocStatus,
+		&p.Locked, &p.LockedBy, &p.LockedAt,
 		&p.CreatedAt, &p.UpdatedAt,
 	}
 	dest := append(pageDest, extras...)
