@@ -225,6 +225,35 @@ const nodes: { [name: string]: NodeSpec } = {
       node.attrs.identifier || node.attrs.issue_id,
     ],
   },
+
+  // database_block is a block-level placeholder that defers all
+  // rendering to a React node view. The PM node carries only the
+  // database_id; the node view fetches schema + rows + views on its
+  // own and renders the table / kanban / list / gallery surface.
+  database_block: {
+    group: "block",
+    atom: true,
+    selectable: true,
+    attrs: {
+      database_id: { default: "" },
+    },
+    parseDOM: [
+      {
+        tag: "div.database-block",
+        getAttrs: (n) => {
+          const el = n as HTMLElement;
+          return { database_id: el.getAttribute("data-database") ?? "" };
+        },
+      },
+    ],
+    toDOM: (node) => [
+      "div",
+      {
+        class: "database-block",
+        "data-database": node.attrs.database_id,
+      },
+    ],
+  },
 };
 
 const marks: { [name: string]: MarkSpec } = {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EditorState, Transaction } from "prosemirror-state";
-import { EditorView } from "prosemirror-view";
+import { EditorView, NodeView } from "prosemirror-view";
 import { Node as PMNode } from "prosemirror-model";
 import { schema } from "~/components/editor/schema";
 import { buildPlugins } from "~/components/editor/extensions";
@@ -16,6 +16,9 @@ export interface UseEditorOptions {
   initialContent: string;
   readOnly?: boolean;
   onChange?: (jsonString: string, plainText: string) => void;
+  // nodeViews lets callers register custom React renderers for
+  // specific PM node types. The database_block uses this.
+  nodeViews?: Record<string, (node: PMNode, view: EditorView, getPos: () => number | undefined) => NodeView>;
 }
 
 // useEditor owns the ProseMirror EditorView. We deliberately do NOT
@@ -23,7 +26,7 @@ export interface UseEditorOptions {
 // stateful DOM-mounted engine; remounting it would lose selection,
 // undo history, and IME state. Instead the view is created once and
 // kept in a ref; the React component just hosts the mount element.
-export function useEditor({ initialContent, readOnly, onChange }: UseEditorOptions) {
+export function useEditor({ initialContent, readOnly, onChange, nodeViews }: UseEditorOptions) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
   const [, force] = useState(0);
@@ -56,6 +59,7 @@ export function useEditor({ initialContent, readOnly, onChange }: UseEditorOptio
     const view = new EditorView(mountRef.current, {
       state,
       editable: () => !readOnly,
+      nodeViews: nodeViews ?? {},
       dispatchTransaction(tr: Transaction) {
         const newState = view.state.apply(tr);
         view.updateState(newState);
@@ -81,7 +85,7 @@ export function useEditor({ initialContent, readOnly, onChange }: UseEditorOptio
     };
     // initialContent is intentionally part of the deps: a different
     // page mounting through this hook reinitialises the view.
-  }, [initialContent, readOnly, onChange]);
+  }, [initialContent, readOnly, onChange, nodeViews]);
 
   // execute lets callers (slash menu, toolbar) run a command against
   // the current view without having to thread the ref through props.

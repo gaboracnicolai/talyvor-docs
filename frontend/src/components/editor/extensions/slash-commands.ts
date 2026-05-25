@@ -174,6 +174,21 @@ export const slashCommands: SlashCommand[] = [
   ...aiCommand("ai-longer", "✨ Make longer", "Expand the current passage"),
   ...aiCommand("ai-translate", "✨ Translate...", "Translate selected text"),
 
+  // Inline database — emits a custom event the Editor catches to
+  // create the database server-side, then insert a database_block
+  // PM node with the returned ID.
+  {
+    id: "database",
+    group: "Content",
+    label: "🗄️ Database",
+    keywords: ["table", "kanban", "list", "gallery"],
+    apply: (view, from, to) => {
+      view.dispatch(view.state.tr.delete(from, to));
+      window.dispatchEvent(new CustomEvent("docs:create-database"));
+      view.focus();
+    },
+  },
+
   // Track integration ---------------------------------------------
   {
     id: "embed-issue",

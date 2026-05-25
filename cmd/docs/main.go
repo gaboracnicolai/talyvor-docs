@@ -24,6 +24,7 @@ import (
 	"github.com/talyvor/docs/internal/block"
 	"github.com/talyvor/docs/internal/collab"
 	"github.com/talyvor/docs/internal/config"
+	"github.com/talyvor/docs/internal/database"
 	"github.com/talyvor/docs/internal/db"
 	"github.com/talyvor/docs/internal/freshness"
 	"github.com/talyvor/docs/internal/importer"
@@ -107,6 +108,11 @@ func main() {
 	analyticsStore := analytics.NewStore(pool)
 	analyticsHandler := analytics.NewHandler(analyticsStore)
 
+	// Inline-database blocks. Independent store; rows + views live
+	// in dedicated tables (see migrations/0007). Mounted under /v1.
+	dbStore := database.NewStore(pool)
+	dbHandler := database.NewHandler(dbStore)
+
 	// Importer (Notion markdown / Confluence HTML) — multipart
 	// upload surface so users can migrate off legacy wikis.
 	importerSvc := importer.New(pageStore, spaceStore)
@@ -189,6 +195,7 @@ func main() {
 		shareHandler.Mount(r)
 		shareHandler.MountPublic(r)
 		importerHandler.Mount(r)
+		dbHandler.Mount(r)
 	})
 
 	srv := &http.Server{

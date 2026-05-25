@@ -1,4 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { QueryClientProvider, useQueryClient } from "@tanstack/react-query";
+import type { NodeView } from "prosemirror-view";
 import { useEditor } from "~/hooks/useEditor";
 import { useCollab, type Change, type PresenceInfo } from "~/hooks/useCollab";
 import { FloatingToolbar } from "./toolbar/FloatingToolbar";
@@ -8,6 +11,8 @@ import { schema } from "./schema";
 import type { RemoteCursor } from "./extensions/remote-cursors";
 import type { TrackIssue } from "~/api/track";
 import { callAI, type AIAction } from "./extensions/ai-assist";
+import { databaseApi } from "~/api/database";
+import { DatabaseBlock } from "~/components/database/DatabaseBlock";
 
 interface EditorProps {
   pageId: string;
@@ -96,10 +101,49 @@ export function Editor({
     };
   }, [onSave]);
 
+  // database_block node view — renders the React DatabaseBlock
+  // inside the ProseMirror tree. We grab the TanStack QueryClient at
+  // call time so the embedded React tree shares the host's cache.
+  const queryClient = useQueryClient();
+  const nodeViews = useMemo(
+    () => ({
+      database_block: (node: import("prosemirror-model").Node): NodeView => {
+        const dom = document.createElement("div");
+        dom.className = "database-block-host";
+        const root: Root = createRoot(dom);
+        const render = (databaseID: string) => {
+          root.render(
+            <QueryClientProvider client={queryClient}>
+              <DatabaseBlock databaseID={databaseID} />
+            </QueryClientProvider>,
+          );
+        };
+        render(node.attrs.database_id);
+        return {
+          dom,
+          update(updated) {
+            if (updated.type.name !== "database_block") return false;
+            render(updated.attrs.database_id);
+            return true;
+          },
+          destroy() {
+            // Defer to next tick so React unmount doesn't race with
+            // ProseMirror's own removal of the DOM node.
+            setTimeout(() => root.unmount(), 0);
+          },
+          stopEvent: () => true,
+          ignoreMutation: () => true,
+        };
+      },
+    }),
+    [queryClient],
+  );
+
   const { mountRef, view, applyRemoteSnapshot, updateRemoteCursors } = useEditor({
     initialContent,
     readOnly,
     onChange: handleChange,
+    nodeViews,
   });
 
   // useCollab needs onRemoteChange in its dep list, but Editor.tsx
@@ -165,6 +209,27 @@ export function Editor({
     const id = setInterval(tick, 250);
     return () => clearInterval(id);
   }, [view, collab]);
+
+  // Database creation. The slash command emits "docs:create-database";
+  // we POST to /pages/:pageID/databases to mint a Database row,
+  // then insert a database_block PM node carrying the returned ID.
+  useEffect(() => {
+    if (!view) return;
+    const onCreate = async () => {
+      try {
+        const db = await databaseApi.create(pageId, { name: "Untitled Database" });
+        const node = schema.nodes.database_block.create({ database_id: db.id });
+        view.dispatch(view.state.tr.replaceSelectionWith(node));
+        view.focus();
+      } catch {
+        // Silently ignore — the slash trigger range has already been
+        // deleted, so the user just sees nothing happen. A toast
+        // would be nice; Phase 2 polish.
+      }
+    };
+    window.addEventListener("docs:create-database", onCreate);
+    return () => window.removeEventListener("docs:create-database", onCreate);
+  }, [view, pageId]);
 
   // Issue-embed picker. The slash command emits a
   // "docs:embed-issue" event with the trigger range; we open the
