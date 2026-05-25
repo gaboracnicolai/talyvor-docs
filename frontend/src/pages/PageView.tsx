@@ -8,6 +8,7 @@ import { IssueEmbed } from "~/components/editor/blocks/IssueEmbed";
 import { FreshnessBadge } from "~/components/FreshnessBadge";
 import { FreshnessPanel } from "~/components/FreshnessPanel";
 import { SharePanel } from "~/components/SharePanel";
+import { ExportMenu } from "~/components/ExportMenu";
 import { Input } from "~/components/ui/Input";
 import { Button } from "~/components/ui/Button";
 import { usePage, useUpdatePage } from "~/hooks/usePage";
@@ -190,6 +191,7 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
               >
                 <Link2 size={10} /> Share
               </button>
+              <ExportMenu spaceID={space.id} pageID={page.id} />
               <PresenceBar presence={presence} selfClientID={selfClientID} />
             </div>
             {freshnessOpen ? (

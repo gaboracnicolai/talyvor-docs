@@ -26,6 +26,7 @@ import (
 	"github.com/talyvor/docs/internal/config"
 	"github.com/talyvor/docs/internal/database"
 	"github.com/talyvor/docs/internal/db"
+	"github.com/talyvor/docs/internal/export"
 	"github.com/talyvor/docs/internal/freshness"
 	"github.com/talyvor/docs/internal/importer"
 	"github.com/talyvor/docs/internal/lensintegration"
@@ -108,6 +109,11 @@ func main() {
 	// failures are logged on the client side rather than retried.
 	analyticsStore := analytics.NewStore(pool)
 	analyticsHandler := analytics.NewHandler(analyticsStore)
+
+	// Export (markdown / HTML / PDF / DOCX) — buffered through a
+	// 50MB-capped writer in the handler.
+	exporter := export.New(pageStore, spaceStore)
+	exportHandler := export.NewHandler(exporter)
 
 	// Template library — 20 built-in templates + workspace-owned
 	// custom templates. UseTemplate creates a new page via the
@@ -205,6 +211,7 @@ func main() {
 		importerHandler.Mount(r)
 		dbHandler.Mount(r)
 		tmplHandler.Mount(r)
+		exportHandler.Mount(r)
 	})
 
 	srv := &http.Server{
