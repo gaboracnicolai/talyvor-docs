@@ -190,6 +190,7 @@ const columns = `id, space_id, workspace_id, parent_id, title, slug,
     last_verified_at, verified_by, stale_after_days,
     doc_status,
     locked, locked_by, locked_at,
+    COALESCE(page_type, 'document') AS page_type,
     created_at, updated_at`
 
 func scan(s interface{ Scan(...any) error }) (*model.Page, error) {
@@ -203,6 +204,7 @@ func scan(s interface{ Scan(...any) error }) (*model.Page, error) {
 		&p.LastVerifiedAt, &p.VerifiedBy, &p.StaleAfterDays,
 		&p.DocStatus,
 		&p.Locked, &p.LockedBy, &p.LockedAt,
+		&p.PageType,
 		&p.CreatedAt, &p.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -686,6 +688,7 @@ func scanPlus(s interface{ Scan(...any) error }, extras ...any) (*model.Page, er
 		&p.LastVerifiedAt, &p.VerifiedBy, &p.StaleAfterDays,
 		&p.DocStatus,
 		&p.Locked, &p.LockedBy, &p.LockedAt,
+		&p.PageType,
 		&p.CreatedAt, &p.UpdatedAt,
 	}
 	dest := append(pageDest, extras...)

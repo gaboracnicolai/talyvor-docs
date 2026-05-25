@@ -1,0 +1,202 @@
+package changelog
+
+import (
+	"encoding/json"
+	"encoding/xml"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+)
+
+type Handler struct{ store *Store }
+
+func NewHandler(store *Store) *Handler { return &Handler{store: store} }
+
+func (h *Handler) Mount(r chi.Router) {
+	r.Post("/spaces/{spaceID}/pages/{pageID}/changelog/entries", h.Create)
+	r.Get("/spaces/{spaceID}/pages/{pageID}/changelog/entries", h.List)
+	r.Get("/spaces/{spaceID}/pages/{pageID}/changelog/entries/{id}", h.Get)
+	r.Patch("/spaces/{spaceID}/pages/{pageID}/changelog/entries/{id}", h.Update)
+	r.Delete("/spaces/{spaceID}/pages/{pageID}/changelog/entries/{id}", h.Delete)
+	r.Post("/spaces/{spaceID}/pages/{pageID}/changelog/entries/{id}/publish", h.Publish)
+	r.Post("/spaces/{spaceID}/pages/{pageID}/changelog/generate", h.Generate)
+	r.Get("/workspaces/{wsID}/changelog/feed", h.Feed)
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func writeErr(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
+	var in ChangelogEntry
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json")
+		return
+	}
+	in.PageID = chi.URLParam(r, "pageID")
+	if in.WorkspaceID == "" {
+		in.WorkspaceID = r.Header.Get("X-Talyvor-Workspace")
+	}
+	if in.CreatedBy == "" {
+		in.CreatedBy = r.Header.Get("X-Member-Id")
+	}
+	out, err := h.store.CreateEntry(r.Context(), in)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	var typ *EntryType
+	if t := r.URL.Query().Get("type"); t != "" {
+		et := EntryType(t)
+		typ = &et
+	}
+	out, err := h.store.ListEntries(r.Context(), chi.URLParam(r, "pageID"), typ, limit, offset)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if out == nil {
+		out = []ChangelogEntry{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
+	e, err := h.store.GetEntry(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, e)
+}
+
+func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
+	var updates map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json")
+		return
+	}
+	e, err := h.store.UpdateEntry(r.Context(), chi.URLParam(r, "id"), updates)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, e)
+}
+
+func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
+	if err := h.store.DeleteEntry(r.Context(), chi.URLParam(r, "id")); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
+	e, err := h.store.PublishEntry(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, e)
+}
+
+type generateBody struct {
+	Version     string   `json:"version"`
+	IssueIDs    []string `json:"issue_ids"`
+	WorkspaceID string   `json:"workspace_id"`
+}
+
+func (h *Handler) Generate(w http.ResponseWriter, r *http.Request) {
+	var in generateBody
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad json")
+		return
+	}
+	if in.WorkspaceID == "" {
+		in.WorkspaceID = r.Header.Get("X-Talyvor-Workspace")
+	}
+	createdBy := r.Header.Get("X-Member-Id")
+	out, err := h.store.GenerateFromIssues(r.Context(),
+		in.WorkspaceID, chi.URLParam(r, "pageID"), createdBy,
+		in.IssueIDs, in.Version)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+// ─── RSS feed ────────────────────────────────────────
+
+type rssChannel struct {
+	XMLName xml.Name  `xml:"channel"`
+	Title   string    `xml:"title"`
+	Link    string    `xml:"link"`
+	Desc    string    `xml:"description"`
+	Items   []rssItem `xml:"item"`
+}
+
+type rssItem struct {
+	Title   string `xml:"title"`
+	Link    string `xml:"link"`
+	Desc    string `xml:"description"`
+	Guid    string `xml:"guid"`
+	PubDate string `xml:"pubDate"`
+}
+
+type rss struct {
+	XMLName xml.Name   `xml:"rss"`
+	Version string     `xml:"version,attr"`
+	Channel rssChannel `xml:"channel"`
+}
+
+func (h *Handler) Feed(w http.ResponseWriter, r *http.Request) {
+	wsID := chi.URLParam(r, "wsID")
+	entries, err := h.store.GetPublicFeed(r.Context(), wsID, 50)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	items := make([]rssItem, 0, len(entries))
+	for _, e := range entries {
+		pub := e.CreatedAt
+		if e.PublishedAt != nil {
+			pub = *e.PublishedAt
+		}
+		items = append(items, rssItem{
+			Title:   e.Version + " — " + e.Title,
+			Link:    "/changelog/" + e.ID,
+			Desc:    e.Summary,
+			Guid:    e.ID,
+			PubDate: pub.Format(time.RFC1123Z),
+		})
+	}
+	feed := rss{
+		Version: "2.0",
+		Channel: rssChannel{
+			Title: "Changelog",
+			Link:  "/changelog",
+			Desc:  "Latest changes",
+			Items: items,
+		},
+	}
+	w.Header().Set("Content-Type", "application/rss+xml")
+	w.Header().Set("X-Powered-By", "Talyvor Docs")
+	_, _ = w.Write([]byte(xml.Header))
+	_ = xml.NewEncoder(w).Encode(feed)
+}

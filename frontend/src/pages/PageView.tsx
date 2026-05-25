@@ -16,6 +16,7 @@ import { LockBanner } from "~/components/LockBanner";
 import { usePageLock } from "~/hooks/usePageLock";
 import { CommentStatsBar } from "~/components/CommentStatsBar";
 import { CommentsPanel } from "~/components/CommentsPanel";
+import { ChangelogView } from "~/components/changelog/ChangelogView";
 import { Input } from "~/components/ui/Input";
 import { Button } from "~/components/ui/Button";
 import { usePage, useUpdatePage } from "~/hooks/usePage";
@@ -207,6 +208,17 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
 
   if (isLoading || !page) {
     return <div className="p-8 text-sm text-muted">Loading page…</div>;
+  }
+
+  // Specialised page types render their own surface — the editor is
+  // hidden behind a typed branch so we can introduce more page
+  // types (templates-as-pages, dashboards, etc.) the same way.
+  if (page.page_type === "changelog") {
+    return (
+      <main className="flex-1 overflow-y-auto">
+        <ChangelogView page={page} spaceID={space.id} />
+      </main>
+    );
   }
 
   return (

@@ -76,6 +76,11 @@ type Page struct {
 	LockedBy *string    `json:"locked_by,omitempty"   db:"locked_by"`
 	LockedAt *time.Time `json:"locked_at,omitempty"   db:"locked_at"`
 
+	// PageType switches the frontend surface — "document" (default),
+	// "changelog", or "template". Backed by a column on `pages`; the
+	// changelog package reads this when generating entries.
+	PageType string `json:"page_type,omitempty" db:"page_type"`
+
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }

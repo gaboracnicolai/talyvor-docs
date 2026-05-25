@@ -43,6 +43,7 @@ export interface Page {
   locked: boolean;
   locked_by?: string;
   locked_at?: string;
+  page_type?: "document" | "changelog" | "template";
   created_at: string;
   updated_at: string;
 }

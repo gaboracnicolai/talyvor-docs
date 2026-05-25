@@ -22,14 +22,18 @@ import (
 // fields we mirror, the more we have to keep in sync as Track
 // evolves.
 type IssueRef struct {
-	ID         string  `json:"id"`
-	Identifier string  `json:"identifier"`
-	Title      string  `json:"title"`
-	Status     string  `json:"status"`
-	Priority   int     `json:"priority"`
-	AssigneeID string  `json:"assignee_id,omitempty"`
-	AICostUSD  float64 `json:"ai_cost_usd"`
-	URL        string  `json:"url,omitempty"`
+	ID         string   `json:"id"`
+	Identifier string   `json:"identifier"`
+	Title      string   `json:"title"`
+	Status     string   `json:"status"`
+	Priority   int      `json:"priority"`
+	AssigneeID string   `json:"assignee_id,omitempty"`
+	AICostUSD  float64  `json:"ai_cost_usd"`
+	URL        string   `json:"url,omitempty"`
+	// Labels powers the changelog auto-grouping ("bug" → bugfix,
+	// "feature" → feature, etc.). Track may omit it; consumers must
+	// degrade gracefully.
+	Labels []string `json:"labels,omitempty"`
 }
 
 // cacheTTL bounds how long a fetched IssueRef stays warm in the

@@ -23,6 +23,7 @@ import (
 	"github.com/talyvor/docs/internal/analytics"
 	"github.com/talyvor/docs/internal/approval"
 	"github.com/talyvor/docs/internal/block"
+	"github.com/talyvor/docs/internal/changelog"
 	"github.com/talyvor/docs/internal/collab"
 	"github.com/talyvor/docs/internal/comment"
 	"github.com/talyvor/docs/internal/config"
@@ -121,6 +122,11 @@ func main() {
 	// rework. The page handler no longer owns comment routes.
 	commentStore := comment.NewStore(pool)
 	commentHandler := comment.NewHandler(commentStore)
+
+	// Changelog — specialised page type with auto-grouping from
+	// Track issues + RSS feed.
+	changelogStore := changelog.NewStore(pool, trackClient)
+	changelogHandler := changelog.NewHandler(changelogStore)
 
 	// Page locks — soft locks that survive restarts. The CanEdit
 	// rule composes locks + approval state, so the lock store reads
@@ -236,6 +242,7 @@ func main() {
 		approvalHandler.Mount(r)
 		lockHandler.Mount(r)
 		commentHandler.Mount(r)
+		changelogHandler.Mount(r)
 	})
 
 	srv := &http.Server{

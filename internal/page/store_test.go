@@ -34,6 +34,7 @@ func pageCols() []string {
 		"last_verified_at", "verified_by", "stale_after_days",
 		"doc_status",
 		"locked", "locked_by", "locked_at",
+		"page_type",
 		"created_at", "updated_at",
 	}
 }
@@ -49,6 +50,7 @@ func pageRow(id, title, slug string, depth int, parent *string) *pgxmock.Rows {
 		(*time.Time)(nil), (*string)(nil), 0,
 		"draft",
 		false, (*string)(nil), (*time.Time)(nil),
+		"document",
 		now, now,
 	)
 }
@@ -167,6 +169,7 @@ func rowVals(id, title, slug string, depth int, parent *string) []driverValue {
 		(*time.Time)(nil), (*string)(nil), 0,
 		"draft",
 		false, (*string)(nil), (*time.Time)(nil),
+		"document",
 		now, now,
 	}
 }
@@ -309,6 +312,7 @@ func TestSearchWithRank_ReturnsRankedResultsWithHeadline(t *testing.T) {
 		(*time.Time)(nil), (*string)(nil), 0,
 		"draft",
 		false, (*string)(nil), (*time.Time)(nil),
+		"document",
 		now, now,
 		"Engineering", float64(0.93), "Some <mark>auth</mark> flow excerpt",
 	}
@@ -321,6 +325,7 @@ func TestSearchWithRank_ReturnsRankedResultsWithHeadline(t *testing.T) {
 		(*time.Time)(nil), (*string)(nil), 0,
 		"draft",
 		false, (*string)(nil), (*time.Time)(nil),
+		"document",
 		now, now,
 		"Engineering", float64(0.42), "<mark>OAuth</mark> design",
 	}

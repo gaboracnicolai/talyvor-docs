@@ -228,7 +228,11 @@ function SpaceRow({
                     : "text-muted hover:bg-bg/60 hover:text-text",
                 )}
               >
-                <FileText size={10} />
+                {p.page_type === "changelog" ? (
+                  <span className="text-[10px]">📋</span>
+                ) : (
+                  <FileText size={10} />
+                )}
                 <span className="truncate">{p.icon ? `${p.icon} ${p.title}` : p.title}</span>
                 {p.locked ? (
                   <Lock size={10} className="ml-auto shrink-0 text-muted" />
