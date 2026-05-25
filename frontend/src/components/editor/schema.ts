@@ -226,6 +226,18 @@ const nodes: { [name: string]: NodeSpec } = {
     ],
   },
 
+  // toc_block is a self-contained block. The node view paints a
+  // live table of contents on its own; no attrs or content because
+  // the TOC is derived from the surrounding document.
+  toc_block: {
+    group: "block",
+    atom: true,
+    selectable: true,
+    attrs: {},
+    parseDOM: [{ tag: "div.toc-block" }],
+    toDOM: () => ["div", { class: "toc-block" }],
+  },
+
   // database_block is a block-level placeholder that defers all
   // rendering to a React node view. The PM node carries only the
   // database_id; the node view fetches schema + rows + views on its

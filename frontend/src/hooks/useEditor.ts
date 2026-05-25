@@ -6,6 +6,7 @@ import { schema } from "~/components/editor/schema";
 import { buildPlugins } from "~/components/editor/extensions";
 import { slashPlugin } from "~/components/editor/extensions/slash-commands";
 import { codeHighlightPlugin } from "~/components/editor/extensions/code-highlight";
+import { headingAnchorPlugin } from "~/components/editor/extensions/heading-anchors";
 import {
   remoteCursorPlugin,
   setRemoteCursors,
@@ -54,6 +55,7 @@ export function useEditor({ initialContent, readOnly, onChange, nodeViews }: Use
         slashPlugin(),
         codeHighlightPlugin(),
         remoteCursorPlugin(),
+        headingAnchorPlugin(),
       ]),
     });
     const view = new EditorView(mountRef.current, {
@@ -70,6 +72,13 @@ export function useEditor({ initialContent, readOnly, onChange, nodeViews }: Use
         if (tr.docChanged && onChange && !isRemote) {
           const json = JSON.stringify(newState.doc.toJSON());
           onChange(json, newState.doc.textContent);
+        }
+        // Notify any embedded TOC blocks that headings may have
+        // shifted so they can re-render. Fires for remote changes
+        // too — readers benefit from a live TOC just as much as the
+        // editor.
+        if (tr.docChanged) {
+          window.dispatchEvent(new Event("docs:toc-refresh"));
         }
         // Force a React re-render so the floating toolbar +
         // slash-menu portals can observe the new selection /

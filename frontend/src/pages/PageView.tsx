@@ -139,25 +139,64 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
     void pagesApi.verify(space.id, page.id);
   }, [page, space.id]);
 
-  // TOC is extracted from the live page content. We do this from the
-  // rendered DOM via querySelectorAll because the editor is the
-  // canonical source of truth; React-level extraction would lag.
+  // TOC is read from the rendered DOM via querySelectorAll. The
+  // ProseMirror heading-anchors plugin stamps each heading with a
+  // stable `id`, so we can reuse those IDs for the right-panel
+  // links + reuse the same IDs for the IntersectionObserver-driven
+  // active highlight below.
   const [toc, setTOC] = useState<{ level: number; text: string; id: string }[]>([]);
+  const [activeHeadingID, setActiveHeadingID] = useState<string>("");
   useEffect(() => {
     if (!page) return;
-    const id = setInterval(() => {
+    const rescan = () => {
       const headings = document.querySelectorAll<HTMLElement>(
         ".prose-editor h1, .prose-editor h2, .prose-editor h3",
       );
-      const items = Array.from(headings).map((el, i) => ({
+      const items = Array.from(headings).map((el) => ({
         level: Number(el.tagName[1]),
         text: el.textContent || "",
-        id: `toc-${i}`,
+        // The plugin stamps `id` via decorations. Fall back to a
+        // synthetic id if anchors haven't painted yet — the
+        // observer re-runs on the next refresh.
+        id: el.id || `toc-${el.textContent?.toLowerCase().replace(/\s+/g, "-")}`,
       }));
       setTOC((prev) => (jsonEq(prev, items) ? prev : items));
-    }, 1500);
-    return () => clearInterval(id);
+    };
+    rescan();
+    const id = setInterval(rescan, 1500);
+    // Listen for explicit refresh events from the Editor — keeps
+    // the panel responsive to edits without waiting for the next
+    // poll tick.
+    window.addEventListener("docs:toc-refresh", rescan);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("docs:toc-refresh", rescan);
+    };
   }, [page?.id]);
+
+  // IntersectionObserver — highlights the entry whose heading is
+  // closest to the top of the viewport. We track every heading the
+  // TOC knows about and pick the most-visible one.
+  useEffect(() => {
+    if (toc.length === 0) return;
+    const elements = toc
+      .map((h) => document.getElementById(h.id))
+      .filter((el): el is HTMLElement => !!el);
+    if (elements.length === 0) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visible = entries
+          .filter((e) => e.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible.length > 0) {
+          setActiveHeadingID((visible[0].target as HTMLElement).id);
+        }
+      },
+      { rootMargin: "0px 0px -60% 0px" },
+    );
+    elements.forEach((el) => observer.observe(el));
+    return () => observer.disconnect();
+  }, [toc]);
 
   const wordCount = useMemo(() => {
     if (!page) return 0;
@@ -281,15 +320,26 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
               <span className="text-muted">No headings yet</span>
             ) : (
               <div className="space-y-0.5">
-                {toc.map((h, i) => (
-                  <div
-                    key={i}
-                    style={{ paddingLeft: (h.level - 1) * 12 }}
-                    className="truncate text-muted"
-                  >
-                    {h.text || "—"}
-                  </div>
-                ))}
+                {toc.map((h, i) => {
+                  const active = h.id === activeHeadingID;
+                  return (
+                    <button
+                      key={i}
+                      onClick={() => {
+                        const target = document.getElementById(h.id);
+                        if (target) {
+                          target.scrollIntoView({ behavior: "smooth", block: "start" });
+                        }
+                      }}
+                      style={{ paddingLeft: (h.level - 1) * 12 }}
+                      className={`block w-full truncate text-left ${
+                        active ? "text-accent" : "text-muted hover:text-text"
+                      }`}
+                    >
+                      {h.text || "—"}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </PanelSection>

@@ -174,6 +174,17 @@ export const slashCommands: SlashCommand[] = [
   ...aiCommand("ai-longer", "✨ Make longer", "Expand the current passage"),
   ...aiCommand("ai-translate", "✨ Translate...", "Translate selected text"),
 
+  // Live table of contents. Inserts a toc_block node — the node
+  // view derives its entries from the surrounding doc on every
+  // change, so no attrs are needed.
+  {
+    id: "toc",
+    group: "Content",
+    label: "📑 Table of Contents",
+    keywords: ["toc", "outline", "headings"],
+    apply: (view, from, to) => insertNode(view, from, to, "toc_block"),
+  },
+
   // Inline database — emits a custom event the Editor catches to
   // create the database server-side, then insert a database_block
   // PM node with the returned ID.

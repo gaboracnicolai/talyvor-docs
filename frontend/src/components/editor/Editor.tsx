@@ -13,6 +13,7 @@ import type { TrackIssue } from "~/api/track";
 import { callAI, type AIAction } from "./extensions/ai-assist";
 import { databaseApi } from "~/api/database";
 import { DatabaseBlock } from "~/components/database/DatabaseBlock";
+import { createTOCNodeView } from "./blocks/TOCBlock";
 
 interface EditorProps {
   pageId: string;
@@ -107,6 +108,11 @@ export function Editor({
   const queryClient = useQueryClient();
   const nodeViews = useMemo(
     () => ({
+      // toc_block paints a live TOC. Vanilla DOM (no React) — the
+      // Editor's dispatchTransaction fires a window event the node
+      // view listens for so it stays in sync with surrounding edits.
+      toc_block: (node: import("prosemirror-model").Node, viewArg: import("prosemirror-view").EditorView) =>
+        createTOCNodeView(node, viewArg),
       database_block: (node: import("prosemirror-model").Node): NodeView => {
         const dom = document.createElement("div");
         dom.className = "database-block-host";
