@@ -14,6 +14,8 @@ import { ApprovalPanel } from "~/components/ApprovalPanel";
 import { LockBadge } from "~/components/LockBadge";
 import { LockBanner } from "~/components/LockBanner";
 import { usePageLock } from "~/hooks/usePageLock";
+import { CommentStatsBar } from "~/components/CommentStatsBar";
+import { CommentsPanel } from "~/components/CommentsPanel";
 import { Input } from "~/components/ui/Input";
 import { Button } from "~/components/ui/Button";
 import { usePage, useUpdatePage } from "~/hooks/usePage";
@@ -244,6 +246,7 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
               </button>
               <ExportMenu spaceID={space.id} pageID={page.id} />
               <DocStatusBadge status={page.doc_status ?? "draft"} />
+              <CommentStatsBar spaceID={space.id} pageID={page.id} />
               <LockBadge
                 state={lockHook.state}
                 lockedByMe={lockHook.lockedByMe}
@@ -381,6 +384,10 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
               pageID={page.id}
               docStatus={page.doc_status ?? "draft"}
             />
+          </PanelSection>
+
+          <PanelSection title="Comments">
+            <CommentsPanel spaceID={space.id} pageID={page.id} />
           </PanelSection>
 
           <LinkedIssuesSection pageID={page.id} workspaceID={page.workspace_id} />

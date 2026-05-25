@@ -24,6 +24,7 @@ import (
 	"github.com/talyvor/docs/internal/approval"
 	"github.com/talyvor/docs/internal/block"
 	"github.com/talyvor/docs/internal/collab"
+	"github.com/talyvor/docs/internal/comment"
 	"github.com/talyvor/docs/internal/config"
 	"github.com/talyvor/docs/internal/database"
 	"github.com/talyvor/docs/internal/db"
@@ -115,6 +116,11 @@ func main() {
 	// Approval workflow — owns the pages.doc_status column.
 	approvalStore := approval.NewStore(pool)
 	approvalHandler := approval.NewHandler(approvalStore)
+
+	// Threaded comments — own package as of the resolution-tracking
+	// rework. The page handler no longer owns comment routes.
+	commentStore := comment.NewStore(pool)
+	commentHandler := comment.NewHandler(commentStore)
 
 	// Page locks — soft locks that survive restarts. The CanEdit
 	// rule composes locks + approval state, so the lock store reads
@@ -229,6 +235,7 @@ func main() {
 		exportHandler.Mount(r)
 		approvalHandler.Mount(r)
 		lockHandler.Mount(r)
+		commentHandler.Mount(r)
 	})
 
 	srv := &http.Server{

@@ -1,7 +1,6 @@
 package page
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,24 +13,16 @@ import (
 	"github.com/talyvor/docs/internal/model"
 )
 
-// commentStore is the tiny subset of comment operations the page
-// handler needs. We back it with a thin pool-backed implementation
-// in this file so we don't need a separate comment package in
-// Phase 1.
-type commentStore interface {
-	Create(ctx context.Context, c model.Comment) (*model.Comment, error)
-	ListByPage(ctx context.Context, pageID string) ([]model.Comment, error)
-	Update(ctx context.Context, id, content string) (*model.Comment, error)
-	Resolve(ctx context.Context, id, resolverID string) error
-}
-
+// Comments moved to internal/comment in the threaded-comments
+// rework. The page handler retains the constructor signature for
+// backwards compatibility — pool is no longer used here but main
+// still hands it in for symmetry with other handlers.
 type Handler struct {
-	store   *Store
-	comment commentStore
+	store *Store
 }
 
-func NewHandler(store *Store, pool *pgxpool.Pool) *Handler {
-	return &Handler{store: store, comment: newCommentStore(pool)}
+func NewHandler(store *Store, _ *pgxpool.Pool) *Handler {
+	return &Handler{store: store}
 }
 
 // Mount registers every page-scoped route under /v1. Comments,
@@ -51,10 +42,10 @@ func (h *Handler) Mount(r chi.Router) {
 		r.Get("/{pageID}/versions", h.GetVersions)
 		r.Post("/{pageID}/versions/{version}/restore", h.RestoreVersion)
 
-		r.Get("/{pageID}/comments", h.ListComments)
-		r.Post("/{pageID}/comments", h.CreateComment)
-		r.Patch("/{pageID}/comments/{commentID}", h.UpdateComment)
-		r.Post("/{pageID}/comments/{commentID}/resolve", h.ResolveComment)
+		// Comment routes live in internal/comment as of the threaded-
+		// comments rework. The legacy handlers below stay for the
+		// /pages/{pageID}/comments/{commentID} update path, but the
+		// list/create/resolve trio is owned by the new package.
 	})
 
 	r.Get("/workspaces/{wsID}/pages/search", h.Search)
@@ -205,67 +196,6 @@ func (h *Handler) RestoreVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// ─── comments ─────────────────────────────────────────────
-
-func (h *Handler) ListComments(w http.ResponseWriter, r *http.Request) {
-	out, err := h.comment.ListByPage(r.Context(), chi.URLParam(r, "pageID"))
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
-		return
-	}
-	if out == nil {
-		out = []model.Comment{}
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
-	var in model.Comment
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeErr(w, http.StatusBadRequest, "BAD_JSON", err.Error())
-		return
-	}
-	in.PageID = chi.URLParam(r, "pageID")
-	if in.AuthorID == "" {
-		in.AuthorID = r.Header.Get("X-Member-Id")
-	}
-	if in.Content == "" {
-		writeErr(w, http.StatusBadRequest, "BAD_PARAMS", "content required")
-		return
-	}
-	out, err := h.comment.Create(r.Context(), in)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "CREATE_FAILED", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, out)
-}
-
-func (h *Handler) UpdateComment(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Content string `json:"content"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeErr(w, http.StatusBadRequest, "BAD_JSON", err.Error())
-		return
-	}
-	out, err := h.comment.Update(r.Context(), chi.URLParam(r, "commentID"), in.Content)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "UPDATE_FAILED", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-func (h *Handler) ResolveComment(w http.ResponseWriter, r *http.Request) {
-	if err := h.comment.Resolve(r.Context(),
-		chi.URLParam(r, "commentID"), r.Header.Get("X-Member-Id")); err != nil {
-		writeErr(w, http.StatusInternalServerError, "RESOLVE_FAILED", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
 // ─── search + stale ───────────────────────────────────────
 
 func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
@@ -304,93 +234,3 @@ func (h *Handler) Stale(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// ─── inline comment store ─────────────────────────────────
-
-// The comment surface is small enough to live alongside the page
-// handler in Phase 1. A future phase can promote it to its own
-// package when comment-specific features (notifications, mentions)
-// land.
-
-type pgxPool interface {
-	commentStore
-}
-
-type defaultCommentStore struct{ pool *pgxpool.Pool }
-
-func newCommentStore(pool *pgxpool.Pool) commentStore {
-	if pool == nil {
-		return nopComments{}
-	}
-	return &defaultCommentStore{pool: pool}
-}
-
-func (s *defaultCommentStore) Create(ctx context.Context, c model.Comment) (*model.Comment, error) {
-	var out model.Comment
-	err := s.pool.QueryRow(ctx,
-		`INSERT INTO page_comments (page_id, block_id, author_id, content)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, page_id, block_id, author_id, content, resolved, resolved_by, created_at, updated_at`,
-		c.PageID, c.BlockID, c.AuthorID, c.Content,
-	).Scan(&out.ID, &out.PageID, &out.BlockID, &out.AuthorID, &out.Content,
-		&out.Resolved, &out.ResolvedBy, &out.CreatedAt, &out.UpdatedAt)
-	return &out, err
-}
-
-func (s *defaultCommentStore) ListByPage(ctx context.Context, pageID string) ([]model.Comment, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, page_id, block_id, author_id, content, resolved, resolved_by, created_at, updated_at
-        FROM page_comments WHERE page_id = $1 ORDER BY created_at ASC`,
-		pageID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []model.Comment
-	for rows.Next() {
-		var c model.Comment
-		if err := rows.Scan(&c.ID, &c.PageID, &c.BlockID, &c.AuthorID, &c.Content,
-			&c.Resolved, &c.ResolvedBy, &c.CreatedAt, &c.UpdatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, c)
-	}
-	return out, rows.Err()
-}
-
-func (s *defaultCommentStore) Update(ctx context.Context, id, content string) (*model.Comment, error) {
-	var out model.Comment
-	err := s.pool.QueryRow(ctx,
-		`UPDATE page_comments SET content = $1, updated_at = NOW() WHERE id = $2
-        RETURNING id, page_id, block_id, author_id, content, resolved, resolved_by, created_at, updated_at`,
-		content, id,
-	).Scan(&out.ID, &out.PageID, &out.BlockID, &out.AuthorID, &out.Content,
-		&out.Resolved, &out.ResolvedBy, &out.CreatedAt, &out.UpdatedAt)
-	return &out, err
-}
-
-func (s *defaultCommentStore) Resolve(ctx context.Context, id, resolverID string) error {
-	_, err := s.pool.Exec(ctx,
-		`UPDATE page_comments SET resolved = true, resolved_by = $1, updated_at = NOW() WHERE id = $2`,
-		resolverID, id,
-	)
-	return err
-}
-
-// nopComments stands in when the page handler is wired without a
-// real pool (tests, dry-run mode). All operations no-op gracefully.
-type nopComments struct{}
-
-func (nopComments) Create(_ context.Context, _ model.Comment) (*model.Comment, error) {
-	return nil, errors.New("comments: store not configured")
-}
-func (nopComments) ListByPage(_ context.Context, _ string) ([]model.Comment, error) { return nil, nil }
-func (nopComments) Update(_ context.Context, _, _ string) (*model.Comment, error) {
-	return nil, errors.New("comments: store not configured")
-}
-func (nopComments) Resolve(_ context.Context, _, _ string) error {
-	return errors.New("comments: store not configured")
-}
-
-// silence unused-import lint for the `pgxPool` placeholder above.
-var _ pgxPool = (*defaultCommentStore)(nil)
