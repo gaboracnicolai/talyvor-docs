@@ -11,6 +11,7 @@ import {
   BarChart3,
   AlertTriangle,
   Lock,
+  BookOpen,
 } from "lucide-react";
 import clsx from "clsx";
 import { useSpaces, useCreateSpace } from "~/hooks/useSpaces";
@@ -27,6 +28,7 @@ interface SidebarProps {
   onOpenPage: (space: Space, page: Page) => void;
   onOpenAnalytics: () => void;
   onOpenStale: () => void;
+  onOpenTemplates: () => void;
   workspaceID: string;
   activeSpaceID: string | null;
   activePageID: string | null;
@@ -38,6 +40,7 @@ export function Sidebar({
   onOpenPage,
   onOpenAnalytics,
   onOpenStale,
+  onOpenTemplates,
   workspaceID,
   activeSpaceID,
   activePageID,
@@ -79,6 +82,13 @@ export function Sidebar({
         >
           <BarChart3 size={14} />
           Analytics
+        </button>
+        <button
+          onClick={onOpenTemplates}
+          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:bg-bg hover:text-text"
+        >
+          <BookOpen size={14} />
+          Templates
         </button>
         <button
           onClick={onOpenStale}

@@ -8,6 +8,7 @@ import { SpaceViewPage } from "./pages/SpaceView";
 import { PageViewPage } from "./pages/PageView";
 import { AnalyticsPage } from "./pages/Analytics";
 import { StalePagesPage } from "./pages/StalePages";
+import { TemplateGalleryPage } from "./pages/TemplateGallery";
 import { SharedPage } from "./pages/SharedPage";
 import type { Page, Space } from "./api/types";
 
@@ -20,7 +21,8 @@ type Route =
   | { kind: "space"; space: Space }
   | { kind: "page"; space: Space; pageID: string }
   | { kind: "analytics" }
-  | { kind: "stale" };
+  | { kind: "stale" }
+  | { kind: "templates" };
 
 export function App() {
   // /s/:token is handled before any other routing — the public
@@ -41,6 +43,7 @@ export function App() {
     setRoute({ kind: "page", space, pageID: page.id });
   const goAnalytics = () => setRoute({ kind: "analytics" });
   const goStale = () => setRoute({ kind: "stale" });
+  const goTemplates = () => setRoute({ kind: "templates" });
 
   // Cmd/Ctrl+K toggles the global search modal. Bound at the App
   // level so the shortcut works regardless of focus.
@@ -60,6 +63,7 @@ export function App() {
     if (route.kind === "home") return [];
     if (route.kind === "analytics") return [{ label: "Analytics" }];
     if (route.kind === "stale") return [{ label: "Needs review" }];
+    if (route.kind === "templates") return [{ label: "Templates" }];
     if (route.kind === "space") {
       return [{ label: route.space.name, onClick: () => goSpace(route.space) }];
     }
@@ -82,6 +86,7 @@ export function App() {
         onOpenPage={goPage}
         onOpenAnalytics={goAnalytics}
         onOpenStale={goStale}
+        onOpenTemplates={goTemplates}
         workspaceID={workspaceID}
         activeSpaceID={
           route.kind === "space" || route.kind === "page" ? route.space.id : null
@@ -125,6 +130,19 @@ export function App() {
             <StalePagesPage
               workspaceID={workspaceID}
               onOpenPage={(spaceID, pageID) =>
+                setRoute({
+                  kind: "page",
+                  space: { id: spaceID, workspace_id: workspaceID, name: "" } as Space,
+                  pageID,
+                })
+              }
+            />
+          </main>
+        ) : route.kind === "templates" ? (
+          <main className="flex-1 overflow-y-auto">
+            <TemplateGalleryPage
+              workspaceID={workspaceID}
+              onCreated={(spaceID, pageID) =>
                 setRoute({
                   kind: "page",
                   space: { id: spaceID, workspace_id: workspaceID, name: "" } as Space,

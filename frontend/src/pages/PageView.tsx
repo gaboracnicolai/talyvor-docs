@@ -15,6 +15,7 @@ import { pagesApi } from "~/api/pages";
 import { linksApi } from "~/api/links";
 import { freshnessApi } from "~/api/freshness";
 import { analyticsApi } from "~/api/analytics";
+import { templatesApi, type TemplateCategory } from "~/api/templates";
 import { pushRecentPage } from "~/hooks/useSearch";
 import type { Space } from "~/api/types";
 import type { PresenceInfo } from "~/hooks/useCollab";
@@ -279,6 +280,10 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
             <Button size="sm" variant="secondary" onClick={onVerify} className="mt-2 w-full">
               <CheckCircle2 size={10} /> Mark as verified
             </Button>
+            <SaveAsTemplateSection
+              pageID={page.id}
+              workspaceID={page.workspace_id}
+            />
           </PanelSection>
 
           <LinkedIssuesSection pageID={page.id} workspaceID={page.workspace_id} />
@@ -399,5 +404,108 @@ function LinkedIssuesSection({
         onClose={() => setPicker(false)}
       />
     </PanelSection>
+  );
+}
+
+// SaveAsTemplateSection is the right-panel affordance that turns a
+// page into a reusable workspace template. We open a small inline
+// form rather than a modal so the user can fill it in without
+// losing the editor's scroll position.
+function SaveAsTemplateSection({
+  pageID,
+  workspaceID,
+}: {
+  pageID: string;
+  workspaceID: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [category, setCategory] = useState<TemplateCategory>("general");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<string>("");
+
+  const submit = async () => {
+    if (!name.trim()) return;
+    setBusy(true);
+    setStatus("");
+    try {
+      await templatesApi.fromPage(workspaceID, {
+        page_id: pageID,
+        name: name.trim(),
+        description: description.trim(),
+        category,
+      });
+      setStatus("Saved.");
+      setName("");
+      setDescription("");
+      setOpen(false);
+    } catch {
+      setStatus("Couldn't save template.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="mt-2 w-full rounded border border-border bg-bg px-2 py-1 text-[10px] text-muted hover:border-accent hover:text-text"
+      >
+        + Save as template
+      </button>
+    );
+  }
+  return (
+    <div className="mt-2 space-y-1 rounded border border-dashed border-border p-2">
+      <input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder="Template name"
+        className="w-full rounded border border-border bg-bg px-1 py-1 text-xs"
+      />
+      <input
+        value={description}
+        onChange={(e) => setDescription(e.target.value)}
+        placeholder="Description"
+        className="w-full rounded border border-border bg-bg px-1 py-1 text-xs"
+      />
+      <select
+        value={category}
+        onChange={(e) => setCategory(e.target.value as TemplateCategory)}
+        className="w-full rounded border border-border bg-bg px-1 py-1 text-xs"
+      >
+        {[
+          "engineering",
+          "product",
+          "hr",
+          "marketing",
+          "finance",
+          "operations",
+          "general",
+        ].map((c) => (
+          <option key={c} value={c}>
+            {c}
+          </option>
+        ))}
+      </select>
+      <div className="flex items-center gap-1">
+        <button
+          onClick={() => void submit()}
+          disabled={busy || !name.trim()}
+          className="flex-1 rounded bg-accent px-2 py-1 text-[10px] text-bg hover:opacity-90 disabled:opacity-40"
+        >
+          {busy ? "Saving…" : "Save"}
+        </button>
+        <button
+          onClick={() => setOpen(false)}
+          className="rounded border border-border px-2 py-1 text-[10px] text-muted hover:text-text"
+        >
+          Cancel
+        </button>
+      </div>
+      {status ? <div className="text-[10px] text-muted">{status}</div> : null}
+    </div>
   );
 }

@@ -37,6 +37,7 @@ import (
 	"github.com/talyvor/docs/internal/search"
 	"github.com/talyvor/docs/internal/sharing"
 	"github.com/talyvor/docs/internal/space"
+	"github.com/talyvor/docs/internal/templatelib"
 	"github.com/talyvor/docs/internal/trackintegration"
 )
 
@@ -107,6 +108,13 @@ func main() {
 	// failures are logged on the client side rather than retried.
 	analyticsStore := analytics.NewStore(pool)
 	analyticsHandler := analytics.NewHandler(analyticsStore)
+
+	// Template library — 20 built-in templates + workspace-owned
+	// custom templates. UseTemplate creates a new page via the
+	// shared pageStore, so the entire workflow stays in one
+	// transaction-equivalent path.
+	tmplStore := templatelib.NewStore(pool, pageStore)
+	tmplHandler := templatelib.NewHandler(tmplStore)
 
 	// Inline-database blocks. Independent store; rows + views live
 	// in dedicated tables (see migrations/0007). Mounted under /v1.
@@ -196,6 +204,7 @@ func main() {
 		shareHandler.MountPublic(r)
 		importerHandler.Mount(r)
 		dbHandler.Mount(r)
+		tmplHandler.Mount(r)
 	})
 
 	srv := &http.Server{
