@@ -13,6 +13,7 @@ import {
   Lock,
   BookOpen,
   ClipboardCheck,
+  Globe,
 } from "lucide-react";
 import clsx from "clsx";
 import { useSpaces, useCreateSpace } from "~/hooks/useSpaces";
@@ -32,6 +33,7 @@ interface SidebarProps {
   onOpenStale: () => void;
   onOpenTemplates: () => void;
   onOpenApprovals: () => void;
+  onOpenDomains: () => void;
   workspaceID: string;
   activeSpaceID: string | null;
   activePageID: string | null;
@@ -45,6 +47,7 @@ export function Sidebar({
   onOpenStale,
   onOpenTemplates,
   onOpenApprovals,
+  onOpenDomains,
   workspaceID,
   activeSpaceID,
   activePageID,
@@ -114,6 +117,13 @@ export function Sidebar({
               {pendingApprovals}
             </span>
           ) : null}
+        </button>
+        <button
+          onClick={onOpenDomains}
+          className="mb-2 flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:bg-bg hover:text-text"
+        >
+          <Globe size={14} />
+          Custom domains
         </button>
         <button
           onClick={onOpenStale}

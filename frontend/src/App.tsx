@@ -10,6 +10,7 @@ import { AnalyticsPage } from "./pages/Analytics";
 import { StalePagesPage } from "./pages/StalePages";
 import { TemplateGalleryPage } from "./pages/TemplateGallery";
 import { ApprovalInboxPage } from "./pages/ApprovalInbox";
+import { DomainSettingsPage } from "./pages/DomainSettings";
 import { SharedPage } from "./pages/SharedPage";
 import type { Page, Space } from "./api/types";
 
@@ -24,7 +25,8 @@ type Route =
   | { kind: "analytics" }
   | { kind: "stale" }
   | { kind: "templates" }
-  | { kind: "approvals" };
+  | { kind: "approvals" }
+  | { kind: "domains" };
 
 export function App() {
   // /s/:token is handled before any other routing — the public
@@ -47,6 +49,7 @@ export function App() {
   const goStale = () => setRoute({ kind: "stale" });
   const goTemplates = () => setRoute({ kind: "templates" });
   const goApprovals = () => setRoute({ kind: "approvals" });
+  const goDomains = () => setRoute({ kind: "domains" });
 
   // Cmd/Ctrl+K toggles the global search modal. Bound at the App
   // level so the shortcut works regardless of focus.
@@ -68,6 +71,7 @@ export function App() {
     if (route.kind === "stale") return [{ label: "Needs review" }];
     if (route.kind === "templates") return [{ label: "Templates" }];
     if (route.kind === "approvals") return [{ label: "Approvals" }];
+    if (route.kind === "domains") return [{ label: "Custom domains" }];
     if (route.kind === "space") {
       return [{ label: route.space.name, onClick: () => goSpace(route.space) }];
     }
@@ -92,6 +96,7 @@ export function App() {
         onOpenStale={goStale}
         onOpenTemplates={goTemplates}
         onOpenApprovals={goApprovals}
+        onOpenDomains={goDomains}
         workspaceID={workspaceID}
         activeSpaceID={
           route.kind === "space" || route.kind === "page" ? route.space.id : null
@@ -168,6 +173,10 @@ export function App() {
                 })
               }
             />
+          </main>
+        ) : route.kind === "domains" ? (
+          <main className="flex-1 overflow-y-auto">
+            <DomainSettingsPage workspaceID={workspaceID} />
           </main>
         ) : (
           <PageViewPage space={route.space} pageID={route.pageID} />

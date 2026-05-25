@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/talyvor/docs/internal/collab"
 	"github.com/talyvor/docs/internal/comment"
 	"github.com/talyvor/docs/internal/config"
+	"github.com/talyvor/docs/internal/customdomain"
 	"github.com/talyvor/docs/internal/database"
 	"github.com/talyvor/docs/internal/db"
 	"github.com/talyvor/docs/internal/export"
@@ -35,6 +37,7 @@ import (
 	"github.com/talyvor/docs/internal/lensintegration"
 	"github.com/talyvor/docs/internal/mcp"
 	"github.com/talyvor/docs/internal/metrics"
+	"github.com/talyvor/docs/internal/model"
 	"github.com/talyvor/docs/internal/page"
 	"github.com/talyvor/docs/internal/pagelink"
 	"github.com/talyvor/docs/internal/pagelock"
@@ -127,6 +130,12 @@ func main() {
 	// Track issues + RSS feed.
 	changelogStore := changelog.NewStore(pool, trackClient)
 	changelogHandler := changelog.NewHandler(changelogStore)
+
+	// Custom domains. The DomainRouter middleware fronts the whole
+	// HTTP stack — see the wrapping below — so verified hostnames
+	// serve a read-only public space view instead of the admin UI.
+	domainStore := customdomain.NewStore(pool)
+	domainHandler := customdomain.NewHandler(domainStore, &publicPageAdapter{pages: pageStore})
 
 	// Page locks — soft locks that survive restarts. The CanEdit
 	// rule composes locks + approval state, so the lock store reads
@@ -243,11 +252,21 @@ func main() {
 		lockHandler.Mount(r)
 		commentHandler.Mount(r)
 		changelogHandler.Mount(r)
+		domainHandler.Mount(r)
 	})
 
+	// DomainRouter wraps the chi tree. Requests on a verified
+	// custom-domain Host header are routed to the public read-only
+	// renderer; everything else passes through to `r` unchanged.
+	rootHandler := customdomain.DomainRouter(
+		domainStore,
+		domainHandler.PublicHandler(),
+		r,
+		listenHostname(cfg.ListenAddr),
+	)
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
-		Handler:           r,
+		Handler:           rootHandler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -276,6 +295,32 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", slog.String("err", err.Error()))
 	}
+}
+
+// publicPageAdapter exposes the narrow page-lookup surface the
+// custom-domain public renderer needs. The full page.Store has a
+// PageFilter-based List; the adapter materialises a per-space slice
+// from it without leaking the filter type into customdomain.
+type publicPageAdapter struct{ pages *page.Store }
+
+func (a *publicPageAdapter) GetByID(ctx context.Context, id string) (*model.Page, error) {
+	return a.pages.GetByID(ctx, id)
+}
+func (a *publicPageAdapter) GetBySlug(ctx context.Context, spaceID, slug string) (*model.Page, error) {
+	return a.pages.GetBySlug(ctx, spaceID, slug)
+}
+func (a *publicPageAdapter) ListBySpace(ctx context.Context, spaceID string) ([]model.Page, error) {
+	return a.pages.List(ctx, page.PageFilter{SpaceID: spaceID, Limit: 500})
+}
+
+// listenHostname extracts the bind hostname from a listen address.
+// "0.0.0.0:4000" → "0.0.0.0", ":4000" → "" (matches isLocalHost
+// in the customdomain middleware via the empty-host shortcut).
+func listenHostname(addr string) string {
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		return addr[:i]
+	}
+	return addr
 }
 
 // metricsMiddleware records request count + latency. Cardinality is
