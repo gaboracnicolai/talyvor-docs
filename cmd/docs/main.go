@@ -21,6 +21,7 @@ import (
 
 	"github.com/talyvor/docs/internal/ai"
 	"github.com/talyvor/docs/internal/analytics"
+	"github.com/talyvor/docs/internal/approval"
 	"github.com/talyvor/docs/internal/block"
 	"github.com/talyvor/docs/internal/collab"
 	"github.com/talyvor/docs/internal/config"
@@ -109,6 +110,10 @@ func main() {
 	// failures are logged on the client side rather than retried.
 	analyticsStore := analytics.NewStore(pool)
 	analyticsHandler := analytics.NewHandler(analyticsStore)
+
+	// Approval workflow — owns the pages.doc_status column.
+	approvalStore := approval.NewStore(pool)
+	approvalHandler := approval.NewHandler(approvalStore)
 
 	// Export (markdown / HTML / PDF / DOCX) — buffered through a
 	// 50MB-capped writer in the handler.
@@ -212,6 +217,7 @@ func main() {
 		dbHandler.Mount(r)
 		tmplHandler.Mount(r)
 		exportHandler.Mount(r)
+		approvalHandler.Mount(r)
 	})
 
 	srv := &http.Server{

@@ -9,6 +9,8 @@ import { FreshnessBadge } from "~/components/FreshnessBadge";
 import { FreshnessPanel } from "~/components/FreshnessPanel";
 import { SharePanel } from "~/components/SharePanel";
 import { ExportMenu } from "~/components/ExportMenu";
+import { DocStatusBadge } from "~/components/DocStatusBadge";
+import { ApprovalPanel } from "~/components/ApprovalPanel";
 import { Input } from "~/components/ui/Input";
 import { Button } from "~/components/ui/Button";
 import { usePage, useUpdatePage } from "~/hooks/usePage";
@@ -192,6 +194,7 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
                 <Link2 size={10} /> Share
               </button>
               <ExportMenu spaceID={space.id} pageID={page.id} />
+              <DocStatusBadge status={page.doc_status ?? "draft"} />
               <PresenceBar presence={presence} selfClientID={selfClientID} />
             </div>
             {freshnessOpen ? (
@@ -213,12 +216,23 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
             onClose={() => setShareOpen(false)}
           />
 
+          {/* Approved pages are read-only until the editor explicitly
+              moves them back to draft. The banner above the editor
+              explains the locked state and links out to the right
+              panel for the workflow controls. */}
+          {page.doc_status === "approved" ? (
+            <div className="rounded border border-callout-success/40 bg-callout-success/10 px-2 py-1 text-[10px] text-callout-success">
+              This page is approved. Editing is locked — request a new
+              review to make changes.
+            </div>
+          ) : null}
+
           {/* editor */}
           <Editor
             pageId={page.id}
             workspaceId={page.workspace_id}
             initialContent={page.content}
-            readOnly={readOnly}
+            readOnly={readOnly || page.doc_status === "approved"}
             onSave={onSaveBody}
             onPresence={handlePresence}
           />
@@ -285,6 +299,14 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
             <SaveAsTemplateSection
               pageID={page.id}
               workspaceID={page.workspace_id}
+            />
+          </PanelSection>
+
+          <PanelSection title="Approval">
+            <ApprovalPanel
+              spaceID={space.id}
+              pageID={page.id}
+              docStatus={page.doc_status ?? "draft"}
             />
           </PanelSection>
 

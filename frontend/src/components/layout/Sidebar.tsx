@@ -12,11 +12,13 @@ import {
   AlertTriangle,
   Lock,
   BookOpen,
+  ClipboardCheck,
 } from "lucide-react";
 import clsx from "clsx";
 import { useSpaces, useCreateSpace } from "~/hooks/useSpaces";
 import { usePages } from "~/hooks/usePage";
 import { freshnessApi } from "~/api/freshness";
+import { approvalApi } from "~/api/approval";
 import type { Page, Space } from "~/api/types";
 import { Input } from "~/components/ui/Input";
 
@@ -29,6 +31,7 @@ interface SidebarProps {
   onOpenAnalytics: () => void;
   onOpenStale: () => void;
   onOpenTemplates: () => void;
+  onOpenApprovals: () => void;
   workspaceID: string;
   activeSpaceID: string | null;
   activePageID: string | null;
@@ -41,6 +44,7 @@ export function Sidebar({
   onOpenAnalytics,
   onOpenStale,
   onOpenTemplates,
+  onOpenApprovals,
   workspaceID,
   activeSpaceID,
   activePageID,
@@ -58,6 +62,15 @@ export function Sidebar({
   });
   const needsReview =
     stale.data?.filter((r) => r.status === "stale" || r.status === "warning").length ?? 0;
+
+  const reviewerID = typeof window !== "undefined" ? localStorage.getItem("docs_member_id") || "" : "";
+  const approvals = useQuery({
+    queryKey: ["approvals-pending", workspaceID, reviewerID],
+    queryFn: () => approvalApi.pending(workspaceID, reviewerID),
+    enabled: !!reviewerID,
+    staleTime: 5 * 60_000,
+  });
+  const pendingApprovals = approvals.data?.length ?? 0;
 
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col border-r border-border bg-surface">
@@ -89,6 +102,18 @@ export function Sidebar({
         >
           <BookOpen size={14} />
           Templates
+        </button>
+        <button
+          onClick={onOpenApprovals}
+          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-sm text-muted hover:bg-bg hover:text-text"
+        >
+          <ClipboardCheck size={14} />
+          <span className="flex-1 text-left">Approvals</span>
+          {pendingApprovals > 0 ? (
+            <span className="rounded bg-accent/30 px-1.5 py-px text-[10px] text-accent">
+              {pendingApprovals}
+            </span>
+          ) : null}
         </button>
         <button
           onClick={onOpenStale}

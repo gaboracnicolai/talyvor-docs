@@ -65,6 +65,11 @@ type Page struct {
 	VerifiedBy     *string    `json:"verified_by,omitempty"      db:"verified_by"`
 	StaleAfterDays int        `json:"stale_after_days"           db:"stale_after_days"`
 
+	// Approval workflow. Owned by internal/approval; page.Store does
+	// not include this column in its primary SELECT/UPDATE allow-list
+	// — approval is the single writer.
+	DocStatus string `json:"doc_status,omitempty" db:"doc_status"`
+
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }

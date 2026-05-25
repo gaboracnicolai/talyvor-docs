@@ -39,6 +39,7 @@ export interface Page {
   last_verified_at?: string;
   verified_by?: string;
   stale_after_days: number;
+  doc_status?: "draft" | "in_review" | "approved" | "rejected" | "archived";
   created_at: string;
   updated_at: string;
 }

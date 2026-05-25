@@ -9,6 +9,7 @@ import { PageViewPage } from "./pages/PageView";
 import { AnalyticsPage } from "./pages/Analytics";
 import { StalePagesPage } from "./pages/StalePages";
 import { TemplateGalleryPage } from "./pages/TemplateGallery";
+import { ApprovalInboxPage } from "./pages/ApprovalInbox";
 import { SharedPage } from "./pages/SharedPage";
 import type { Page, Space } from "./api/types";
 
@@ -22,7 +23,8 @@ type Route =
   | { kind: "page"; space: Space; pageID: string }
   | { kind: "analytics" }
   | { kind: "stale" }
-  | { kind: "templates" };
+  | { kind: "templates" }
+  | { kind: "approvals" };
 
 export function App() {
   // /s/:token is handled before any other routing — the public
@@ -44,6 +46,7 @@ export function App() {
   const goAnalytics = () => setRoute({ kind: "analytics" });
   const goStale = () => setRoute({ kind: "stale" });
   const goTemplates = () => setRoute({ kind: "templates" });
+  const goApprovals = () => setRoute({ kind: "approvals" });
 
   // Cmd/Ctrl+K toggles the global search modal. Bound at the App
   // level so the shortcut works regardless of focus.
@@ -64,6 +67,7 @@ export function App() {
     if (route.kind === "analytics") return [{ label: "Analytics" }];
     if (route.kind === "stale") return [{ label: "Needs review" }];
     if (route.kind === "templates") return [{ label: "Templates" }];
+    if (route.kind === "approvals") return [{ label: "Approvals" }];
     if (route.kind === "space") {
       return [{ label: route.space.name, onClick: () => goSpace(route.space) }];
     }
@@ -87,6 +91,7 @@ export function App() {
         onOpenAnalytics={goAnalytics}
         onOpenStale={goStale}
         onOpenTemplates={goTemplates}
+        onOpenApprovals={goApprovals}
         workspaceID={workspaceID}
         activeSpaceID={
           route.kind === "space" || route.kind === "page" ? route.space.id : null
@@ -143,6 +148,19 @@ export function App() {
             <TemplateGalleryPage
               workspaceID={workspaceID}
               onCreated={(spaceID, pageID) =>
+                setRoute({
+                  kind: "page",
+                  space: { id: spaceID, workspace_id: workspaceID, name: "" } as Space,
+                  pageID,
+                })
+              }
+            />
+          </main>
+        ) : route.kind === "approvals" ? (
+          <main className="flex-1 overflow-y-auto">
+            <ApprovalInboxPage
+              workspaceID={workspaceID}
+              onOpenPage={(spaceID, pageID) =>
                 setRoute({
                   kind: "page",
                   space: { id: spaceID, workspace_id: workspaceID, name: "" } as Space,

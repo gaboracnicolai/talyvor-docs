@@ -167,6 +167,7 @@ const columns = `id, space_id, workspace_id, parent_id, title, slug,
     linked_issues, ai_cost_usd,
     view_count, last_viewed_at,
     last_verified_at, verified_by, stale_after_days,
+    doc_status,
     created_at, updated_at`
 
 func scan(s interface{ Scan(...any) error }) (*model.Page, error) {
@@ -178,6 +179,7 @@ func scan(s interface{ Scan(...any) error }) (*model.Page, error) {
 		&p.LinkedIssues, &p.AICostUSD,
 		&p.ViewCount, &p.LastViewedAt,
 		&p.LastVerifiedAt, &p.VerifiedBy, &p.StaleAfterDays,
+		&p.DocStatus,
 		&p.CreatedAt, &p.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -642,6 +644,7 @@ func scanPlus(s interface{ Scan(...any) error }, extras ...any) (*model.Page, er
 		&p.LinkedIssues, &p.AICostUSD,
 		&p.ViewCount, &p.LastViewedAt,
 		&p.LastVerifiedAt, &p.VerifiedBy, &p.StaleAfterDays,
+		&p.DocStatus,
 		&p.CreatedAt, &p.UpdatedAt,
 	}
 	dest := append(pageDest, extras...)
