@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Check, Clock, Copy, Globe, RefreshCcw, Trash2, X } from "lucide-react";
 import { useCustomDomains } from "~/hooks/useCustomDomains";
 import { useSpaces } from "~/hooks/useSpaces";
+import { OfflineSettings } from "~/components/OfflineSettings";
 import type { CustomDomain } from "~/api/customdomain";
 
 interface SettingsProps {
@@ -97,6 +98,8 @@ export function DomainSettingsPage({ workspaceID }: SettingsProps) {
           ) : null}
         </div>
       </section>
+
+      <OfflineSettings />
     </div>
   );
 }

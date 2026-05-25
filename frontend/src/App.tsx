@@ -3,6 +3,7 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { Header } from "./components/layout/Header";
 import { AskAI } from "./components/AskAI";
 import { SearchModal } from "./components/SearchModal";
+import { OfflineIndicator } from "./components/OfflineIndicator";
 import { HomePage } from "./pages/Home";
 import { SpaceViewPage } from "./pages/SpaceView";
 import { PageViewPage } from "./pages/PageView";
@@ -87,7 +88,11 @@ export function App() {
       : "default";
 
   return (
-    <div className="flex h-screen w-full bg-bg text-text">
+    <div className="flex h-screen w-full flex-col bg-bg text-text">
+      {/* Always-mounted offline indicator. Self-hiding when online +
+          synced. */}
+      <OfflineIndicator />
+      <div className="flex flex-1 overflow-hidden">
       <Sidebar
         onHome={goHome}
         onOpenSpace={goSpace}
@@ -181,6 +186,7 @@ export function App() {
         ) : (
           <PageViewPage space={route.space} pageID={route.pageID} />
         )}
+      </div>
       </div>
     </div>
   );
