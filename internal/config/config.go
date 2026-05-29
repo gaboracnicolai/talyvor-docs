@@ -29,6 +29,11 @@ type Config struct {
 	// against. Phase 4 supports a single workspace per Docs
 	// instance; Phase 5 will iterate workspaces from the DB.
 	DefaultWorkspaceID string
+
+	// AppBaseURL is the public base URL used to build deep links in
+	// notification emails. Email itself is configured via the
+	// product-neutral EMAIL_* vars read by internal/email.
+	AppBaseURL string
 }
 
 func Load() (*Config, error) {
@@ -41,6 +46,7 @@ func Load() (*Config, error) {
 		LensURL:            os.Getenv("DOCS_LENS_URL"),
 		LensAPIKey:         os.Getenv("DOCS_LENS_API_KEY"),
 		DefaultWorkspaceID: getEnv("DOCS_DEFAULT_WORKSPACE", "default"),
+		AppBaseURL:         getEnv("DOCS_APP_BASE_URL", "http://localhost:4000"),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("%w: DOCS_DATABASE_URL", ErrMissingEnv)

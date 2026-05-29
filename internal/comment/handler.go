@@ -1,15 +1,31 @@
 package comment
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 )
 
-type Handler struct{ store *Store }
+// emailer is the subset of the notification dispatcher this handler calls.
+// Local interface; email is optional/opt-in and best-effort.
+type emailer interface {
+	PageMentioned(ctx context.Context, pageID, text, actorID string)
+}
+
+type Handler struct {
+	store   *Store
+	emailer emailer
+}
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
+
+// WithEmailer wires the email dispatcher. Optional/opt-in.
+func (h *Handler) WithEmailer(e emailer) *Handler {
+	h.emailer = e
+	return h
+}
 
 func (h *Handler) Mount(r chi.Router) {
 	r.Get("/spaces/{spaceID}/pages/{pageID}/comments", h.List)
@@ -75,6 +91,9 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if h.emailer != nil {
+		h.emailer.PageMentioned(r.Context(), c.PageID, c.Content, c.AuthorID)
+	}
 	writeJSON(w, http.StatusCreated, c)
 }
 
@@ -96,6 +115,9 @@ func (h *Handler) Reply(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	if h.emailer != nil {
+		h.emailer.PageMentioned(r.Context(), c.PageID, c.Content, c.AuthorID)
 	}
 	writeJSON(w, http.StatusCreated, c)
 }

@@ -1,0 +1,36 @@
+{{define "page.approval_requested"}}{{.Heading}}
+
+Your review is requested on "{{.Title}}".
+{{range .Lines}}
+{{.}}{{end}}
+{{if .CTAURL}}
+{{.CTALabel}}: {{.CTAURL}}{{end}}
+
+—
+Manage your email preferences: {{.PreferencesURL}}
+{{end}}
+
+{{define "page.mentioned"}}{{.Heading}}
+
+You were mentioned on "{{.Title}}".
+{{range .Lines}}
+{{.}}{{end}}
+{{if .CTAURL}}
+{{.CTALabel}}: {{.CTAURL}}{{end}}
+
+—
+Manage your email preferences: {{.PreferencesURL}}
+{{end}}
+
+{{define "page.stale_digest"}}{{.Heading}}
+
+These pages you own may be out of date:
+{{range .Items}}
+- {{.Title}} ({{.Detail}})
+  {{.URL}}{{end}}
+
+Open a page and hit Verify to mark it current.
+
+—
+Manage your email preferences: {{.PreferencesURL}}
+{{end}}

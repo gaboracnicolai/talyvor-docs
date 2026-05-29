@@ -31,6 +31,7 @@ import (
 	"github.com/talyvor/docs/internal/customdomain"
 	"github.com/talyvor/docs/internal/database"
 	"github.com/talyvor/docs/internal/db"
+	"github.com/talyvor/docs/internal/email"
 	"github.com/talyvor/docs/internal/export"
 	"github.com/talyvor/docs/internal/freshness"
 	"github.com/talyvor/docs/internal/importer"
@@ -38,6 +39,7 @@ import (
 	"github.com/talyvor/docs/internal/mcp"
 	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/model"
+	"github.com/talyvor/docs/internal/notification"
 	"github.com/talyvor/docs/internal/page"
 	"github.com/talyvor/docs/internal/pagelink"
 	"github.com/talyvor/docs/internal/pagelock"
@@ -68,6 +70,29 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+
+	// Email notifications (stale-page digest, approval-requested, mention).
+	// Strictly opt-in via EMAIL_ENABLED; when disabled, emailDispatcher stays
+	// nil and no hooks are wired, so Docs behaves exactly as before. Delivery
+	// is async + best-effort and never blocks or fails a request/job.
+	var (
+		emailQueue      *email.Queue
+		emailDispatcher *notification.Dispatcher
+	)
+	if emailCfg := email.LoadConfig(); emailCfg.Enabled {
+		renderer, rerr := email.NewRenderer()
+		if rerr != nil {
+			slog.Error("email disabled: renderer init failed", slog.String("err", rerr.Error()))
+		} else {
+			emailQueue = email.NewQueue(email.NewSender(emailCfg, logger), email.QueueOptions{Workers: 4}, logger)
+			emailQueue.Start(ctx)
+			emailDispatcher = notification.NewDispatcher(
+				pool, notification.NewRecipientStore(pool), notification.NewPreferenceStore(pool),
+				emailQueue, renderer, cfg.AppBaseURL, "Talyvor Docs", logger,
+			)
+			slog.Info("email notifications enabled", slog.String("from", emailCfg.From))
+		}
+	}
 
 	spaceStore := space.NewStore(pool)
 	linkStore := pagelink.NewStore(pool)
@@ -109,6 +134,9 @@ func main() {
 	// look" badges. The daily digest is currently log-only; future
 	// phases will ship Slack / email.
 	freshEngine := freshness.New(pageStore, linkStore, trackClient)
+	if emailDispatcher != nil {
+		freshEngine.WithDigester(emailDispatcher) // daily digest now emails owners
+	}
 	freshHandler := freshness.NewHandler(freshEngine)
 	freshEngine.Start(ctx, cfg.DefaultWorkspaceID)
 
@@ -125,6 +153,15 @@ func main() {
 	// rework. The page handler no longer owns comment routes.
 	commentStore := comment.NewStore(pool)
 	commentHandler := comment.NewHandler(commentStore)
+
+	// Wire email hooks only when a dispatcher exists. Guarded so we never pass
+	// a typed-nil into a handler's interface field (which would pass the
+	// nil-check and then panic on call).
+	if emailDispatcher != nil {
+		approvalHandler.WithEmailer(emailDispatcher)
+		commentHandler.WithEmailer(emailDispatcher)
+		pageHandler.WithEmailer(emailDispatcher)
+	}
 
 	// Changelog — specialised page type with auto-grouping from
 	// Track issues + RSS feed.
@@ -294,6 +331,14 @@ func main() {
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", slog.String("err", err.Error()))
+	}
+
+	// Drain queued emails so an in-flight notification isn't lost on a clean
+	// shutdown. Bounded so a stuck SMTP server can't hang exit.
+	if emailQueue != nil {
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		emailQueue.Shutdown(drainCtx)
+		drainCancel()
 	}
 }
 

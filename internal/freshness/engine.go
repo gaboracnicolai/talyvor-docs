@@ -66,10 +66,18 @@ type trackReader interface {
 	GetIssue(ctx context.Context, workspaceID, issueID string) (*trackintegration.IssueRef, error)
 }
 
+// staleDigester is the optional email sink for the daily digest. The
+// notification dispatcher satisfies it; when unset (email disabled) the digest
+// is log-only, exactly as before.
+type staleDigester interface {
+	StaleDigest(ctx context.Context, workspaceID string, stale []model.Page)
+}
+
 type FreshnessEngine struct {
-	pages pageReader
-	links linkReader
-	track trackReader
+	pages    pageReader
+	links    linkReader
+	track    trackReader
+	digester staleDigester
 }
 
 func New(pages pageReader, links linkReader, track trackReader) *FreshnessEngine {
@@ -78,6 +86,13 @@ func New(pages pageReader, links linkReader, track trackReader) *FreshnessEngine
 
 func newFreshnessEngine(pages pageReader, links linkReader, track trackReader) *FreshnessEngine {
 	return &FreshnessEngine{pages: pages, links: links, track: track}
+}
+
+// WithDigester wires the optional email digest sink. Opt-in: without it the
+// daily digest only logs a summary.
+func (e *FreshnessEngine) WithDigester(d staleDigester) *FreshnessEngine {
+	e.digester = d
+	return e
 }
 
 // GetStatus computes a single page's freshness report. Errors are
@@ -151,6 +166,17 @@ func (e *FreshnessEngine) SendStaleDigest(ctx context.Context, workspaceID strin
 		slog.String("workspace", workspaceID),
 		slog.Int("stale_pages", stale),
 		slog.Int("warning_pages", warning))
+
+	// Email the owners of stale pages, when an email sink is wired. Best-
+	// effort: a lookup failure is logged but never breaks the schedule.
+	if e.digester != nil {
+		pages, err := e.pages.GetStalePages(ctx, workspaceID)
+		if err != nil {
+			slog.Warn("freshness: digest email lookup failed", slog.String("err", err.Error()))
+		} else {
+			e.digester.StaleDigest(ctx, workspaceID, pages)
+		}
+	}
 	return nil
 }
 

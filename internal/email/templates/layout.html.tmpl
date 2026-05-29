@@ -1,0 +1,21 @@
+{{define "layout"}}<!doctype html>
+<html>
+<body style="margin:0;padding:0;background:#f4f5f7;font-family:-apple-system,Segoe UI,Arial,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:24px 0;">
+    <tr><td align="center">
+      <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border:1px solid #e2e4e9;border-radius:8px;overflow:hidden;">
+        <tr><td style="background:#6366f1;padding:16px 24px;color:#ffffff;font-size:16px;font-weight:bold;">{{.AppName}}</td></tr>
+        <tr><td style="padding:24px;color:#1f2329;font-size:14px;line-height:1.6;">
+          {{if .Heading}}<h1 style="font-size:18px;margin:0 0 14px;color:#1f2329;">{{.Heading}}</h1>{{end}}
+          {{.Content}}
+          {{if .CTAURL}}<p style="margin:24px 0 4px;"><a href="{{.CTAURL}}" style="background:#6366f1;color:#ffffff;text-decoration:none;padding:10px 18px;border-radius:6px;display:inline-block;font-size:14px;">{{.CTALabel}}</a></p>{{end}}
+        </td></tr>
+        <tr><td style="padding:16px 24px;border-top:1px solid #eef0f3;color:#8a909c;font-size:12px;line-height:1.5;">
+          You're receiving this because of your activity in {{.AppName}}.<br>
+          <a href="{{.PreferencesURL}}" style="color:#6366f1;">Manage your email preferences</a> to change which notifications you get.
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>{{end}}

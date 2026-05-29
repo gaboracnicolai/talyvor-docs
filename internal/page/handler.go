@@ -1,6 +1,7 @@
 package page
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,16 +14,30 @@ import (
 	"github.com/talyvor/docs/internal/model"
 )
 
+// emailer is the subset of the notification dispatcher this handler calls when
+// a page body is created/edited (to notify @mentioned users). Local interface;
+// optional/opt-in and best-effort.
+type emailer interface {
+	PageMentioned(ctx context.Context, pageID, text, actorID string)
+}
+
 // Comments moved to internal/comment in the threaded-comments
 // rework. The page handler retains the constructor signature for
 // backwards compatibility — pool is no longer used here but main
 // still hands it in for symmetry with other handlers.
 type Handler struct {
-	store *Store
+	store   *Store
+	emailer emailer
 }
 
 func NewHandler(store *Store, _ *pgxpool.Pool) *Handler {
 	return &Handler{store: store}
+}
+
+// WithEmailer wires the email dispatcher. Optional/opt-in.
+func (h *Handler) WithEmailer(e emailer) *Handler {
+	h.emailer = e
+	return h
 }
 
 // Mount registers every page-scoped route under /v1. Comments,
@@ -82,6 +97,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	metrics.PagesCreated.WithLabelValues(out.SpaceID).Inc()
+	if h.emailer != nil {
+		// Mentions in the new page body. Actor = creator (excluded inside).
+		h.emailer.PageMentioned(r.Context(), out.ID, out.ContentText, out.CreatedBy)
+	}
 	writeJSON(w, http.StatusCreated, out)
 }
 
@@ -136,6 +155,13 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		}
 		writeErr(w, http.StatusBadRequest, "UPDATE_FAILED", err.Error())
 		return
+	}
+	if h.emailer != nil {
+		// Only scan for mentions when the body actually changed.
+		if _, ok := updates["content"]; ok {
+			actor, _ := updates["updated_by"].(string)
+			h.emailer.PageMentioned(r.Context(), out.ID, out.ContentText, actor)
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -233,4 +259,3 @@ func (h *Handler) Stale(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, out)
 }
-

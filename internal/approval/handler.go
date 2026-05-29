@@ -1,6 +1,7 @@
 package approval
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -8,9 +9,26 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-type Handler struct{ store *Store }
+// emailer is the subset of the notification dispatcher this handler calls.
+// Local interface so approval stays free of a notification import; email is
+// optional and opt-in, and the call is best-effort (never fails the request).
+type emailer interface {
+	ApprovalRequested(ctx context.Context, pageID, workspaceID, requestedBy string, reviewers []string, message string)
+}
+
+type Handler struct {
+	store   *Store
+	emailer emailer
+}
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
+
+// WithEmailer wires the email dispatcher. Optional/opt-in: without it, approval
+// behaviour is unchanged.
+func (h *Handler) WithEmailer(e emailer) *Handler {
+	h.emailer = e
+	return h
+}
 
 func (h *Handler) Mount(r chi.Router) {
 	r.Post("/spaces/{spaceID}/pages/{pageID}/approval", h.Request)
@@ -57,14 +75,18 @@ func (h *Handler) Request(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if h.emailer != nil {
+		// Post-commit: the approval rows + page status are persisted.
+		h.emailer.ApprovalRequested(r.Context(), req.PageID, req.WorkspaceID, req.RequestedBy, req.Reviewers, req.Message)
+	}
 	writeJSON(w, http.StatusCreated, req)
 }
 
 // Latest returns the most recent approval request (if any) plus its
 // decisions — the shape the frontend ApprovalPanel reads.
 type latestResponse struct {
-	Request   *ApprovalRequest  `json:"request"`
-	Decisions []ReviewDecision  `json:"decisions"`
+	Request   *ApprovalRequest `json:"request"`
+	Decisions []ReviewDecision `json:"decisions"`
 }
 
 func (h *Handler) Latest(w http.ResponseWriter, r *http.Request) {

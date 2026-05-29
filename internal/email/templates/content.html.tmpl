@@ -1,0 +1,20 @@
+{{define "page.approval_requested"}}
+<p style="margin:0 0 12px;">Your review is requested on <strong>{{.Title}}</strong>.</p>
+{{range .Lines}}<p style="margin:0 0 8px;color:#5c6370;">{{.}}</p>{{end}}
+{{end}}
+
+{{define "page.mentioned"}}
+<p style="margin:0 0 12px;">You were mentioned on <strong>{{.Title}}</strong>.</p>
+{{range .Lines}}<p style="margin:0 0 8px;color:#5c6370;">{{.}}</p>{{end}}
+{{end}}
+
+{{define "page.stale_digest"}}
+<p style="margin:0 0 12px;">These pages you own haven't been updated in a while and may be out of date:</p>
+<table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+{{range .Items}}<tr><td style="padding:8px 0;border-bottom:1px solid #eef0f3;">
+  <a href="{{.URL}}" style="color:#6366f1;font-weight:600;text-decoration:none;">{{.Title}}</a>
+  <div style="color:#8a909c;font-size:12px;">{{.Detail}}</div>
+</td></tr>{{end}}
+</table>
+<p style="margin:14px 0 0;color:#5c6370;">Open a page and hit <em>Verify</em> to mark it current.</p>
+{{end}}
