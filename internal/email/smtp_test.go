@@ -66,6 +66,54 @@ func TestSMTPSender_SendInvokesTransportWithRecipientsAndMIME(t *testing.T) {
 	}
 }
 
+// headerLines returns the CRLF-split lines of the header block (before the
+// first blank line).
+func headerLines(raw string) []string {
+	block := raw
+	if i := strings.Index(raw, "\r\n\r\n"); i >= 0 {
+		block = raw[:i]
+	}
+	return strings.Split(block, "\r\n")
+}
+
+// TestBuildMIME_StripsHeaderInjectionFromSubject is an adversarial-sweep test:
+// the Subject is built from user-controlled data (page titles), so a CRLF in
+// that data must not inject extra SMTP headers (Bcc, fake bodies, …).
+func TestBuildMIME_StripsHeaderInjectionFromSubject(t *testing.T) {
+	s := &SMTPSender{from: "noreply@docs.example", fromName: "Docs"}
+	msg := Message{
+		To:       []string{"alice@example.com"},
+		Subject:  "Review requested: Spec\r\nBcc: attacker@evil.example\r\nX-Injected: yes",
+		TextBody: "body", HTMLBody: "<p>body</p>",
+	}
+	raw := string(s.buildMIME(msg))
+	for _, line := range headerLines(raw) {
+		if strings.HasPrefix(line, "Bcc:") || strings.HasPrefix(line, "X-Injected") {
+			t.Errorf("Subject header injection not neutralized — smuggled header line %q present\n%s", line, raw)
+		}
+	}
+	if !strings.Contains(raw, "Subject: Review requested: Spec") {
+		t.Errorf("sanitized subject text should still be present:\n%s", raw)
+	}
+}
+
+// TestBuildMIME_StripsHeaderInjectionFromRecipient is defense-in-depth even
+// though addresses are resolved server-side.
+func TestBuildMIME_StripsHeaderInjectionFromRecipient(t *testing.T) {
+	s := &SMTPSender{from: "noreply@docs.example", fromName: "Docs"}
+	msg := Message{
+		To:       []string{"alice@example.com\r\nBcc: attacker@evil.example"},
+		Subject:  "hi",
+		TextBody: "body", HTMLBody: "<p>body</p>",
+	}
+	raw := string(s.buildMIME(msg))
+	for _, line := range headerLines(raw) {
+		if strings.HasPrefix(line, "Bcc:") {
+			t.Errorf("recipient header injection not neutralized — %q present\n%s", line, raw)
+		}
+	}
+}
+
 func TestSMTPSender_SendNoRecipientsIsNoop(t *testing.T) {
 	called := false
 	s := &SMTPSender{host: "h", port: "25", from: "f@x.z",

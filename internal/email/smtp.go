@@ -61,13 +61,17 @@ func (s *SMTPSender) buildMIME(msg Message) []byte {
 	const boundary = "talyvor-boundary-7f3a9c2e1b"
 	var b bytes.Buffer
 
-	from := s.from
+	from := sanitizeHeader(s.from)
 	if s.fromName != "" {
-		from = fmt.Sprintf("%s <%s>", s.fromName, s.from)
+		from = fmt.Sprintf("%s <%s>", sanitizeHeader(s.fromName), sanitizeHeader(s.from))
+	}
+	to := make([]string, 0, len(msg.To))
+	for _, addr := range msg.To {
+		to = append(to, sanitizeHeader(addr))
 	}
 	fmt.Fprintf(&b, "From: %s\r\n", from)
-	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(msg.To, ", "))
-	fmt.Fprintf(&b, "Subject: %s\r\n", msg.Subject)
+	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(to, ", "))
+	fmt.Fprintf(&b, "Subject: %s\r\n", sanitizeHeader(msg.Subject))
 	b.WriteString("MIME-Version: 1.0\r\n")
 	fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=\"%s\"\r\n", boundary)
 	b.WriteString("\r\n")
@@ -85,4 +89,15 @@ func (s *SMTPSender) buildMIME(msg Message) []byte {
 
 	fmt.Fprintf(&b, "--%s--\r\n", boundary)
 	return b.Bytes()
+}
+
+// sanitizeHeader neutralizes SMTP header (CRLF) injection. Header values are
+// derived from user-controlled data (page titles, …), so any CR or LF — the
+// only bytes that can start a new header line — is replaced with a space
+// before the value is written into a header.
+func sanitizeHeader(v string) string {
+	if !strings.ContainsAny(v, "\r\n") {
+		return v
+	}
+	return strings.NewReplacer("\r", " ", "\n", " ").Replace(v)
 }

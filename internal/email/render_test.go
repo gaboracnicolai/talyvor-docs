@@ -72,3 +72,26 @@ func TestRenderer_EscapesUserSuppliedContent(t *testing.T) {
 		t.Error("user-supplied Title must be HTML-escaped")
 	}
 }
+
+// TestRenderer_EscapesDigestItemTitles pins escaping of page titles in the
+// stale digest — a user-controlled vector distinct from the single-event Title.
+func TestRenderer_EscapesDigestItemTitles(t *testing.T) {
+	r, _ := NewRenderer()
+	d := sampleData()
+	d.Items = []DigestItem{
+		{Title: `<img src=x onerror="alert(1)">`, Detail: "stale", URL: "https://docs.example.com/pages/x"},
+	}
+	html, text, err := r.Render(EventPageStaleDigest, d)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if strings.Contains(html, "<img src=x onerror=") {
+		t.Errorf("digest item title must be HTML-escaped:\n%s", html)
+	}
+	if !strings.Contains(html, "&lt;img") {
+		t.Errorf("expected escaped entity form in HTML digest:\n%s", html)
+	}
+	if !strings.Contains(text, `<img src=x onerror="alert(1)">`) {
+		t.Errorf("plain-text digest should carry the raw title verbatim:\n%s", text)
+	}
+}
