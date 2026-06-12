@@ -32,21 +32,39 @@ func (o QueueOptions) withDefaults() QueueOptions {
 	return o
 }
 
+// DeadLetterSink records a message the queue has permanently given up on (all
+// delivery attempts exhausted). Implementations are typically durable (a DB
+// table) so failed notifications are visible to an admin and never silently
+// vanish. Record runs in a worker goroutine off the request path.
+type DeadLetterSink interface {
+	Record(ctx context.Context, msg Message, attempts int, lastErr string) error
+}
+
 // Queue delivers messages asynchronously through a bounded worker pool. It
 // never blocks the caller: Enqueue is non-blocking and drops (with a log) when
 // the buffer is full, because notifications are best-effort and must never
 // hold up a core request. SMTP failures are retried with backoff inside the
-// workers, off the request path entirely.
+// workers, off the request path entirely. When all attempts are exhausted the
+// message is handed to the dead-letter sink (if configured) rather than lost.
 type Queue struct {
-	sender Sender
-	opts   QueueOptions
-	logger *slog.Logger
+	sender     Sender
+	opts       QueueOptions
+	logger     *slog.Logger
+	deadLetter DeadLetterSink
 
 	ch chan Message
 	wg sync.WaitGroup
 
 	mu      sync.RWMutex
 	closing bool
+}
+
+// WithDeadLetter attaches a dead-letter sink. Optional: with no sink, an
+// exhausted message is logged and dropped exactly as before (best-effort).
+// Returns the queue for chaining. Call before Start.
+func (q *Queue) WithDeadLetter(sink DeadLetterSink) *Queue {
+	q.deadLetter = sink
+	return q
 }
 
 func NewQueue(sender Sender, opts QueueOptions, logger *slog.Logger) *Queue {
@@ -95,15 +113,15 @@ func (q *Queue) Enqueue(msg Message) bool {
 }
 
 func (q *Queue) deliver(ctx context.Context, msg Message) {
+	var lastErr error
 	for attempt := 1; attempt <= q.opts.Attempts; attempt++ {
-		if err := q.sender.Send(ctx, msg); err == nil {
+		err := q.sender.Send(ctx, msg)
+		if err == nil {
 			return
-		} else if attempt == q.opts.Attempts {
-			q.logger.Warn("email: delivery failed, giving up",
-				slog.Int("attempts", attempt),
-				slog.String("subject", msg.Subject),
-				slog.String("err", err.Error()))
-			return
+		}
+		lastErr = err
+		if attempt == q.opts.Attempts {
+			break
 		}
 		timer := time.NewTimer(q.opts.Backoff * time.Duration(attempt))
 		select {
@@ -111,6 +129,19 @@ func (q *Queue) deliver(ctx context.Context, msg Message) {
 			timer.Stop()
 			return
 		case <-timer.C:
+		}
+	}
+
+	// All attempts exhausted. Log, then dead-letter so the failure is durable
+	// and visible rather than silently dropped.
+	q.logger.Warn("email: delivery failed, giving up",
+		slog.Int("attempts", q.opts.Attempts),
+		slog.String("subject", msg.Subject),
+		slog.String("err", lastErr.Error()))
+	if q.deadLetter != nil {
+		if derr := q.deadLetter.Record(ctx, msg, q.opts.Attempts, lastErr.Error()); derr != nil {
+			q.logger.Error("email: dead-letter record failed (notification truly lost)",
+				slog.String("subject", msg.Subject), slog.String("err", derr.Error()))
 		}
 	}
 }

@@ -78,13 +78,19 @@ func main() {
 	var (
 		emailQueue      *email.Queue
 		emailDispatcher *notification.Dispatcher
+		emailDeadLetter *notification.DeadLetterStore
 	)
 	if emailCfg := email.LoadConfig(); emailCfg.Enabled {
 		renderer, rerr := email.NewRenderer()
 		if rerr != nil {
 			slog.Error("email disabled: renderer init failed", slog.String("err", rerr.Error()))
 		} else {
-			emailQueue = email.NewQueue(email.NewSender(emailCfg, logger), email.QueueOptions{Workers: 4}, logger)
+			// Dead-letter sink: messages that exhaust all retry attempts are
+			// recorded durably (and surfaced via the admin list) rather than
+			// silently dropped.
+			emailDeadLetter = notification.NewDeadLetterStore(pool)
+			emailQueue = email.NewQueue(email.NewSender(emailCfg, logger), email.QueueOptions{Workers: 4}, logger).
+				WithDeadLetter(emailDeadLetter)
 			emailQueue.Start(ctx)
 			emailDispatcher = notification.NewDispatcher(
 				pool, notification.NewRecipientStore(pool), notification.NewPreferenceStore(pool),
@@ -161,6 +167,14 @@ func main() {
 		approvalHandler.WithEmailer(emailDispatcher)
 		commentHandler.WithEmailer(emailDispatcher)
 		pageHandler.WithEmailer(emailDispatcher)
+	}
+
+	// Notification admin surface (email dead-letter list). Wired with the
+	// dead-letter store only when email is enabled; otherwise the route
+	// returns an empty list.
+	notificationHandler := notification.NewHandler()
+	if emailDeadLetter != nil {
+		notificationHandler.WithDeadLetters(emailDeadLetter)
 	}
 
 	// Changelog — specialised page type with auto-grouping from
@@ -290,6 +304,7 @@ func main() {
 		commentHandler.Mount(r)
 		changelogHandler.Mount(r)
 		domainHandler.Mount(r)
+		notificationHandler.Mount(r)
 	})
 
 	// DomainRouter wraps the chi tree. Requests on a verified

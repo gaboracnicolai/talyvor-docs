@@ -3,6 +3,7 @@ package email
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -114,6 +115,69 @@ func TestQueue_GivesUpAfterMaxAttempts(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&rs.calls); got != 3 {
 		t.Fatalf("want exactly 3 attempts then give up, got %d", got)
+	}
+}
+
+// recordDLQ is a fake dead-letter sink that records what the queue gives up on.
+type recordDLQ struct {
+	mu       sync.Mutex
+	recorded []deadLetterRecord
+}
+type deadLetterRecord struct {
+	msg      Message
+	attempts int
+	lastErr  string
+}
+
+func (r *recordDLQ) Record(_ context.Context, m Message, attempts int, lastErr string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.recorded = append(r.recorded, deadLetterRecord{m, attempts, lastErr})
+	return nil
+}
+func (r *recordDLQ) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.recorded)
+}
+
+func TestQueue_DeadLettersAfterMaxAttempts(t *testing.T) {
+	rs := &recordSender{fn: func(int) error { return errors.New("smtp down") }}
+	dlq := &recordDLQ{}
+	q := NewQueue(rs, QueueOptions{Workers: 1, Capacity: 10, Attempts: 3, Backoff: time.Millisecond}, nil).
+		WithDeadLetter(dlq)
+	q.Start(context.Background())
+	q.Enqueue(Message{To: []string{"a@b.c"}, Subject: "x"})
+	q.Shutdown(ctx2s(t))
+
+	if dlq.count() != 1 {
+		t.Fatalf("want 1 dead-lettered message after exhausting attempts, got %d", dlq.count())
+	}
+	rec := dlq.recorded[0]
+	if rec.attempts != 3 {
+		t.Errorf("want attempts=3 recorded, got %d", rec.attempts)
+	}
+	if !strings.Contains(rec.lastErr, "smtp down") {
+		t.Errorf("want the last SMTP error captured, got %q", rec.lastErr)
+	}
+}
+
+func TestQueue_NoDeadLetterOnSuccess(t *testing.T) {
+	rs := &recordSender{fn: func(attempt int) error {
+		if attempt < 2 {
+			return errors.New("transient")
+		}
+		return nil
+	}}
+	dlq := &recordDLQ{}
+	q := NewQueue(rs, QueueOptions{Workers: 1, Capacity: 10, Attempts: 3, Backoff: time.Millisecond}, nil).
+		WithDeadLetter(dlq)
+	q.Start(context.Background())
+	q.Enqueue(Message{Subject: "x"})
+	q.Shutdown(ctx2s(t))
+
+	if dlq.count() != 0 {
+		t.Fatalf("a message that eventually succeeds must not be dead-lettered, got %d", dlq.count())
 	}
 }
 
