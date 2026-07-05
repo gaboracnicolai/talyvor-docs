@@ -136,12 +136,21 @@ func (d *DB) Workspace(t *testing.T) string {
 	return "ws_" + randToken(t)
 }
 
-// Member returns a synthetic member id for email. Docs has no membership table yet
-// (added by A0b PR-2, which upgrades this helper to seed a real workspace_members row);
-// for now the id is test-local — a test uses it as an author/actor.
+// Member seeds a REAL workspace_members row (the SEC-4 membership source, migration
+// 0014) for (wsID, email) with role 'member', and returns the generated member id. This
+// is what lets a cross-tenant test seed alice@/A and bob@/B and have the resolver
+// distinguish them. Idempotent per (workspace_id, email).
 func (d *DB) Member(t *testing.T, wsID, email string) string {
 	t.Helper()
-	return "mbr_" + randToken(t)
+	memberID := "mbr_" + randToken(t)
+	if _, err := d.Pool.Exec(context.Background(),
+		`INSERT INTO workspace_members (workspace_id, email, role, member_id)
+		 VALUES ($1, $2, 'member', $3)
+		 ON CONFLICT (workspace_id, email) DO UPDATE SET member_id = EXCLUDED.member_id`,
+		wsID, email, memberID); err != nil {
+		t.Fatalf("testutil: seed workspace_member: %v", err)
+	}
+	return memberID
 }
 
 // Page persists a space and a page inside it (real rows) in wsID, authored by

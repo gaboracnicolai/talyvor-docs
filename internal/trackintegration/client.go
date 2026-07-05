@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/talyvor/docs/internal/membership"
 )
 
 // IssueRef is the lean projection of a Track issue Docs needs. We
@@ -22,14 +24,14 @@ import (
 // fields we mirror, the more we have to keep in sync as Track
 // evolves.
 type IssueRef struct {
-	ID         string   `json:"id"`
-	Identifier string   `json:"identifier"`
-	Title      string   `json:"title"`
-	Status     string   `json:"status"`
-	Priority   int      `json:"priority"`
-	AssigneeID string   `json:"assignee_id,omitempty"`
-	AICostUSD  float64  `json:"ai_cost_usd"`
-	URL        string   `json:"url,omitempty"`
+	ID         string  `json:"id"`
+	Identifier string  `json:"identifier"`
+	Title      string  `json:"title"`
+	Status     string  `json:"status"`
+	Priority   int     `json:"priority"`
+	AssigneeID string  `json:"assignee_id,omitempty"`
+	AICostUSD  float64 `json:"ai_cost_usd"`
+	URL        string  `json:"url,omitempty"`
 	// Labels powers the changelog auto-grouping ("bug" → bugfix,
 	// "feature" → feature, etc.). Track may omit it; consumers must
 	// degrade gracefully.
@@ -48,11 +50,12 @@ type cachedRef struct {
 }
 
 type Client struct {
-	trackURL   string
-	apiKey     string
-	httpClient *http.Client
-	mu         sync.RWMutex
-	cache      map[string]cachedRef
+	trackURL         string
+	apiKey           string
+	memberSyncSecret string // DEDICATED secret for GET /v1/service/members — NOT apiKey
+	httpClient       *http.Client
+	mu               sync.RWMutex
+	cache            map[string]cachedRef
 }
 
 func New(trackURL, apiKey string) *Client {
@@ -64,6 +67,50 @@ func New(trackURL, apiKey string) *Client {
 		},
 		cache: map[string]cachedRef{},
 	}
+}
+
+// WithMemberSyncSecret sets the dedicated bearer for the member-sync pull (A0b PR-2).
+// Separate from apiKey — never reuse the issue-link key for roster access.
+func (c *Client) WithMemberSyncSecret(secret string) *Client {
+	c.memberSyncSecret = secret
+	return c
+}
+
+// MemberSyncConfigured reports whether the member-sync pull can run (both the Track URL
+// and the dedicated member-sync secret are set). Unset ⇒ the syncer skips member-sync.
+func (c *Client) MemberSyncConfigured() bool {
+	return c.trackURL != "" && c.memberSyncSecret != ""
+}
+
+// GetWorkspaceMembers pulls one workspace's roster from Track's GET /v1/service/members.
+// Authorized by the DEDICATED member-sync secret (never apiKey). Single page, limit=500 —
+// rosters are assumed < 500; a workspace exceeding that would need offset pagination
+// (deferred, flagged). A non-2xx (esp. 401) is an error; a genuinely-empty roster is
+// ([], nil) — the caller (reconcile) treats empty as skip-prune, so a transient error that
+// surfaces as an error here never reaches the pruning path.
+func (c *Client) GetWorkspaceMembers(ctx context.Context, workspaceID string) ([]membership.MemberRef, error) {
+	if !c.MemberSyncConfigured() {
+		return nil, errors.New("trackintegration: member sync not configured (need DOCS_TRACK_URL + DOCS_TRACK_MEMBER_SYNC_SECRET)")
+	}
+	q := url.Values{"workspace_id": {workspaceID}, "limit": {"500"}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.trackURL+"/v1/service/members?"+q.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.memberSyncSecret)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("trackintegration: member pull for %s: %s", workspaceID, resp.Status)
+	}
+	var out []membership.MemberRef
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("trackintegration: decode members: %w", err)
+	}
+	return out, nil
 }
 
 // IsConfigured returns true when both the URL and the API key are

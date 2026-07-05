@@ -36,6 +36,7 @@ import (
 	"github.com/talyvor/docs/internal/importer"
 	"github.com/talyvor/docs/internal/lensintegration"
 	"github.com/talyvor/docs/internal/mcp"
+	"github.com/talyvor/docs/internal/membership"
 	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/model"
 	"github.com/talyvor/docs/internal/page"
@@ -88,10 +89,14 @@ func main() {
 
 	// Track integration. Empty trackURL / API key gracefully
 	// no-op every endpoint and skip the cost syncer.
-	trackClient := trackintegration.New(cfg.TrackURL, cfg.TrackAPIKey)
+	trackClient := trackintegration.New(cfg.TrackURL, cfg.TrackAPIKey).
+		WithMemberSyncSecret(cfg.TrackMemberSyncSecret) // A0b PR-2: dedicated member-sync bearer
 	trackHandler := trackintegration.NewHandler(trackClient)
 	linkHandler := pagelink.NewHandler(linkStore)
-	trackSyncer := trackintegration.NewSyncer(trackClient, pageStore, linkStore, cfg.DefaultWorkspaceID)
+	// A0b PR-2: the syncer also full-pulls each workspace's roster into workspace_members.
+	membershipStore := membership.NewStore(pool)
+	trackSyncer := trackintegration.NewSyncer(trackClient, pageStore, linkStore, cfg.DefaultWorkspaceID).
+		WithMemberSync(trackClient, membershipStore)
 	go trackSyncer.Start(ctx, 15*time.Minute)
 
 	// Lens integration. Every AI call routes through here; an empty
