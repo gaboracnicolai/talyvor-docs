@@ -25,6 +25,13 @@ type Config struct {
 	LensURL     string
 	LensAPIKey  string
 
+	// TrackMemberSyncSecret authenticates the member-sync pull from Track's
+	// GET /v1/service/members (Authorization: Bearer). It is a DEDICATED secret,
+	// SEPARATE from TrackAPIKey (the issue-link integration) — never reuse them.
+	// Unset ⇒ member-sync is disabled (the syncer skips it), same posture as an
+	// unconfigured cost-sync. Server-side only; never browser-reachable.
+	TrackMemberSyncSecret string
+
 	// DefaultWorkspaceID is the tenant the cost syncer operates
 	// against. Phase 4 supports a single workspace per Docs
 	// instance; Phase 5 will iterate workspaces from the DB.
@@ -33,14 +40,15 @@ type Config struct {
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		ListenAddr:         getEnv("DOCS_LISTEN_ADDR", "0.0.0.0:4000"),
-		DatabaseURL:        os.Getenv("DOCS_DATABASE_URL"),
-		LogLevel:           getEnv("DOCS_LOG_LEVEL", "info"),
-		TrackURL:           os.Getenv("DOCS_TRACK_URL"),
-		TrackAPIKey:        os.Getenv("DOCS_TRACK_API_KEY"),
-		LensURL:            os.Getenv("DOCS_LENS_URL"),
-		LensAPIKey:         os.Getenv("DOCS_LENS_API_KEY"),
-		DefaultWorkspaceID: getEnv("DOCS_DEFAULT_WORKSPACE", "default"),
+		ListenAddr:            getEnv("DOCS_LISTEN_ADDR", "0.0.0.0:4000"),
+		DatabaseURL:           os.Getenv("DOCS_DATABASE_URL"),
+		LogLevel:              getEnv("DOCS_LOG_LEVEL", "info"),
+		TrackURL:              os.Getenv("DOCS_TRACK_URL"),
+		TrackAPIKey:           os.Getenv("DOCS_TRACK_API_KEY"),
+		TrackMemberSyncSecret: os.Getenv("DOCS_TRACK_MEMBER_SYNC_SECRET"),
+		LensURL:               os.Getenv("DOCS_LENS_URL"),
+		LensAPIKey:            os.Getenv("DOCS_LENS_API_KEY"),
+		DefaultWorkspaceID:    getEnv("DOCS_DEFAULT_WORKSPACE", "default"),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("%w: DOCS_DATABASE_URL", ErrMissingEnv)
