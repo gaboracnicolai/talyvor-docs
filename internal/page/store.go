@@ -571,12 +571,21 @@ func (s *Store) Verify(ctx context.Context, pageID, verifierID string) error {
 var ErrNotFound = errors.New("page: not found in an accessible workspace")
 
 // assertInWorkspaces returns ErrNotFound unless page id lives in one of wsIDs.
-func (s *Store) assertInWorkspaces(ctx context.Context, id string, wsIDs []string) error {
+// PageInWorkspaces reports whether page id lives in one of wsIDs — the scope check the collab
+// WebSocket entry point runs before opening a live-edit session (it can't use ErrNotFound
+// because a WS reject is an HTTP status, not a store error).
+func (s *Store) PageInWorkspaces(ctx context.Context, id string, wsIDs []string) (bool, error) {
 	var exists bool
-	if err := s.pool.QueryRow(ctx,
+	err := s.pool.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM pages WHERE id = $1 AND workspace_id = ANY($2))`,
 		id, wsIDs,
-	).Scan(&exists); err != nil {
+	).Scan(&exists)
+	return exists, err
+}
+
+func (s *Store) assertInWorkspaces(ctx context.Context, id string, wsIDs []string) error {
+	exists, err := s.PageInWorkspaces(ctx, id, wsIDs)
+	if err != nil {
 		return fmt.Errorf("page: scope check: %w", err)
 	}
 	if !exists {

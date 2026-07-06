@@ -9,6 +9,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
+
+	"github.com/talyvor/docs/internal/authz"
 )
 
 // upgrader keeps the default check off so the dev frontend (on
@@ -40,12 +42,26 @@ type LockGuard interface {
 	CanEdit(ctx context.Context, pageID, memberID string, isAdmin bool) (bool, string, error)
 }
 
+// PageScoper answers "is this page in the caller's workspace membership?" — the SEC-4 gate
+// the WS entry point runs before opening a session. internal/page.Store satisfies it.
+type PageScoper interface {
+	PageInWorkspaces(ctx context.Context, pageID string, wsIDs []string) (bool, error)
+}
+
 type Handler struct {
 	engine *OTEngine
 	guard  LockGuard
+	scope  PageScoper
 }
 
 func NewHandler(engine *OTEngine) *Handler { return &Handler{engine: engine} }
+
+// WithPageScope attaches the SEC-4 membership scope check. REQUIRED for a gated deployment:
+// with no scoper wired, ServeWS fails closed (rejects every session).
+func (h *Handler) WithPageScope(s PageScoper) *Handler {
+	h.scope = s
+	return h
+}
 
 // WithGuard attaches the lock-aware guard. When set, the WebSocket
 // loop drops "change" frames from clients that can't edit (a
@@ -60,15 +76,32 @@ func (h *Handler) WithGuard(g LockGuard) *Handler {
 // one client. Each pump owns one goroutine; the engine sees an
 // abstract send channel and never touches the WebSocket directly.
 //
-// URL pattern: /v1/collab/{pageID}/ws?client_id=&member_id=&member_name=
+// SEC-4: this route lives inside the /v1 boundary, so gatewayauth (transit proof) and authz
+// (membership) have already run. The caller's member id comes from the VERIFIED gateway
+// context, never a ?member_id= query param (retired, like the REST X-Member-Id), and the page
+// MUST be in the caller's workspace membership or the session is refused BEFORE the upgrade.
+//
+// URL pattern: /v1/collab/{pageID}/ws?client_id=&member_name=
 func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	pageID := chi.URLParam(r, "pageID")
 	q := r.URL.Query()
 	clientID := q.Get("client_id")
-	memberID := q.Get("member_id")
-	memberName := q.Get("member_name")
+	memberName := q.Get("member_name") // display label only — not an identity
 	if pageID == "" || clientID == "" {
 		http.Error(w, `{"error":"page_id and client_id required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// SEC-4 gate: verified actor + page-in-membership, checked BEFORE the upgrade so a reject
+	// is a clean HTTP 404, not a half-open socket. Fail closed if no scoper is wired.
+	memberID := authz.ActorOrEmpty(r.Context())
+	inScope := false
+	if h.scope != nil {
+		ok, sErr := h.scope.PageInWorkspaces(r.Context(), pageID, authz.WorkspaceIDs(r.Context()))
+		inScope = sErr == nil && ok
+	}
+	if !inScope {
+		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return
 	}
 
