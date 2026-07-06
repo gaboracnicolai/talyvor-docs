@@ -12,10 +12,15 @@ import (
 
 	"github.com/talyvor/docs/internal/ai"
 	"github.com/talyvor/docs/internal/analytics"
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/freshness"
 	"github.com/talyvor/docs/internal/model"
 	"github.com/talyvor/docs/internal/page"
 )
+
+// testWS is the workspace every fake object resolves to; rpc() injects a verified membership
+// for it so tool-logic tests exercise the authorized path through the SEC-4 authz chokepoint.
+const testWS = "ws-1"
 
 // ─── Fakes ────────────────────────────────────────────────
 
@@ -29,10 +34,17 @@ type fakePages struct {
 }
 
 func (f *fakePages) GetByID(_ context.Context, id string) (*model.Page, error) {
-	return f.byID[id], nil
+	p := f.byID[id]
+	if p != nil && p.WorkspaceID == "" {
+		p.WorkspaceID = testWS // so the SEC-4 chokepoint resolves the page's workspace
+	}
+	return p, nil
 }
 func (f *fakePages) GetBySlug(_ context.Context, _, _ string) (*model.Page, error) {
 	for _, p := range f.byID {
+		if p.WorkspaceID == "" {
+			p.WorkspaceID = testWS
+		}
 		return p, nil
 	}
 	return nil, nil
@@ -69,7 +81,13 @@ type fakeSpaces struct {
 }
 
 func (f *fakeSpaces) GetByID(_ context.Context, id string) (*model.Space, error) {
-	return f.byID[id], nil
+	if sp := f.byID[id]; sp != nil {
+		if sp.WorkspaceID == "" {
+			sp.WorkspaceID = testWS
+		}
+		return sp, nil
+	}
+	return &model.Space{ID: id, WorkspaceID: testWS}, nil // default: a space in the test workspace
 }
 func (f *fakeSpaces) List(_ context.Context, _ string) ([]model.Space, error) {
 	return f.list, nil
@@ -114,7 +132,10 @@ func rpc(method string, params any, id int) *http.Request {
 	})
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	return req
+	// SEC-4: tools now pass through the authz chokepoint, so exercise the authorized path —
+	// a verified caller who is a member of testWS (mirrors the gateway+authz middleware).
+	ctx := authz.WithMemberships(req.Context(), "agent@test", []authz.Membership{{WorkspaceID: testWS, MemberID: "m-agent"}})
+	return req.WithContext(ctx)
 }
 
 func decodeResp(t *testing.T, rr *httptest.ResponseRecorder) map[string]any {
@@ -316,7 +337,7 @@ func TestGetSpaceTree_ReturnsNested(t *testing.T) {
 	}
 }
 
-func TestUnknownTool_ReturnsMethodNotFound(t *testing.T) {
+func TestUnknownTool_DeniedFailClosed(t *testing.T) {
 	srv := newTestServer(t, &fakePages{}, &fakeSpaces{}, &fakeAnalytics{}, &fakeAI{}, nil)
 	rr := httptest.NewRecorder()
 	srv.HandleRPC(rr, rpc("tools/call", map[string]any{"name": "no_such_tool"}, 1))
@@ -325,16 +346,19 @@ func TestUnknownTool_ReturnsMethodNotFound(t *testing.T) {
 	if errObj == nil {
 		t.Fatalf("expected error, got %+v", resp)
 	}
-	if int(errObj["code"].(float64)) != -32601 {
-		t.Fatalf("expected -32601 (method not found), got %v", errObj["code"])
+	// SEC-4: an unmapped tool is denied at the authz chokepoint (fail-closed, ws unresolved)
+	// BEFORE the dispatcher's method-not-found — an unauthorized caller can't probe tool existence.
+	if int(errObj["code"].(float64)) != -32001 {
+		t.Fatalf("expected -32001 (unauthorized, fail-closed), got %v", errObj["code"])
 	}
 }
 
 func TestMissingRequiredParam_ReturnsInvalidParams(t *testing.T) {
 	srv := newTestServer(t, &fakePages{}, &fakeSpaces{}, &fakeAnalytics{}, &fakeAI{}, nil)
-	// search_docs requires query + workspace_id.
+	// search_docs requires query + workspace_id. Supply an AUTHORIZED workspace_id (so the
+	// chokepoint passes) but omit query → the tool's own param validation returns invalid-params.
 	rr := httptest.NewRecorder()
-	srv.HandleRPC(rr, rpc("tools/call", map[string]any{"name": "search_docs", "arguments": map[string]any{}}, 1))
+	srv.HandleRPC(rr, rpc("tools/call", map[string]any{"name": "search_docs", "arguments": map[string]any{"workspace_id": testWS}}, 1))
 	resp := decodeResp(t, rr)
 	errObj, _ := resp["error"].(map[string]any)
 	if errObj == nil {
