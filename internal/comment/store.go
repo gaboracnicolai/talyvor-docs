@@ -75,11 +75,14 @@ func scan(s interface{ Scan(...any) error }) (*Comment, error) {
 
 // ─── Create / Reply ─────────────────────────────────
 
-// Create inserts a top-level comment. The thread_id field is
-// derived inline from the freshly-allocated row id — Postgres
-// can't reference DEFAULT in a RETURNING clause, so we let the row
-// hand back its id and seed thread_id atomically via a single
-// statement using a CTE.
+// Create inserts a top-level comment whose thread_id equals its own id (a top-level
+// comment is its own thread root). The id is generated up front in a CTE and used for
+// BOTH id and thread_id in a single atomic INSERT ... SELECT. This replaces an earlier
+// `WITH inserted AS (INSERT ...) UPDATE page_comments ... FROM inserted` form that was
+// doubly broken on real Postgres — an ambiguous `id` in RETURNING (42702), and, even once
+// disambiguated, the UPDATE could not see the CTE-inserted row (same snapshot) so it
+// matched 0 rows. pgxmock never executed the SQL, so both faults were invisible until the
+// real-PG harness ran it.
 func (s *Store) Create(ctx context.Context, pageID string, blockID *string, authorID, authorName, content string) (*Comment, error) {
 	if s.pool == nil {
 		return nil, errors.New("comment: no pool")
@@ -91,15 +94,10 @@ func (s *Store) Create(ctx context.Context, pageID string, blockID *string, auth
 		return nil, errors.New("comment: author_id required")
 	}
 	row := s.pool.QueryRow(ctx,
-		`WITH inserted AS (
-            INSERT INTO page_comments (page_id, block_id, author_id, author_name, content)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id
-        )
-        UPDATE page_comments
-        SET thread_id = inserted.id
-        FROM inserted
-        WHERE page_comments.id = inserted.id
+		`WITH new_id AS (SELECT gen_random_uuid()::text AS id)
+        INSERT INTO page_comments (id, page_id, block_id, thread_id, author_id, author_name, content)
+        SELECT new_id.id, $1, $2, new_id.id, $3, $4, $5
+        FROM new_id
         RETURNING `+cols,
 		pageID, blockID, authorID, authorName, content,
 	)
