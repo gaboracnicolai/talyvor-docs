@@ -33,6 +33,8 @@ type ctxKey struct{}
 type authCtx struct {
 	email       string
 	memberships []Membership
+	authWS      string // set by WithAuthorized after a per-call workspace authorization (MCP chokepoint)
+	authMember  string
 }
 
 // Memberships returns the verified caller's full membership set. ok=false when the request
@@ -116,6 +118,50 @@ func WorkspaceOrEmpty(ctx context.Context) string {
 func ActorOrEmpty(ctx context.Context) string {
 	m, _ := SingleMemberID(ctx)
 	return m
+}
+
+// AuthorizeWorkspace authorizes a CALLER-SUPPLIED workspace id (a JSON-RPC tool arg, or one
+// resolved from the object a tool touches) against the verified caller's memberships. Returns
+// the matching Membership (so the caller gets the resolved member id as the actor) and ok=false
+// when the caller is not a member. Fail-closed: an empty id, or no memberships in context (the
+// request never passed the boundary), → ok=false. This is the MCP arg-trust cure — the workspace
+// acted on is authorized against membership, never trusted from the arg.
+func AuthorizeWorkspace(ctx context.Context, workspaceID string) (Membership, bool) {
+	if workspaceID == "" {
+		return Membership{}, false
+	}
+	ms, ok := Memberships(ctx)
+	if !ok {
+		return Membership{}, false
+	}
+	for _, m := range ms {
+		if m.WorkspaceID == workspaceID {
+			return m, true
+		}
+	}
+	return Membership{}, false
+}
+
+// WithAuthorized returns a context carrying an authorized workspace + the caller's member id
+// there — the MCP chokepoint installs it after AuthorizeWorkspace passes, so tools attribute
+// writes (created_by/updated_by/verified_by) to the verified actor, not a client-supplied arg.
+func WithAuthorized(ctx context.Context, workspaceID, memberID string) context.Context {
+	base, _ := ctx.Value(ctxKey{}).(*authCtx)
+	next := authCtx{}
+	if base != nil {
+		next = *base
+	}
+	next.authWS, next.authMember = workspaceID, memberID
+	return context.WithValue(ctx, ctxKey{}, &next)
+}
+
+// AuthorizedMember returns the resolved actor from the last AuthorizeWorkspace. ok=false if none.
+func AuthorizedMember(ctx context.Context) (string, bool) {
+	ac, ok := ctx.Value(ctxKey{}).(*authCtx)
+	if !ok || ac.authMember == "" {
+		return "", false
+	}
+	return ac.authMember, true
 }
 
 // WithMemberships returns a context carrying a verified identity + memberships. The middleware

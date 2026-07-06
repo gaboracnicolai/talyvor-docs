@@ -227,11 +227,18 @@ func main() {
 	})
 	r.Handle("/metrics", metrics.Handler())
 
-	// MCP server is a public surface (no auth) — agent clients
-	// connect over JSON-RPC and SSE. Live on the top-level router
-	// so the /v1 group's middleware doesn't intercept it.
-	r.Post("/mcp", mcpServer.HandleRPC)
-	r.Get("/mcp/sse", mcpServer.HandleSSE)
+	// MCP (SEC-4 model b, mirroring Track): behind the SAME gatewayauth + authz chain as /v1.
+	// A tool call reaches dispatch only with a valid transit proof + verified identity; the
+	// authz chokepoint in callTool then authorizes the acted-on workspace (a JSON-RPC arg, or
+	// resolved from the touched object) against the caller's memberships. Agents reach this
+	// through the gateway carrying the user's identity — no longer a public no-auth surface.
+	r.Group(func(r chi.Router) {
+		mcpExempt := func(string) bool { return false }
+		r.Use(gatewayauth.Middleware(cfg.GatewayAuthSecret, mcpExempt))
+		r.Use(authz.Middleware(authz.NewPGResolver(pool), mcpExempt))
+		r.Post("/mcp", mcpServer.HandleRPC)
+		r.Get("/mcp/sse", mcpServer.HandleSSE)
+	})
 
 	r.Route("/v1", func(r chi.Router) {
 		// SEC-4 Layer 1: transit-proof + membership on EVERY /v1 route except the public

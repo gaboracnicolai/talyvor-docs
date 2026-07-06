@@ -12,6 +12,7 @@ import (
 
 	"github.com/talyvor/docs/internal/ai"
 	"github.com/talyvor/docs/internal/analytics"
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/freshness"
 	"github.com/talyvor/docs/internal/model"
 	"github.com/talyvor/docs/internal/page"
@@ -109,6 +110,7 @@ const (
 	errMethodNotFound = -32601
 	errInvalidParams  = -32602
 	errInternal       = -32603
+	errUnauthorized   = -32001 // SEC-4: not a member of / not authorized for the acted-on workspace
 )
 
 func writeRPC(w http.ResponseWriter, resp rpcResponse) {
@@ -344,6 +346,21 @@ func required(names ...string) func(map[string]any) {
 // ─── Tool dispatch ───────────────────────────────────────
 
 func (s *Server) callTool(ctx context.Context, name string, args map[string]any) (any, error) {
+	// SEC-4 authz chokepoint (mirrors Track's handleToolsCall): resolve the acted-on workspace —
+	// from the workspace_id arg, or from the object the tool touches — and authorize it against
+	// the VERIFIED caller's memberships BEFORE dispatch. Fail-closed by construction: an unmapped
+	// tool, a missing/nonexistent object, or a non-member all yield deny — a tool never dispatches
+	// on an unauthorized workspace, and a new tool cannot be an open surface.
+	ws, err := s.toolWorkspace(ctx, name, args)
+	if err != nil || ws == "" {
+		return nil, &rpcError{Code: errUnauthorized, Message: "not authorized for the requested workspace"}
+	}
+	m, ok := authz.AuthorizeWorkspace(ctx, ws)
+	if !ok {
+		return nil, &rpcError{Code: errUnauthorized, Message: "not a member of this workspace"}
+	}
+	ctx = authz.WithAuthorized(ctx, m.WorkspaceID, m.MemberID)
+
 	switch name {
 	case "search_docs":
 		return s.toolSearchDocs(ctx, args)
@@ -367,6 +384,52 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 		return s.toolGetSpaceTree(ctx, args)
 	}
 	return nil, &rpcError{Code: errMethodNotFound, Message: "unknown tool: " + name}
+}
+
+// toolWorkspace resolves the workspace a tool call acts on, for the authz chokepoint. Direct
+// (the workspace_id arg) for workspace-keyed tools; resolved from the touched object's workspace
+// for page/space-keyed tools. Returns "" for an unmapped tool or an unresolvable object so the
+// chokepoint denies (fail-closed).
+func (s *Server) toolWorkspace(ctx context.Context, name string, args map[string]any) (string, error) {
+	switch name {
+	case "search_docs", "ask_docs", "get_stale_pages", "get_space_tree":
+		return stringArg(args, "workspace_id", ""), nil
+	case "create_page", "list_pages":
+		return s.spaceWorkspace(ctx, stringArg(args, "space_id", ""))
+	case "update_page", "verify_page", "get_page_analytics":
+		return s.pageWorkspace(ctx, stringArg(args, "page_id", ""))
+	case "get_page":
+		if pid := stringArg(args, "page_id", ""); pid != "" {
+			return s.pageWorkspace(ctx, pid)
+		}
+		return s.spaceWorkspace(ctx, stringArg(args, "space_id", ""))
+	}
+	return "", nil // unmapped tool → deny
+}
+
+// pageWorkspace returns the workspace a page belongs to (to authorize a page-keyed tool). A
+// missing/nonexistent page (or a lookup error) yields "" → deny — never a full-table leak.
+func (s *Server) pageWorkspace(ctx context.Context, pageID string) (string, error) {
+	if pageID == "" {
+		return "", nil
+	}
+	p, err := s.deps.pages.GetByID(ctx, pageID)
+	if err != nil || p == nil {
+		return "", nil
+	}
+	return p.WorkspaceID, nil
+}
+
+// spaceWorkspace returns the workspace a space belongs to (to authorize a space-keyed tool).
+func (s *Server) spaceWorkspace(ctx context.Context, spaceID string) (string, error) {
+	if spaceID == "" {
+		return "", nil
+	}
+	sp, err := s.deps.spaces.GetByID(ctx, spaceID)
+	if err != nil || sp == nil {
+		return "", nil
+	}
+	return sp.WorkspaceID, nil
 }
 
 // requireStrings ensures every argument named in `names` is present
@@ -647,12 +710,12 @@ func (s *Server) toolAskDocs(ctx context.Context, args map[string]any) (any, err
 }
 
 type stalePageOut struct {
-	PageID         string `json:"page_id"`
-	Title          string `json:"title"`
-	Status         string `json:"status"`
-	DaysSinceEdit  int    `json:"days_since_edit"`
-	Reason         string `json:"reason,omitempty"`
-	SpaceID        string `json:"space_id"`
+	PageID        string `json:"page_id"`
+	Title         string `json:"title"`
+	Status        string `json:"status"`
+	DaysSinceEdit int    `json:"days_since_edit"`
+	Reason        string `json:"reason,omitempty"`
+	SpaceID       string `json:"space_id"`
 }
 
 func (s *Server) toolGetStalePages(ctx context.Context, args map[string]any) (any, error) {
@@ -722,9 +785,9 @@ func (s *Server) toolGetPageAnalytics(ctx context.Context, args map[string]any) 
 }
 
 type spaceTreeOut struct {
-	SpaceID string         `json:"space_id"`
-	Name    string         `json:"name"`
-	Icon    string         `json:"icon"`
+	SpaceID string          `json:"space_id"`
+	Name    string          `json:"name"`
+	Icon    string          `json:"icon"`
 	Pages   []spaceTreePage `json:"pages"`
 }
 
