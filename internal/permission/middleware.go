@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/talyvor/docs/internal/authz"
 )
 
 // ResourceResolver fetches a resourceContext for the resource the
@@ -29,7 +30,7 @@ func RequireAccess(store *Store, resolver ResourceResolver, minAccess AccessLeve
 				writeForbidden(w)
 				return
 			}
-			memberID := r.Header.Get("X-Member-Id")
+			memberID := authz.ActorOrEmpty(r.Context())
 			level, err := store.Check(r.Context(), memberID, res)
 			if err != nil {
 				writeForbidden(w)
@@ -75,10 +76,10 @@ type SpaceMeta struct {
 }
 
 type PageMeta struct {
-	SpaceID         string
-	SpaceCreatedBy  string
-	SpacePrivate    bool
-	PageCreatedBy   string
+	SpaceID        string
+	SpaceCreatedBy string
+	SpacePrivate   bool
+	PageCreatedBy  string
 }
 
 // PageResolverFromParam joins the page + its space so the page's

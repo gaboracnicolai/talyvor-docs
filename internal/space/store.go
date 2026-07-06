@@ -186,3 +186,49 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	_, err := s.pool.Exec(ctx, `DELETE FROM spaces WHERE id = $1`, id)
 	return err
 }
+
+// ─── SEC-4 Layer 2: workspace-scoped by-id ops ─────────────
+//
+// The authed /v1 space handler uses these; a space in a workspace the caller doesn't belong
+// to is invisible → ErrNotFound → 404. wsIDs comes from verified membership (Layer 1).
+
+// ErrNotFound signals a by-id op resolved to no space in the caller's workspaces.
+var ErrNotFound = errors.New("space: not found in an accessible workspace")
+
+func (s *Store) assertInWorkspaces(ctx context.Context, id string, wsIDs []string) error {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM spaces WHERE id = $1 AND workspace_id = ANY($2))`,
+		id, wsIDs,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("space: scope check: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetByIDInWorkspaces reads a space only if it lives in one of the caller's workspaces.
+func (s *Store) GetByIDInWorkspaces(ctx context.Context, id string, wsIDs []string) (*model.Space, error) {
+	if err := s.assertInWorkspaces(ctx, id, wsIDs); err != nil {
+		return nil, err
+	}
+	return s.GetByID(ctx, id)
+}
+
+// UpdateInWorkspaces mutates a space only if it lives in one of the caller's workspaces.
+func (s *Store) UpdateInWorkspaces(ctx context.Context, id string, updates map[string]any, wsIDs []string) (*model.Space, error) {
+	if err := s.assertInWorkspaces(ctx, id, wsIDs); err != nil {
+		return nil, err
+	}
+	return s.Update(ctx, id, updates)
+}
+
+// DeleteInWorkspaces deletes a space only if it lives in one of the caller's workspaces.
+func (s *Store) DeleteInWorkspaces(ctx context.Context, id string, wsIDs []string) error {
+	if err := s.assertInWorkspaces(ctx, id, wsIDs); err != nil {
+		return err
+	}
+	return s.Delete(ctx, id)
+}

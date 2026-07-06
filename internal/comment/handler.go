@@ -2,9 +2,12 @@ package comment
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/talyvor/docs/internal/authz"
 )
 
 type Handler struct{ store *Store }
@@ -31,14 +34,23 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// memberFromReq prefers the X-Member-Id header, falls back to the
-// value the body supplied. Header is preferred because it can't be
-// spoofed by a malicious client editor.
+// memberFromReq resolves the actor from the SEC-4 verified identity (never a spoofable
+// header), falling back to the body-supplied value only when no verified actor is present
+// (e.g. tests without the middleware chain).
 func memberFromReq(r *http.Request, fallback string) string {
-	if v := r.Header.Get("X-Member-Id"); v != "" {
+	if v := authz.ActorOrEmpty(r.Context()); v != "" {
 		return v
 	}
 	return fallback
+}
+
+// scoped404 maps a store scope miss (comment's page not in the caller's workspaces) to 404.
+func scoped404(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return true
+	}
+	return false
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
@@ -90,9 +102,12 @@ func (h *Handler) Reply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	c, err := h.store.Reply(r.Context(),
+	c, err := h.store.ReplyInWorkspaces(r.Context(),
 		chi.URLParam(r, "id"),
-		memberFromReq(r, in.AuthorID), in.AuthorName, in.Content)
+		memberFromReq(r, in.AuthorID), in.AuthorName, in.Content, authz.WorkspaceIDs(r.Context()))
+	if scoped404(w, err) {
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -112,7 +127,11 @@ func (h *Handler) Resolve(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "resolver required")
 		return
 	}
-	if err := h.store.Resolve(r.Context(), chi.URLParam(r, "id"), resolver); err != nil {
+	err := h.store.ResolveInWorkspaces(r.Context(), chi.URLParam(r, "id"), resolver, authz.WorkspaceIDs(r.Context()))
+	if scoped404(w, err) {
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -120,7 +139,11 @@ func (h *Handler) Resolve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Unresolve(w http.ResponseWriter, r *http.Request) {
-	if err := h.store.Unresolve(r.Context(), chi.URLParam(r, "id")); err != nil {
+	err := h.store.UnresolveInWorkspaces(r.Context(), chi.URLParam(r, "id"), authz.WorkspaceIDs(r.Context()))
+	if scoped404(w, err) {
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -128,12 +151,16 @@ func (h *Handler) Unresolve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
-	requester := r.Header.Get("X-Member-Id")
+	requester := authz.ActorOrEmpty(r.Context())
 	if requester == "" {
-		writeErr(w, http.StatusBadRequest, "X-Member-Id required")
+		writeErr(w, http.StatusBadRequest, "verified identity required")
 		return
 	}
-	if err := h.store.Delete(r.Context(), chi.URLParam(r, "id"), requester); err != nil {
+	err := h.store.DeleteInWorkspaces(r.Context(), chi.URLParam(r, "id"), requester, authz.WorkspaceIDs(r.Context()))
+	if scoped404(w, err) {
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}

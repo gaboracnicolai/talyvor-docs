@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/talyvor/docs/internal/authz"
 )
 
 type Handler struct{ store *Store }
@@ -42,11 +43,11 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.PageID = chi.URLParam(r, "pageID")
-	if in.WorkspaceID == "" {
-		in.WorkspaceID = r.Header.Get("X-Talyvor-Workspace")
+	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
+		in.WorkspaceID = ws
 	}
 	if in.CreatedBy == "" {
-		in.CreatedBy = r.Header.Get("X-Member-Id")
+		in.CreatedBy = authz.ActorOrEmpty(r.Context())
 	}
 	out, err := h.store.CreateEntry(r.Context(), in)
 	if err != nil {
@@ -127,10 +128,10 @@ func (h *Handler) Generate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	if in.WorkspaceID == "" {
-		in.WorkspaceID = r.Header.Get("X-Talyvor-Workspace")
+	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
+		in.WorkspaceID = ws
 	}
-	createdBy := r.Header.Get("X-Member-Id")
+	createdBy := authz.ActorOrEmpty(r.Context())
 	out, err := h.store.GenerateFromIssues(r.Context(),
 		in.WorkspaceID, chi.URLParam(r, "pageID"), createdBy,
 		in.IssueIDs, in.Version)

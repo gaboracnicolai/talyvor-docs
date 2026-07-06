@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/permission"
 )
 
@@ -79,8 +80,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	if in.WorkspaceID == "" {
-		in.WorkspaceID = r.Header.Get("X-Talyvor-Workspace")
+	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
+		in.WorkspaceID = ws
 	}
 	if in.Access == "" {
 		in.Access = permission.AccessView
@@ -93,7 +94,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	link, err := h.store.Create(r.Context(),
 		chi.URLParam(r, "pageID"),
 		in.WorkspaceID,
-		r.Header.Get("X-Member-Id"),
+		authz.ActorOrEmpty(r.Context()),
 		in.Access,
 		expiresAt,
 		in.Password,

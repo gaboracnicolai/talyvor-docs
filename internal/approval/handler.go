@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/talyvor/docs/internal/authz"
 )
 
 type Handler struct{ store *Store }
@@ -44,10 +45,10 @@ func (h *Handler) Request(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	if in.WorkspaceID == "" {
-		in.WorkspaceID = r.Header.Get("X-Talyvor-Workspace")
+	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
+		in.WorkspaceID = ws
 	}
-	requestedBy := r.Header.Get("X-Member-Id")
+	requestedBy := authz.ActorOrEmpty(r.Context())
 	if requestedBy == "" {
 		requestedBy = "user"
 	}
@@ -63,8 +64,8 @@ func (h *Handler) Request(w http.ResponseWriter, r *http.Request) {
 // Latest returns the most recent approval request (if any) plus its
 // decisions — the shape the frontend ApprovalPanel reads.
 type latestResponse struct {
-	Request   *ApprovalRequest  `json:"request"`
-	Decisions []ReviewDecision  `json:"decisions"`
+	Request   *ApprovalRequest `json:"request"`
+	Decisions []ReviewDecision `json:"decisions"`
 }
 
 func (h *Handler) Latest(w http.ResponseWriter, r *http.Request) {
@@ -92,9 +93,9 @@ type decideBody struct {
 
 func (h *Handler) Decide(w http.ResponseWriter, r *http.Request) {
 	requestID := chi.URLParam(r, "requestID")
-	reviewerID := r.Header.Get("X-Member-Id")
+	reviewerID := authz.ActorOrEmpty(r.Context())
 	if reviewerID == "" {
-		writeErr(w, http.StatusBadRequest, "X-Member-Id header required")
+		writeErr(w, http.StatusBadRequest, "verified identity required")
 		return
 	}
 	var in decideBody
@@ -121,7 +122,7 @@ func (h *Handler) Pending(w http.ResponseWriter, r *http.Request) {
 	wsID := chi.URLParam(r, "wsID")
 	reviewerID := r.URL.Query().Get("reviewer_id")
 	if reviewerID == "" {
-		reviewerID = r.Header.Get("X-Member-Id")
+		reviewerID = authz.ActorOrEmpty(r.Context())
 	}
 	out, err := h.store.ListPending(r.Context(), reviewerID, wsID)
 	if err != nil {

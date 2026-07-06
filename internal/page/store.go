@@ -556,6 +556,105 @@ func (s *Store) Verify(ctx context.Context, pageID, verifierID string) error {
 	return err
 }
 
+// ─── SEC-4 Layer 2: workspace-scoped by-id ops ─────────────
+//
+// The authed /v1 page handler calls these variants, never the unscoped ones above (those
+// remain for the PUBLIC share adapter + internal engines — freshness/export/mcp — which are
+// public-by-contract or gated elsewhere). Each scopes to the caller's workspace SET
+// (resolved from membership by Layer 1): a page in a workspace the caller doesn't belong to
+// is invisible → ErrNotFound → 404, never leaking existence. wsIDs empty (caller has no
+// membership) matches nothing → ErrNotFound. This is the IDOR cure: the workspace filter
+// comes from verified membership, never from a client header/body.
+
+// ErrNotFound signals a by-id op resolved to no row IN THE CALLER'S WORKSPACES — the handler
+// maps it to 404. Distinct from a raw DB error so a real failure is never masked as not-found.
+var ErrNotFound = errors.New("page: not found in an accessible workspace")
+
+// assertInWorkspaces returns ErrNotFound unless page id lives in one of wsIDs.
+// PageInWorkspaces reports whether page id lives in one of wsIDs — the scope check the collab
+// WebSocket entry point runs before opening a live-edit session (it can't use ErrNotFound
+// because a WS reject is an HTTP status, not a store error).
+func (s *Store) PageInWorkspaces(ctx context.Context, id string, wsIDs []string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM pages WHERE id = $1 AND workspace_id = ANY($2))`,
+		id, wsIDs,
+	).Scan(&exists)
+	return exists, err
+}
+
+func (s *Store) assertInWorkspaces(ctx context.Context, id string, wsIDs []string) error {
+	exists, err := s.PageInWorkspaces(ctx, id, wsIDs)
+	if err != nil {
+		return fmt.Errorf("page: scope check: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetByIDInWorkspaces reads a page only if it lives in one of the caller's workspaces.
+func (s *Store) GetByIDInWorkspaces(ctx context.Context, id string, wsIDs []string) (*model.Page, error) {
+	p, err := scan(s.pool.QueryRow(ctx,
+		`SELECT `+columns+` FROM pages WHERE id = $1 AND workspace_id = ANY($2)`, id, wsIDs))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// UpdateInWorkspaces mutates a page only if it lives in one of the caller's workspaces.
+func (s *Store) UpdateInWorkspaces(ctx context.Context, id string, updates map[string]any, wsIDs []string) (*model.Page, error) {
+	if err := s.assertInWorkspaces(ctx, id, wsIDs); err != nil {
+		return nil, err
+	}
+	return s.Update(ctx, id, updates)
+}
+
+// DeleteInWorkspaces deletes a page only if it lives in one of the caller's workspaces.
+func (s *Store) DeleteInWorkspaces(ctx context.Context, id string, wsIDs []string) error {
+	if err := s.assertInWorkspaces(ctx, id, wsIDs); err != nil {
+		return err
+	}
+	return s.Delete(ctx, id)
+}
+
+// GetVersionsInWorkspaces lists versions only if the page lives in one of the caller's workspaces.
+func (s *Store) GetVersionsInWorkspaces(ctx context.Context, pageID string, wsIDs []string) ([]model.PageVersion, error) {
+	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
+		return nil, err
+	}
+	return s.GetVersions(ctx, pageID)
+}
+
+// RestoreVersionInWorkspaces restores only if the page lives in one of the caller's workspaces.
+func (s *Store) RestoreVersionInWorkspaces(ctx context.Context, pageID string, version int, wsIDs []string) (*model.Page, error) {
+	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
+		return nil, err
+	}
+	return s.RestoreVersion(ctx, pageID, version)
+}
+
+// RecordViewInWorkspaces records a view only if the page lives in one of the caller's workspaces.
+func (s *Store) RecordViewInWorkspaces(ctx context.Context, pageID, viewerID string, wsIDs []string) error {
+	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
+		return err
+	}
+	return s.RecordView(ctx, pageID, viewerID)
+}
+
+// VerifyInWorkspaces stamps verification only if the page lives in one of the caller's workspaces.
+func (s *Store) VerifyInWorkspaces(ctx context.Context, pageID, verifierID string, wsIDs []string) error {
+	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
+		return err
+	}
+	return s.Verify(ctx, pageID, verifierID)
+}
+
 // ─── GetStalePages ─────────────────────────────────────────
 
 // GetStalePages returns pages where stale_after_days > 0 AND the

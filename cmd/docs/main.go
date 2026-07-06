@@ -23,6 +23,7 @@ import (
 	"github.com/talyvor/docs/internal/ai"
 	"github.com/talyvor/docs/internal/analytics"
 	"github.com/talyvor/docs/internal/approval"
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/block"
 	"github.com/talyvor/docs/internal/changelog"
 	"github.com/talyvor/docs/internal/collab"
@@ -33,6 +34,7 @@ import (
 	"github.com/talyvor/docs/internal/db"
 	"github.com/talyvor/docs/internal/export"
 	"github.com/talyvor/docs/internal/freshness"
+	"github.com/talyvor/docs/internal/gatewayauth"
 	"github.com/talyvor/docs/internal/importer"
 	"github.com/talyvor/docs/internal/lensintegration"
 	"github.com/talyvor/docs/internal/mcp"
@@ -202,7 +204,8 @@ func main() {
 	// the handler layer below upgrades the HTTP request and shuttles
 	// frames through the engine's per-client send channels.
 	otEngine := collab.NewOTEngine()
-	collabHandler := collab.NewHandler(otEngine).WithGuard(lockStore)
+	// SEC-4: WithPageScope binds every collab session to the caller's workspace membership.
+	collabHandler := collab.NewHandler(otEngine).WithGuard(lockStore).WithPageScope(pageStore)
 	saver := collab.NewAutoSaver(otEngine,
 		func(ctx context.Context, pageID, content string) error {
 			_, err := pageStore.Update(ctx, pageID, map[string]any{"content": content})
@@ -224,12 +227,6 @@ func main() {
 	})
 	r.Handle("/metrics", metrics.Handler())
 
-	// Collab WS lives at the same /v1 prefix as the REST API so a
-	// reverse-proxy doesn't need a special rule. The chi middleware
-	// Timeout above does NOT apply because chi disables it for
-	// hijacked connections.
-	r.Get("/v1/collab/{pageID}/ws", collabHandler.ServeWS)
-
 	// MCP server is a public surface (no auth) — agent clients
 	// connect over JSON-RPC and SSE. Live on the top-level router
 	// so the /v1 group's middleware doesn't intercept it.
@@ -237,6 +234,21 @@ func main() {
 	r.Get("/mcp/sse", mcpServer.HandleSSE)
 
 	r.Route("/v1", func(r chi.Router) {
+		// SEC-4 Layer 1: transit-proof + membership on EVERY /v1 route except the public
+		// share viewer (/v1/public/*, which authenticates by its own share token).
+		// gatewayauth 401s a request lacking a valid x-gateway-auth BEFORE any identity
+		// header is read; authz then resolves the verified x-user-email to workspace
+		// memberships (from workspace_members) and puts them in context. Handlers scope every
+		// by-id query to that membership set — never to a client-supplied header.
+		v1Exempt := func(p string) bool { return strings.HasPrefix(p, "/v1/public/") }
+		r.Use(gatewayauth.Middleware(cfg.GatewayAuthSecret, v1Exempt))
+		r.Use(authz.Middleware(authz.NewPGResolver(pool), v1Exempt))
+
+		// Collab WS is now INSIDE the boundary: the gateway proof + membership run on the
+		// upgrade request before ServeWS opens a session (chi's Timeout is disabled for
+		// hijacked connections, so long-lived sockets are unaffected).
+		r.Get("/collab/{pageID}/ws", collabHandler.ServeWS)
+
 		spaceHandler.Mount(r)
 		pageHandler.Mount(r)
 		blockHandler.Mount(r)

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/talyvor/docs/internal/authz"
 )
 
 type Handler struct{ store *Store }
@@ -62,7 +63,7 @@ func (h *Handler) FromPage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	creator := r.Header.Get("X-Member-Id")
+	creator := authz.ActorOrEmpty(r.Context())
 	tmpl, err := h.store.CreateFromPage(r.Context(),
 		in.PageID, wsID, creator,
 		in.Name, in.Description, in.Category,
@@ -90,7 +91,7 @@ func (h *Handler) Use(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "space_id is required")
 		return
 	}
-	creator := r.Header.Get("X-Member-Id")
+	creator := authz.ActorOrEmpty(r.Context())
 	if creator == "" {
 		creator = "user"
 	}

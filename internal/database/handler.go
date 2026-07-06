@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/talyvor/docs/internal/authz"
 )
 
 type Handler struct{ store *Store }
@@ -45,8 +46,8 @@ func (h *Handler) CreateDatabase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.PageID = chi.URLParam(r, "pageID")
-	if in.WorkspaceID == "" {
-		in.WorkspaceID = r.Header.Get("X-Talyvor-Workspace")
+	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
+		in.WorkspaceID = ws
 	}
 	db, err := h.store.CreateDatabase(r.Context(), in)
 	if err != nil {

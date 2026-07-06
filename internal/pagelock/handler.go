@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/talyvor/docs/internal/authz"
 )
 
 type Handler struct{ store *Store }
@@ -37,7 +38,7 @@ type unlockBody struct {
 }
 
 func memberFromReq(r *http.Request, fallback string) string {
-	if v := r.Header.Get("X-Member-Id"); v != "" {
+	if v := authz.ActorOrEmpty(r.Context()); v != "" {
 		return v
 	}
 	return fallback
@@ -52,7 +53,7 @@ func (h *Handler) Lock(w http.ResponseWriter, r *http.Request) {
 	}
 	memberID := memberFromReq(r, in.MemberID)
 	if memberID == "" {
-		writeErr(w, http.StatusBadRequest, "member_id or X-Member-Id required")
+		writeErr(w, http.StatusBadRequest, "member_id required")
 		return
 	}
 	state, err := h.store.Lock(r.Context(), pageID, memberID)
@@ -74,7 +75,7 @@ func (h *Handler) Unlock(w http.ResponseWriter, r *http.Request) {
 	}
 	memberID := memberFromReq(r, in.MemberID)
 	if memberID == "" {
-		writeErr(w, http.StatusBadRequest, "member_id or X-Member-Id required")
+		writeErr(w, http.StatusBadRequest, "member_id required")
 		return
 	}
 	if err := h.store.Unlock(r.Context(), pageID, memberID, in.IsAdmin); err != nil {

@@ -262,3 +262,63 @@ func (s *Store) Delete(ctx context.Context, commentID, requesterID string) error
 	_, err := s.pool.Exec(ctx, `DELETE FROM page_comments WHERE id = $1`, commentID)
 	return err
 }
+
+// ─── SEC-4 Layer 2: workspace-scoped by-id ops ─────────────
+//
+// page_comments has no workspace_id — a comment is scoped via its page (FK page_id → pages).
+// The authed /v1 comment handler uses these variants; a comment whose page is in a workspace
+// the caller doesn't belong to is invisible → ErrNotFound → 404. wsIDs comes from verified
+// membership (Layer 1), never a client header.
+
+// ErrNotFound signals a by-id op resolved to no comment on a page in the caller's workspaces.
+var ErrNotFound = errors.New("comment: not found in an accessible workspace")
+
+// assertInWorkspaces returns ErrNotFound unless commentID's page lives in one of wsIDs.
+func (s *Store) assertInWorkspaces(ctx context.Context, commentID string, wsIDs []string) error {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(
+             SELECT 1 FROM page_comments c JOIN pages p ON c.page_id = p.id
+             WHERE c.id = $1 AND p.workspace_id = ANY($2))`,
+		commentID, wsIDs,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("comment: scope check: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ReplyInWorkspaces replies only if the parent comment's page is in one of the caller's workspaces.
+func (s *Store) ReplyInWorkspaces(ctx context.Context, parentID, authorID, authorName, content string, wsIDs []string) (*Comment, error) {
+	if err := s.assertInWorkspaces(ctx, parentID, wsIDs); err != nil {
+		return nil, err
+	}
+	return s.Reply(ctx, parentID, authorID, authorName, content)
+}
+
+// ResolveInWorkspaces resolves only if the comment's page is in one of the caller's workspaces.
+func (s *Store) ResolveInWorkspaces(ctx context.Context, commentID, resolvedBy string, wsIDs []string) error {
+	if err := s.assertInWorkspaces(ctx, commentID, wsIDs); err != nil {
+		return err
+	}
+	return s.Resolve(ctx, commentID, resolvedBy)
+}
+
+// UnresolveInWorkspaces unresolves only if the comment's page is in one of the caller's workspaces.
+func (s *Store) UnresolveInWorkspaces(ctx context.Context, commentID string, wsIDs []string) error {
+	if err := s.assertInWorkspaces(ctx, commentID, wsIDs); err != nil {
+		return err
+	}
+	return s.Unresolve(ctx, commentID)
+}
+
+// DeleteInWorkspaces deletes only if the comment's page is in one of the caller's workspaces
+// (in addition to the author-only check inside Delete).
+func (s *Store) DeleteInWorkspaces(ctx context.Context, commentID, requesterID string, wsIDs []string) error {
+	if err := s.assertInWorkspaces(ctx, commentID, wsIDs); err != nil {
+		return err
+	}
+	return s.Delete(ctx, commentID, requesterID)
+}

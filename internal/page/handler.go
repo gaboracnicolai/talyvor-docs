@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/model"
 )
@@ -105,7 +106,9 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
-	out, err := h.store.GetByID(r.Context(), chi.URLParam(r, "pageID"))
+	// SEC-4: scope to the caller's verified workspace membership — a page in another
+	// workspace is not-found (404), never leaked.
+	out, err := h.store.GetByIDInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), authz.WorkspaceIDs(r.Context()))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
 		return
@@ -119,14 +122,20 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_JSON", err.Error())
 		return
 	}
-	// Propagate the caller's member identity for the lock guard.
-	if _, set := updates["updated_by"]; !set {
-		if v := r.Header.Get("X-Member-Id"); v != "" {
-			updates["updated_by"] = v
-		}
+	// SEC-4: the editor identity for the lock guard is the VERIFIED member id, never a
+	// client-supplied header or body field. Overwrite any caller-provided updated_by.
+	if mid, ok := authz.SingleMemberID(r.Context()); ok {
+		updates["updated_by"] = mid
+	} else {
+		delete(updates, "updated_by")
 	}
-	out, err := h.store.Update(r.Context(), chi.URLParam(r, "pageID"), updates)
+	out, err := h.store.UpdateInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), updates, authz.WorkspaceIDs(r.Context()))
 	if err != nil {
+		// Cross-tenant / unknown page → 404 (never leak existence).
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+			return
+		}
 		// 423 Locked is the precise signal for lock conflicts so the
 		// frontend can render a specific banner; everything else is
 		// a generic 400 because it's caller-supplied bad input.
@@ -141,7 +150,12 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
-	if err := h.store.Delete(r.Context(), chi.URLParam(r, "pageID")); err != nil {
+	err := h.store.DeleteInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "DELETE_FAILED", err.Error())
 		return
 	}
@@ -151,8 +165,13 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 // ─── view / verify ────────────────────────────────────────
 
 func (h *Handler) RecordView(w http.ResponseWriter, r *http.Request) {
-	if err := h.store.RecordView(r.Context(),
-		chi.URLParam(r, "pageID"), r.Header.Get("X-Member-Id")); err != nil {
+	viewer, _ := authz.SingleMemberID(r.Context()) // verified actor, never X-Member-Id
+	err := h.store.RecordViewInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), viewer, authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "VIEW_FAILED", err.Error())
 		return
 	}
@@ -160,8 +179,13 @@ func (h *Handler) RecordView(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Verify(w http.ResponseWriter, r *http.Request) {
-	if err := h.store.Verify(r.Context(),
-		chi.URLParam(r, "pageID"), r.Header.Get("X-Member-Id")); err != nil {
+	verifier, _ := authz.SingleMemberID(r.Context()) // verified actor, never X-Member-Id
+	err := h.store.VerifyInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), verifier, authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "VERIFY_FAILED", err.Error())
 		return
 	}
@@ -171,7 +195,11 @@ func (h *Handler) Verify(w http.ResponseWriter, r *http.Request) {
 // ─── versions ─────────────────────────────────────────────
 
 func (h *Handler) GetVersions(w http.ResponseWriter, r *http.Request) {
-	out, err := h.store.GetVersions(r.Context(), chi.URLParam(r, "pageID"))
+	out, err := h.store.GetVersionsInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "VERSIONS_FAILED", err.Error())
 		return
@@ -188,7 +216,11 @@ func (h *Handler) RestoreVersion(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_VERSION", "version must be int")
 		return
 	}
-	out, err := h.store.RestoreVersion(r.Context(), chi.URLParam(r, "pageID"), n)
+	out, err := h.store.RestoreVersionInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), n, authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "RESTORE_FAILED", err.Error())
 		return
@@ -233,4 +265,3 @@ func (h *Handler) Stale(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, out)
 }
-
