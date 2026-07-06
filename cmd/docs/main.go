@@ -23,6 +23,7 @@ import (
 	"github.com/talyvor/docs/internal/ai"
 	"github.com/talyvor/docs/internal/analytics"
 	"github.com/talyvor/docs/internal/approval"
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/block"
 	"github.com/talyvor/docs/internal/changelog"
 	"github.com/talyvor/docs/internal/collab"
@@ -33,6 +34,7 @@ import (
 	"github.com/talyvor/docs/internal/db"
 	"github.com/talyvor/docs/internal/export"
 	"github.com/talyvor/docs/internal/freshness"
+	"github.com/talyvor/docs/internal/gatewayauth"
 	"github.com/talyvor/docs/internal/importer"
 	"github.com/talyvor/docs/internal/lensintegration"
 	"github.com/talyvor/docs/internal/mcp"
@@ -237,6 +239,16 @@ func main() {
 	r.Get("/mcp/sse", mcpServer.HandleSSE)
 
 	r.Route("/v1", func(r chi.Router) {
+		// SEC-4 Layer 1: transit-proof + membership on EVERY /v1 route except the public
+		// share viewer (/v1/public/*, which authenticates by its own share token).
+		// gatewayauth 401s a request lacking a valid x-gateway-auth BEFORE any identity
+		// header is read; authz then resolves the verified x-user-email to workspace
+		// memberships (from workspace_members) and puts them in context. Handlers scope every
+		// by-id query to that membership set — never to a client-supplied header.
+		v1Exempt := func(p string) bool { return strings.HasPrefix(p, "/v1/public/") }
+		r.Use(gatewayauth.Middleware(cfg.GatewayAuthSecret, v1Exempt))
+		r.Use(authz.Middleware(authz.NewPGResolver(pool), v1Exempt))
+
 		spaceHandler.Mount(r)
 		pageHandler.Mount(r)
 		blockHandler.Mount(r)

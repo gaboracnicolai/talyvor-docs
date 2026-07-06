@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/model"
 )
 
@@ -70,7 +71,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	cd, err := h.store.Create(r.Context(),
 		chi.URLParam(r, "wsID"),
 		in.Domain,
-		r.Header.Get("X-Member-Id"),
+		authz.ActorOrEmpty(r.Context()),
 		in.SpaceID,
 	)
 	if err != nil {
@@ -117,9 +118,10 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 
 // PublicHandler returns an http.Handler that the DomainRouter
 // forwards requests to. Three routes:
-//   GET /                — space index (page list)
-//   GET /{slug}          — page by slug
-//   GET /search?q=...    — basic search (delegates to upstream)
+//
+//	GET /                — space index (page list)
+//	GET /{slug}          — page by slug
+//	GET /search?q=...    — basic search (delegates to upstream)
 //
 // All responses are read-only HTML — no JSON API, no admin UI.
 func (h *Handler) PublicHandler() http.Handler {

@@ -6,6 +6,8 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/talyvor/docs/internal/authz"
 )
 
 type Handler struct{ store *Store }
@@ -53,10 +55,9 @@ func (h *Handler) RecordView(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	if in.WorkspaceID == "" {
-		// Fall back to a header-supplied workspace if the body
-		// omitted it — keeps the client surface minimal.
-		in.WorkspaceID = r.Header.Get("X-Talyvor-Workspace")
+	// SEC-4: the workspace is the caller's VERIFIED membership, not a client header/body.
+	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
+		in.WorkspaceID = ws
 	}
 	err := h.store.RecordView(r.Context(), PageView{
 		PageID:      chi.URLParam(r, "pageID"),

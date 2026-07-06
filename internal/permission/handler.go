@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/talyvor/docs/internal/authz"
 )
 
 type Handler struct{ store *Store }
@@ -75,8 +76,8 @@ func (h *Handler) grant(w http.ResponseWriter, r *http.Request, resType Resource
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	if in.WorkspaceID == "" {
-		in.WorkspaceID = r.Header.Get("X-Talyvor-Workspace")
+	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
+		in.WorkspaceID = ws
 	}
 	p := Permission{
 		ResourceType: resType,
@@ -85,7 +86,7 @@ func (h *Handler) grant(w http.ResponseWriter, r *http.Request, resType Resource
 		SubjectID:    in.SubjectID,
 		Access:       in.Access,
 		WorkspaceID:  in.WorkspaceID,
-		GrantedBy:    r.Header.Get("X-Member-Id"),
+		GrantedBy:    authz.ActorOrEmpty(r.Context()),
 	}
 	if err := h.store.Grant(r.Context(), p); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())

@@ -2,10 +2,12 @@ package space
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/model"
 )
 
@@ -62,7 +64,8 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
-	out, err := h.store.GetByID(r.Context(), chi.URLParam(r, "spaceID"))
+	// SEC-4: scope to the caller's verified workspace membership.
+	out, err := h.store.GetByIDInWorkspaces(r.Context(), chi.URLParam(r, "spaceID"), authz.WorkspaceIDs(r.Context()))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
 		return
@@ -76,7 +79,11 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_JSON", err.Error())
 		return
 	}
-	out, err := h.store.Update(r.Context(), chi.URLParam(r, "spaceID"), updates)
+	out, err := h.store.UpdateInWorkspaces(r.Context(), chi.URLParam(r, "spaceID"), updates, authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "UPDATE_FAILED", err.Error())
 		return
@@ -85,7 +92,12 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
-	if err := h.store.Delete(r.Context(), chi.URLParam(r, "spaceID")); err != nil {
+	err := h.store.DeleteInWorkspaces(r.Context(), chi.URLParam(r, "spaceID"), authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "DELETE_FAILED", err.Error())
 		return
 	}
