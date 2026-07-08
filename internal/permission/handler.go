@@ -9,18 +9,31 @@ import (
 	"github.com/talyvor/docs/internal/authz"
 )
 
-type Handler struct{ store *Store }
+type Handler struct {
+	store    *Store
+	spaceEnf *Enforcer // A3 within-workspace access guard for space-scoped perm routes (nil = unguarded)
+	pageEnf  *Enforcer // A3 within-workspace access guard for page-scoped perm routes (nil = unguarded)
+}
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
 
-func (h *Handler) Mount(r chi.Router) {
-	r.Get("/spaces/{spaceID}/permissions", h.listSpace)
-	r.Post("/spaces/{spaceID}/permissions", h.grantSpace)
-	r.Delete("/spaces/{spaceID}/permissions/{permID}", h.delete)
+// WithAccess wires the A3 access enforcers. Without it the routes mount unguarded (tests).
+func (h *Handler) WithAccess(spaceEnf, pageEnf *Enforcer) *Handler {
+	h.spaceEnf = spaceEnf
+	h.pageEnf = pageEnf
+	return h
+}
 
-	r.Get("/spaces/{spaceID}/pages/{pageID}/permissions", h.listPage)
-	r.Post("/spaces/{spaceID}/pages/{pageID}/permissions", h.grantPage)
-	r.Delete("/spaces/{spaceID}/pages/{pageID}/permissions/{permID}", h.delete)
+func (h *Handler) Mount(r chi.Router) {
+	// A3: viewing, granting, and revoking access all reveal or change who can reach a resource, so
+	// every permission-management route is gated at Admin on the relevant resource's enforcer.
+	r.With(h.spaceEnf.Require(AccessAdmin)).Method(http.MethodGet, "/spaces/{spaceID}/permissions", http.HandlerFunc(h.listSpace))
+	r.With(h.spaceEnf.Require(AccessAdmin)).Method(http.MethodPost, "/spaces/{spaceID}/permissions", http.HandlerFunc(h.grantSpace))
+	r.With(h.spaceEnf.Require(AccessAdmin)).Method(http.MethodDelete, "/spaces/{spaceID}/permissions/{permID}", http.HandlerFunc(h.delete))
+
+	r.With(h.pageEnf.Require(AccessAdmin)).Method(http.MethodGet, "/spaces/{spaceID}/pages/{pageID}/permissions", http.HandlerFunc(h.listPage))
+	r.With(h.pageEnf.Require(AccessAdmin)).Method(http.MethodPost, "/spaces/{spaceID}/pages/{pageID}/permissions", http.HandlerFunc(h.grantPage))
+	r.With(h.pageEnf.Require(AccessAdmin)).Method(http.MethodDelete, "/spaces/{spaceID}/pages/{pageID}/permissions/{permID}", http.HandlerFunc(h.delete))
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

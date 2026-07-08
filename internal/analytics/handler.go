@@ -8,15 +8,25 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/talyvor/docs/internal/authz"
+	"github.com/talyvor/docs/internal/permission"
 )
 
-type Handler struct{ store *Store }
+type Handler struct {
+	store   *Store
+	pageEnf *permission.Enforcer // A3: by-page access (view/edit)
+}
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
 
+// WithAccess wires the A3 access enforcer. Without it the routes mount unguarded (tests).
+func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
+	h.pageEnf = pageEnf
+	return h
+}
+
 func (h *Handler) Mount(r chi.Router) {
-	r.Post("/spaces/{spaceID}/pages/{pageID}/view", h.RecordView)
-	r.Get("/spaces/{spaceID}/pages/{pageID}/analytics", h.PageStats)
+	r.With(h.pageEnf.Require(permission.AccessView)).Post("/spaces/{spaceID}/pages/{pageID}/view", h.RecordView)
+	r.With(h.pageEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}/pages/{pageID}/analytics", h.PageStats)
 	r.Get("/workspaces/{wsID}/analytics/pages", h.WorkspaceStats)
 }
 

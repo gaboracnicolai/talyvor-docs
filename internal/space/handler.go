@@ -9,18 +9,30 @@ import (
 
 	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/model"
+	"github.com/talyvor/docs/internal/permission"
 )
 
-type Handler struct{ store *Store }
+type Handler struct {
+	store    *Store
+	spaceEnf *permission.Enforcer // A3 within-workspace access guard (nil = unguarded)
+}
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
 
+// WithAccess wires the A3 space access enforcer. Without it the routes mount unguarded (tests).
+func (h *Handler) WithAccess(spaceEnf *permission.Enforcer) *Handler {
+	h.spaceEnf = spaceEnf
+	return h
+}
+
 func (h *Handler) Mount(r chi.Router) {
+	// Create + list are workspace-level (no single resource yet; list is filtered in-query). Get
+	// requires View; settings-mutation + delete require Admin.
 	r.Post("/spaces", h.Create)
 	r.Get("/workspaces/{wsID}/spaces", h.List)
-	r.Get("/spaces/{spaceID}", h.Get)
-	r.Patch("/spaces/{spaceID}", h.Update)
-	r.Delete("/spaces/{spaceID}", h.Delete)
+	r.With(h.spaceEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}", h.Get)
+	r.With(h.spaceEnf.Require(permission.AccessAdmin)).Patch("/spaces/{spaceID}", h.Update)
+	r.With(h.spaceEnf.Require(permission.AccessAdmin)).Delete("/spaces/{spaceID}", h.Delete)
 }
 
 type apiError struct {

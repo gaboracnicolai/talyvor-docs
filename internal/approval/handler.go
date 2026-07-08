@@ -8,17 +8,29 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/talyvor/docs/internal/authz"
+	"github.com/talyvor/docs/internal/permission"
 )
 
-type Handler struct{ store *Store }
+type Handler struct {
+	store   *Store
+	pageEnf *permission.Enforcer // A3: approval acts on a page (nil = unguarded)
+}
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
 
+// WithAccess wires the A3 page access enforcer. Without it the routes mount unguarded (tests).
+func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
+	h.pageEnf = pageEnf
+	return h
+}
+
 func (h *Handler) Mount(r chi.Router) {
-	r.Post("/spaces/{spaceID}/pages/{pageID}/approval", h.Request)
-	r.Get("/spaces/{spaceID}/pages/{pageID}/approval", h.Latest)
-	r.Post("/spaces/{spaceID}/pages/{pageID}/approval/{requestID}/decide", h.Decide)
-	r.Post("/spaces/{spaceID}/pages/{pageID}/publish", h.Publish)
+	// Requesting approval / publishing mutate the page → Edit; reading the status / deciding are
+	// View (the Decide store already gates on the verified reviewer). Pending is workspace-level.
+	r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/spaces/{spaceID}/pages/{pageID}/approval", h.Request)
+	r.With(h.pageEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}/pages/{pageID}/approval", h.Latest)
+	r.With(h.pageEnf.Require(permission.AccessView)).Post("/spaces/{spaceID}/pages/{pageID}/approval/{requestID}/decide", h.Decide)
+	r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/spaces/{spaceID}/pages/{pageID}/publish", h.Publish)
 	r.Get("/workspaces/{wsID}/approvals/pending", h.Pending)
 }
 

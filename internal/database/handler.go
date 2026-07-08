@@ -7,14 +7,27 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/talyvor/docs/internal/authz"
+	"github.com/talyvor/docs/internal/permission"
 )
 
-type Handler struct{ store *Store }
+type Handler struct {
+	store   *Store
+	pageEnf *permission.Enforcer // A3: by-page access for the page-scoped create route
+}
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
 
+// WithAccess wires the A3 access enforcer. Without it the routes mount unguarded (tests).
+func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
+	h.pageEnf = pageEnf
+	return h
+}
+
 func (h *Handler) Mount(r chi.Router) {
-	r.Post("/pages/{pageID}/databases", h.CreateDatabase)
+	// A3: page-scoped create is gated by page access (Edit). The /databases/{dbID}/* routes below
+	// carry no {pageID}/{spaceID} in the URL, so the page resolver can't run — they stay on the
+	// SEC-4 L2 workspace-scoped guard until a database→page access resolver lands.
+	r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/pages/{pageID}/databases", h.CreateDatabase)
 	r.Get("/databases/{dbID}", h.GetDatabase)
 	r.Patch("/databases/{dbID}/schema", h.UpdateSchema)
 

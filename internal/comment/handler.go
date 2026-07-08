@@ -8,20 +8,34 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/talyvor/docs/internal/authz"
+	"github.com/talyvor/docs/internal/permission"
 )
 
-type Handler struct{ store *Store }
+type Handler struct {
+	store   *Store
+	pageEnf *permission.Enforcer // A3: comment routes gate on the parent page's access (nil = unguarded)
+}
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
 
+// WithAccess wires the A3 page access enforcer. Without it the routes mount unguarded (tests).
+func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
+	h.pageEnf = pageEnf
+	return h
+}
+
 func (h *Handler) Mount(r chi.Router) {
-	r.Get("/spaces/{spaceID}/pages/{pageID}/comments", h.List)
-	r.Post("/spaces/{spaceID}/pages/{pageID}/comments", h.Create)
-	r.Get("/spaces/{spaceID}/pages/{pageID}/comments/stats", h.Stats)
-	r.Post("/spaces/{spaceID}/pages/{pageID}/comments/{id}/reply", h.Reply)
-	r.Post("/spaces/{spaceID}/pages/{pageID}/comments/{id}/resolve", h.Resolve)
-	r.Delete("/spaces/{spaceID}/pages/{pageID}/comments/{id}/resolve", h.Unresolve)
-	r.Delete("/spaces/{spaceID}/pages/{pageID}/comments/{id}", h.Delete)
+	// DECISION (view-can-comment): comment participation — list/create/reply/resolve/delete — requires
+	// only View on the parent page, so view-tier collaborators can discuss without edit. Flip this
+	// single `commentLevel` to AccessEdit to make comments an edit-tier action.
+	commentLevel := permission.AccessView
+	r.With(h.pageEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}/pages/{pageID}/comments", h.List)
+	r.With(h.pageEnf.Require(commentLevel)).Post("/spaces/{spaceID}/pages/{pageID}/comments", h.Create)
+	r.With(h.pageEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}/pages/{pageID}/comments/stats", h.Stats)
+	r.With(h.pageEnf.Require(commentLevel)).Post("/spaces/{spaceID}/pages/{pageID}/comments/{id}/reply", h.Reply)
+	r.With(h.pageEnf.Require(commentLevel)).Post("/spaces/{spaceID}/pages/{pageID}/comments/{id}/resolve", h.Resolve)
+	r.With(h.pageEnf.Require(commentLevel)).Delete("/spaces/{spaceID}/pages/{pageID}/comments/{id}/resolve", h.Unresolve)
+	r.With(h.pageEnf.Require(commentLevel)).Delete("/spaces/{spaceID}/pages/{pageID}/comments/{id}", h.Delete)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

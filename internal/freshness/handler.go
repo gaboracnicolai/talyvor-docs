@@ -5,15 +5,27 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/talyvor/docs/internal/permission"
 )
 
-type Handler struct{ engine *FreshnessEngine }
+type Handler struct {
+	engine  *FreshnessEngine
+	pageEnf *permission.Enforcer // A3: by-page access (view)
+}
 
 func NewHandler(engine *FreshnessEngine) *Handler { return &Handler{engine: engine} }
 
+// WithAccess wires the A3 access enforcer. Without it the routes mount unguarded (tests).
+func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
+	h.pageEnf = pageEnf
+	return h
+}
+
 func (h *Handler) Mount(r chi.Router) {
 	r.Get("/workspaces/{wsID}/freshness", h.Workspace)
-	r.Get("/spaces/{spaceID}/pages/{pageID}/freshness", h.Page)
+	// Per-page freshness read → View.
+	r.With(h.pageEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}/pages/{pageID}/freshness", h.Page)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

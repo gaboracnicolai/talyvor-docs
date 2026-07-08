@@ -31,23 +31,31 @@ type PublicPage struct {
 }
 
 type Handler struct {
-	store *Store
-	page  PageContentLoader
+	store   *Store
+	page    PageContentLoader
+	pageEnf *permission.Enforcer // A3: sharing admin gates on the parent page (nil = unguarded)
 }
 
 func NewHandler(store *Store, page PageContentLoader) *Handler {
 	return &Handler{store: store, page: page}
 }
 
-func (h *Handler) Mount(r chi.Router) {
-	r.Post("/spaces/{spaceID}/pages/{pageID}/share", h.Create)
-	r.Get("/spaces/{spaceID}/pages/{pageID}/share", h.List)
-	r.Delete("/spaces/{spaceID}/pages/{pageID}/share/{id}", h.Revoke)
+// WithAccess wires the A3 page access enforcer. Without it the routes mount unguarded (tests).
+func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
+	h.pageEnf = pageEnf
+	return h
 }
 
-// MountPublic mounts the no-auth public viewer at /v1/public/s/:token.
-// Lives on a separate router branch so middleware that requires
-// X-Member-Id doesn't intercept it.
+func (h *Handler) Mount(r chi.Router) {
+	// Creating/listing/revoking share links is an admin action on the page — share links are public
+	// access-granting tokens, so only Admins may mint, enumerate, or revoke them.
+	r.With(h.pageEnf.Require(permission.AccessAdmin)).Post("/spaces/{spaceID}/pages/{pageID}/share", h.Create)
+	r.With(h.pageEnf.Require(permission.AccessAdmin)).Get("/spaces/{spaceID}/pages/{pageID}/share", h.List)
+	r.With(h.pageEnf.Require(permission.AccessAdmin)).Delete("/spaces/{spaceID}/pages/{pageID}/share/{id}", h.Revoke)
+}
+
+// MountPublic mounts the no-auth public viewer at /v1/public/s/:token — authenticated by the share
+// token itself (NOT membership), so it is NOT behind RequireAccess. Public-by-design.
 func (h *Handler) MountPublic(r chi.Router) {
 	r.Get("/public/s/{token}", h.Public)
 }

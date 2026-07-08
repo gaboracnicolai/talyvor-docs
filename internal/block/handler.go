@@ -7,22 +7,36 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/talyvor/docs/internal/model"
+	"github.com/talyvor/docs/internal/permission"
 )
 
-type Handler struct{ store *Store }
+type Handler struct {
+	store *Store
+	// A3: blocks are the page's content. The /pages/{pageID}/blocks routes resolve access from the
+	// pageID (pageEnf); the /blocks/{blockID} routes resolve the owning page from the block (blockEnf).
+	pageEnf  *permission.Enforcer
+	blockEnf *permission.Enforcer
+}
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
+
+// WithAccess wires the A3 access enforcers. Without it the routes mount unguarded (tests).
+func (h *Handler) WithAccess(pageEnf, blockEnf *permission.Enforcer) *Handler {
+	h.pageEnf, h.blockEnf = pageEnf, blockEnf
+	return h
+}
 
 // Mount registers the block CRUD endpoints. Phase 1 keeps these
 // minimal — the collaborative editor that drives heavy per-block
 // traffic ships in Phase 2.
 func (h *Handler) Mount(r chi.Router) {
 	r.Route("/pages/{pageID}/blocks", func(r chi.Router) {
-		r.Get("/", h.List)
-		r.Post("/", h.Create)
+		// Blocks ARE the page's content: read=View, mutation=Edit.
+		r.With(h.pageEnf.Require(permission.AccessView)).Get("/", h.List)
+		r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/", h.Create)
 	})
-	r.Patch("/blocks/{blockID}", h.Update)
-	r.Delete("/blocks/{blockID}", h.Delete)
+	r.With(h.blockEnf.Require(permission.AccessEdit)).Patch("/blocks/{blockID}", h.Update)
+	r.With(h.blockEnf.Require(permission.AccessEdit)).Delete("/blocks/{blockID}", h.Delete)
 }
 
 type apiError struct {
