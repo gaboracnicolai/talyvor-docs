@@ -2,6 +2,7 @@ package approval
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -70,7 +71,16 @@ type latestResponse struct {
 
 func (h *Handler) Latest(w http.ResponseWriter, r *http.Request) {
 	pageID := chi.URLParam(r, "pageID")
-	reqs, err := h.store.ListByPage(r.Context(), pageID)
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	// SEC-4 L2: a foreign page id is 404 (no oracle), not an empty 200.
+	if ok, err := h.store.PageInWorkspaces(r.Context(), pageID, wsIDs); err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	} else if !ok {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	reqs, err := h.store.ListByPage(r.Context(), pageID, wsIDs)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -78,7 +88,7 @@ func (h *Handler) Latest(w http.ResponseWriter, r *http.Request) {
 	resp := latestResponse{Decisions: []ReviewDecision{}}
 	if len(reqs) > 0 {
 		resp.Request = &reqs[0]
-		decisions, err := h.store.GetDecisions(r.Context(), reqs[0].ID)
+		decisions, err := h.store.GetDecisions(r.Context(), reqs[0].ID, wsIDs)
 		if err == nil {
 			resp.Decisions = decisions
 		}
@@ -103,7 +113,12 @@ func (h *Handler) Decide(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	if err := h.store.Decide(r.Context(), requestID, reviewerID, in.Decision, in.Comment); err != nil {
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	if err := h.store.Decide(r.Context(), requestID, reviewerID, in.Decision, in.Comment, wsIDs); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -111,7 +126,12 @@ func (h *Handler) Decide(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
-	if err := h.store.PublishApproved(r.Context(), chi.URLParam(r, "pageID")); err != nil {
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	if err := h.store.PublishApproved(r.Context(), chi.URLParam(r, "pageID"), wsIDs); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
 		writeErr(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -119,12 +139,12 @@ func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Pending(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
+	wsIDs := authz.WorkspaceIDs(r.Context())
 	reviewerID := r.URL.Query().Get("reviewer_id")
 	if reviewerID == "" {
 		reviewerID = authz.ActorOrEmpty(r.Context())
 	}
-	out, err := h.store.ListPending(r.Context(), reviewerID, wsID)
+	out, err := h.store.ListPending(r.Context(), reviewerID, wsIDs)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

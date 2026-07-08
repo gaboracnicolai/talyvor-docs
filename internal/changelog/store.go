@@ -153,18 +153,28 @@ func (s *Store) CreateEntry(ctx context.Context, e ChangelogEntry) (*ChangelogEn
 	return scan(row)
 }
 
-func (s *Store) GetEntry(ctx context.Context, id string) (*ChangelogEntry, error) {
+// ErrNotFound signals a by-id op resolved to no row IN THE CALLER'S WORKSPACES — the handler
+// maps it to 404. Distinct from a raw DB error so a real failure is never masked as not-found.
+// wsIDs empty (caller has no membership) matches nothing → ErrNotFound (fail-closed).
+var ErrNotFound = errors.New("changelog: not found in workspace")
+
+func (s *Store) GetEntry(ctx context.Context, id string, wsIDs []string) (*ChangelogEntry, error) {
 	if s.pool == nil {
 		return nil, errors.New("changelog: no pool")
 	}
-	row := s.pool.QueryRow(ctx, `SELECT `+cols+` FROM changelog_entries WHERE id = $1`, id)
-	return scan(row)
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+cols+` FROM changelog_entries WHERE id = $1 AND workspace_id = ANY($2)`, id, wsIDs)
+	e, err := scan(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return e, err
 }
 
 // UpdateEntry applies the allow-listed updates and re-stamps
 // updated_at. Allow-listing keeps internal columns (id, created_at,
 // page_id) immutable.
-func (s *Store) UpdateEntry(ctx context.Context, id string, updates map[string]any) (*ChangelogEntry, error) {
+func (s *Store) UpdateEntry(ctx context.Context, id string, updates map[string]any, wsIDs []string) (*ChangelogEntry, error) {
 	if s.pool == nil {
 		return nil, errors.New("changelog: no pool")
 	}
@@ -189,38 +199,54 @@ func (s *Store) UpdateEntry(ctx context.Context, id string, updates map[string]a
 		return nil, errors.New("changelog: no updatable fields")
 	}
 	setParts = append(setParts, fmt.Sprintf("updated_at = NOW()"))
-	args = append(args, id)
+	// id is $idx; the workspace scope set is $idx+1.
+	args = append(args, id, wsIDs)
 	row := s.pool.QueryRow(ctx,
-		fmt.Sprintf(`UPDATE changelog_entries SET %s WHERE id = $%d RETURNING %s`,
-			strings.Join(setParts, ", "), idx, cols),
+		fmt.Sprintf(`UPDATE changelog_entries SET %s WHERE id = $%d AND workspace_id = ANY($%d) RETURNING %s`,
+			strings.Join(setParts, ", "), idx, idx+1, cols),
 		args...,
 	)
-	return scan(row)
+	e, err := scan(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return e, err
 }
 
-func (s *Store) PublishEntry(ctx context.Context, id string) (*ChangelogEntry, error) {
+func (s *Store) PublishEntry(ctx context.Context, id string, wsIDs []string) (*ChangelogEntry, error) {
 	if s.pool == nil {
 		return nil, errors.New("changelog: no pool")
 	}
 	row := s.pool.QueryRow(ctx,
 		`UPDATE changelog_entries SET published_at = NOW(), updated_at = NOW()
-        WHERE id = $1 RETURNING `+cols,
-		id,
+        WHERE id = $1 AND workspace_id = ANY($2) RETURNING `+cols,
+		id, wsIDs,
 	)
-	return scan(row)
+	e, err := scan(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return e, err
 }
 
-func (s *Store) DeleteEntry(ctx context.Context, id string) error {
+func (s *Store) DeleteEntry(ctx context.Context, id string, wsIDs []string) error {
 	if s.pool == nil {
 		return errors.New("changelog: no pool")
 	}
-	_, err := s.pool.Exec(ctx, `DELETE FROM changelog_entries WHERE id = $1`, id)
-	return err
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM changelog_entries WHERE id = $1 AND workspace_id = ANY($2)`, id, wsIDs)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ─── ListEntries ─────────────────────────────────────
 
-func (s *Store) ListEntries(ctx context.Context, pageID string, entryType *EntryType, limit, offset int) ([]ChangelogEntry, error) {
+func (s *Store) ListEntries(ctx context.Context, pageID string, entryType *EntryType, limit, offset int, wsIDs []string) ([]ChangelogEntry, error) {
 	if s.pool == nil {
 		return nil, nil
 	}
@@ -238,18 +264,18 @@ func (s *Store) ListEntries(ctx context.Context, pageID string, entryType *Entry
 	if entryType != nil {
 		rows, err = s.pool.Query(ctx,
 			`SELECT `+cols+` FROM changelog_entries
-            WHERE page_id = $1 AND type = $2
+            WHERE page_id = $1 AND type = $2 AND workspace_id = ANY($3)
             ORDER BY published_at DESC NULLS LAST, created_at DESC
-            LIMIT $3 OFFSET $4`,
-			pageID, string(*entryType), limit, offset,
+            LIMIT $4 OFFSET $5`,
+			pageID, string(*entryType), wsIDs, limit, offset,
 		)
 	} else {
 		rows, err = s.pool.Query(ctx,
 			`SELECT `+cols+` FROM changelog_entries
-            WHERE page_id = $1
+            WHERE page_id = $1 AND workspace_id = ANY($2)
             ORDER BY published_at DESC NULLS LAST, created_at DESC
-            LIMIT $2 OFFSET $3`,
-			pageID, limit, offset,
+            LIMIT $3 OFFSET $4`,
+			pageID, wsIDs, limit, offset,
 		)
 	}
 	if err != nil {
@@ -329,8 +355,8 @@ func buildContent(track issueLookup, issueIDs []string) string {
 	}
 
 	var doc struct {
-		Type    string  `json:"type"`
-		Content []any   `json:"content"`
+		Type    string `json:"type"`
+		Content []any  `json:"content"`
 	}
 	doc.Type = "doc"
 
@@ -423,7 +449,11 @@ func (s *Store) GenerateFromIssues(ctx context.Context, workspaceID, pageID, cre
 
 // ─── GetPublicFeed ───────────────────────────────────
 
-func (s *Store) GetPublicFeed(ctx context.Context, workspaceID string, limit int) ([]ChangelogEntry, error) {
+// GetPublicFeed lists published entries scoped to the caller's VERIFIED workspace set
+// (SEC-4 L2 DECEPTIVE shape). The Feed handler previously fed workspaceID straight from
+// chi.URLParam("wsID"), so a caller could name any workspace's id in the URL and read its
+// published feed. wsIDs now comes from authz.WorkspaceIDs (verified membership), never the URL.
+func (s *Store) GetPublicFeed(ctx context.Context, wsIDs []string, limit int) ([]ChangelogEntry, error) {
 	if s.pool == nil {
 		return nil, nil
 	}
@@ -435,10 +465,10 @@ func (s *Store) GetPublicFeed(ctx context.Context, workspaceID string, limit int
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+cols+` FROM changelog_entries
-        WHERE workspace_id = $1 AND published_at IS NOT NULL
+        WHERE workspace_id = ANY($1) AND published_at IS NOT NULL
         ORDER BY published_at DESC
         LIMIT $2`,
-		workspaceID, limit,
+		wsIDs, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("changelog: feed: %w", err)

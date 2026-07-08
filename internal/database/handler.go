@@ -2,6 +2,7 @@ package database
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -58,7 +59,8 @@ func (h *Handler) CreateDatabase(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) GetDatabase(w http.ResponseWriter, r *http.Request) {
-	db, err := h.store.GetDatabase(r.Context(), chi.URLParam(r, "dbID"))
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	db, err := h.store.GetDatabase(r.Context(), chi.URLParam(r, "dbID"), wsIDs)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "database not found")
 		return
@@ -74,8 +76,13 @@ func (h *Handler) UpdateSchema(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	db, err := h.store.UpdateSchema(r.Context(), chi.URLParam(r, "dbID"), in.Schema)
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	db, err := h.store.UpdateSchema(r.Context(), chi.URLParam(r, "dbID"), in.Schema, wsIDs)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "database not found")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -91,8 +98,13 @@ func (h *Handler) CreateRow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.DatabaseID = chi.URLParam(r, "dbID")
-	row, err := h.store.CreateRow(r.Context(), in)
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	row, err := h.store.CreateRow(r.Context(), in, wsIDs)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "database not found")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -107,8 +119,13 @@ func (h *Handler) UpdateRow(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	row, err := h.store.UpdateRow(r.Context(), chi.URLParam(r, "rowID"), in.Values)
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	row, err := h.store.UpdateRow(r.Context(), chi.URLParam(r, "rowID"), in.Values, wsIDs)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "row not found")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -116,7 +133,12 @@ func (h *Handler) UpdateRow(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) DeleteRow(w http.ResponseWriter, r *http.Request) {
-	if err := h.store.DeleteRow(r.Context(), chi.URLParam(r, "rowID")); err != nil {
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	if err := h.store.DeleteRow(r.Context(), chi.URLParam(r, "rowID"), wsIDs); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "row not found")
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -125,12 +147,13 @@ func (h *Handler) DeleteRow(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) ListRows(w http.ResponseWriter, r *http.Request) {
 	dbID := chi.URLParam(r, "dbID")
+	wsIDs := authz.WorkspaceIDs(r.Context())
 	var view *DatabaseView
 	if viewID := r.URL.Query().Get("view_id"); viewID != "" {
 		// Resolve the saved view so filters/sort are applied. A
 		// missing view is silently ignored — the rows still come
 		// back, just unfiltered.
-		views, _ := h.store.ListViews(r.Context(), dbID)
+		views, _ := h.store.ListViews(r.Context(), dbID, wsIDs)
 		for i := range views {
 			if views[i].ID == viewID {
 				view = &views[i]
@@ -138,7 +161,7 @@ func (h *Handler) ListRows(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	rows, err := h.store.ListRows(r.Context(), dbID, view)
+	rows, err := h.store.ListRows(r.Context(), dbID, view, wsIDs)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -158,8 +181,13 @@ func (h *Handler) CreateView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.DatabaseID = chi.URLParam(r, "dbID")
-	v, err := h.store.CreateView(r.Context(), in)
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	v, err := h.store.CreateView(r.Context(), in, wsIDs)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "database not found")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -167,7 +195,8 @@ func (h *Handler) CreateView(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) ListViews(w http.ResponseWriter, r *http.Request) {
-	views, err := h.store.ListViews(r.Context(), chi.URLParam(r, "dbID"))
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	views, err := h.store.ListViews(r.Context(), chi.URLParam(r, "dbID"), wsIDs)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -184,8 +213,13 @@ func (h *Handler) UpdateView(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	v, err := h.store.UpdateView(r.Context(), chi.URLParam(r, "viewID"), updates)
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	v, err := h.store.UpdateView(r.Context(), chi.URLParam(r, "viewID"), updates, wsIDs)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "view not found")
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

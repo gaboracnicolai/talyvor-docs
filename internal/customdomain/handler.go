@@ -3,6 +3,7 @@ package customdomain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
@@ -13,6 +14,18 @@ import (
 	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/model"
 )
+
+// contains reports whether v is present in xs. Used to authorize the
+// caller-supplied path {wsID} against the verified membership set
+// before it becomes a new domain's owner workspace.
+func contains(xs []string, v string) bool {
+	for _, x := range xs {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
 
 // Handler covers two surfaces:
 //   - admin CRUD for custom domains (mounted under /v1)
@@ -68,8 +81,18 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
+	// A new domain may only be created inside a workspace the caller
+	// is a verified member of. The path {wsID} is caller-supplied, so
+	// authorize it against the membership set before it becomes the
+	// new row's owner — otherwise the write lands in a foreign
+	// workspace. Unauthorized → 404 (no existence oracle).
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized write-target: contains(authz.WorkspaceIDs) below rejects non-members before Create owns the new domain
+	if !contains(authz.WorkspaceIDs(r.Context()), wsID) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
 	cd, err := h.store.Create(r.Context(),
-		chi.URLParam(r, "wsID"),
+		wsID,
 		in.Domain,
 		authz.ActorOrEmpty(r.Context()),
 		in.SpaceID,
@@ -82,7 +105,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	out, err := h.store.GetByWorkspace(r.Context(), chi.URLParam(r, "wsID"))
+	out, err := h.store.GetByWorkspace(r.Context(), authz.WorkspaceIDs(r.Context()))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -94,7 +117,11 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Verify(w http.ResponseWriter, r *http.Request) {
-	ok, err := h.store.Verify(r.Context(), chi.URLParam(r, "id"))
+	ok, err := h.store.Verify(r.Context(), chi.URLParam(r, "id"), authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -107,7 +134,12 @@ func (h *Handler) Verify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
-	if err := h.store.Delete(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "wsID")); err != nil {
+	err := h.store.Delete(r.Context(), chi.URLParam(r, "id"), authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}

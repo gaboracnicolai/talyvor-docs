@@ -2,6 +2,7 @@ package permission
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -33,7 +34,7 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 }
 
 func (h *Handler) listSpace(w http.ResponseWriter, r *http.Request) {
-	out, err := h.store.ListForResource(r.Context(), ResourceSpace, chi.URLParam(r, "spaceID"))
+	out, err := h.store.ListForResource(r.Context(), ResourceSpace, chi.URLParam(r, "spaceID"), authz.WorkspaceIDs(r.Context()))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "list failed")
 		return
@@ -45,7 +46,7 @@ func (h *Handler) listSpace(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listPage(w http.ResponseWriter, r *http.Request) {
-	out, err := h.store.ListForResource(r.Context(), ResourcePage, chi.URLParam(r, "pageID"))
+	out, err := h.store.ListForResource(r.Context(), ResourcePage, chi.URLParam(r, "pageID"), authz.WorkspaceIDs(r.Context()))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "list failed")
 		return
@@ -76,6 +77,10 @@ func (h *Handler) grant(w http.ResponseWriter, r *http.Request, resType Resource
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
+	// SEC-4: stamp the grant's workspace from the caller's VERIFIED membership, overriding any
+	// client-supplied in.WorkspaceID — a grant can never be written into a foreign workspace.
+	// (Verifying the target resource_id itself belongs to that workspace is a separate fix, out
+	// of scope here: this closes the workspace_id-spoof vector on the write path.)
 	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
 		in.WorkspaceID = ws
 	}
@@ -96,7 +101,13 @@ func (h *Handler) grant(w http.ResponseWriter, r *http.Request, resType Resource
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
-	if err := h.store.RevokeByID(r.Context(), chi.URLParam(r, "permID")); err != nil {
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	err := h.store.RevokeByID(r.Context(), chi.URLParam(r, "permID"), wsIDs)
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "delete failed")
 		return
 	}

@@ -2,6 +2,7 @@ package templatelib
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -31,14 +32,16 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
+	// Scope to the caller's VERIFIED workspace set, never the {wsID} path
+	// param — the path workspace is spoofable; membership is not.
+	wsIDs := authz.WorkspaceIDs(r.Context())
 	var cat *TemplateCategory
 	if c := strings.TrimSpace(r.URL.Query().Get("category")); c != "" {
 		t := TemplateCategory(c)
 		cat = &t
 	}
 	search := r.URL.Query().Get("search")
-	out, err := h.store.List(r.Context(), wsID, cat, search)
+	out, err := h.store.List(r.Context(), wsIDs, cat, search)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -57,17 +60,30 @@ type fromPageBody struct {
 }
 
 func (h *Handler) FromPage(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
 	var in fromPageBody
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
+	// The SOURCE page read is scoped to the caller's VERIFIED set. The NEW
+	// template's owner is the {wsID} path workspace, but ONLY if the caller
+	// is a verified member of it — otherwise a raw path param could name a
+	// foreign workspace to plant a template into. Reject with 404 (no leak).
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	target := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized write-target: authz.AuthorizeWorkspace below rejects non-members before this workspace owns the new object
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), target); !ok {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
 	creator := authz.ActorOrEmpty(r.Context())
 	tmpl, err := h.store.CreateFromPage(r.Context(),
-		in.PageID, wsID, creator,
-		in.Name, in.Description, in.Category,
+		in.PageID, target, creator,
+		in.Name, in.Description, in.Category, wsIDs,
 	)
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -80,7 +96,6 @@ type useBody struct {
 }
 
 func (h *Handler) Use(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
 	templateID := chi.URLParam(r, "templateID")
 	var in useBody
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -91,11 +106,24 @@ func (h *Handler) Use(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "space_id is required")
 		return
 	}
+	// TEMPLATE read scoped to the caller's VERIFIED set; the NEW page's owner
+	// is the {wsID} path workspace, but only if the caller is a verified
+	// member (else 404 — a raw path param can't name a foreign target).
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	target := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized write-target: authz.AuthorizeWorkspace below rejects non-members before this workspace owns the new object
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), target); !ok {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
 	creator := authz.ActorOrEmpty(r.Context())
 	if creator == "" {
 		creator = "user"
 	}
-	page, err := h.store.UseTemplate(r.Context(), templateID, in.SpaceID, wsID, creator)
+	page, err := h.store.UseTemplate(r.Context(), templateID, in.SpaceID, target, creator, wsIDs)
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -107,9 +135,16 @@ func (h *Handler) Use(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
 	templateID := chi.URLParam(r, "templateID")
-	if err := h.store.Delete(r.Context(), templateID, wsID); err != nil {
+	// Scope to the caller's VERIFIED workspace set, never the {wsID} path
+	// param. A template in a workspace the caller doesn't belong to → 404,
+	// never deleted cross-tenant (the SEC-4 L2 "deceptive shape" fix).
+	err := h.store.Delete(r.Context(), templateID, authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err != nil {
 		// Built-in deletion returns a typed error; map to 400 so
 		// the UI can disable the trash icon for built-ins instead
 		// of treating it as a server fault.

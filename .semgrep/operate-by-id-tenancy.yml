@@ -1,0 +1,59 @@
+# SEC-4 Layer-2 class-guard for the secondary handler groups. Two shapes, both = a verified member
+# of workspace A reaching workspace B's objects:
+#
+#   (a) BARE by-id: a DELETE/UPDATE/SELECT store op `WHERE id = $1` with NO workspace predicate.
+#   (b) DECEPTIVE:  a workspace value taken from chi.URLParam (attacker-controlled path param) and
+#       used to scope a store op — "looks scoped, isn't."
+#
+# The fix for both: scope to the caller's VERIFIED membership set —
+#   WHERE id = $1 AND workspace_id = ANY($n)   with $n = authz.WorkspaceIDs(ctx)
+# (or a parent-join subquery containing `workspace_id = ANY($n)` for child tables).
+#
+# NOTE (metavariable-regex is re.match-ANCHORED and the raw-string value includes the leading
+# backtick, so patterns need a `(?s).*` prefix to match anywhere in the SQL literal).
+rules:
+  - id: docs-by-id-write-requires-workspace-scope
+    languages: [go]
+    severity: ERROR
+    message: >
+      SEC-4 L2: this by-id DELETE/UPDATE (WHERE id = $1) has no workspace_id scope, so a verified
+      member of any workspace can act on another workspace's object by id. Scope it to the caller's
+      verified set: `AND workspace_id = ANY($n)` where $n = authz.WorkspaceIDs(ctx). Reference:
+      internal/page/store.go GetByIDInWorkspaces.
+    patterns:
+      - pattern-either:
+          - pattern: $POOL.Exec($CTX, $SQL, ...)
+          - pattern: $POOL.QueryRow($CTX, $SQL, ...)
+          - pattern: $POOL.Query($CTX, $SQL, ...)
+      - metavariable-regex:
+          metavariable: $SQL
+          regex: (?s).*(DELETE FROM|UPDATE)\s+\w+.*WHERE id = \$1
+      # Excluded when the SAME statement is already membership-scoped (…workspace_id = ANY / = ANY subquery):
+      - pattern-not:
+          patterns:
+            - pattern: $POOL.$M($CTX, $SQL, ...)
+            - metavariable-regex:
+                metavariable: $SQL
+                regex: (?s).*workspace_id = ANY
+
+  - id: docs-no-url-param-workspace-scope
+    languages: [go]
+    severity: ERROR
+    message: >
+      SEC-4 L2 (deceptive shape): a workspace value read from chi.URLParam is attacker-controlled —
+      scoping a store op to it "looks scoped but isn't." Scope by authz.WorkspaceIDs(ctx) (the verified
+      membership set). A path {wsID} may only be used as a WRITE TARGET after authz.AuthorizeWorkspace
+      confirms membership — mark those lines `// nosemgrep: docs-no-url-param-workspace-scope` with the
+      reason. Approximation: this flags every chi.URLParam("wsID"); the few authorized write-targets are
+      suppressed inline (documented limitation).
+    patterns:
+      - pattern: chi.URLParam($R, "wsID")
+    paths:
+      include:
+        - "/internal/approval/"
+        - "/internal/permission/"
+        - "/internal/database/"
+        - "/internal/changelog/"
+        - "/internal/templatelib/"
+        - "/internal/customdomain/"
+        - "/internal/export/"

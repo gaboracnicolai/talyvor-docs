@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -23,6 +24,24 @@ type fakePages struct {
 func (f *fakePages) GetByID(_ context.Context, id string) (*model.Page, error) {
 	return f.byID[id], nil
 }
+
+// GetByIDInWorkspaces mirrors the real store's scoped read: a page is
+// only visible when its WorkspaceID is in wsIDs, otherwise the caller
+// gets page.ErrNotFound (never a nil page + nil error). An empty
+// wsIDs matches nothing.
+func (f *fakePages) GetByIDInWorkspaces(_ context.Context, id string, wsIDs []string) (*model.Page, error) {
+	p := f.byID[id]
+	if p == nil {
+		return nil, page.ErrNotFound
+	}
+	for _, ws := range wsIDs {
+		if p.WorkspaceID == ws {
+			return p, nil
+		}
+	}
+	return nil, page.ErrNotFound
+}
+
 func (f *fakePages) List(_ context.Context, filter page.PageFilter) ([]model.Page, error) {
 	return f.bySpace[filter.SpaceID], nil
 }
@@ -36,16 +55,17 @@ func (f *fakeSpaces) GetByID(_ context.Context, id string) (*model.Space, error)
 func makePage(id, title, prosemirror string, parent *string, position float64) *model.Page {
 	now := time.Date(2026, 5, 23, 10, 0, 0, 0, time.UTC)
 	return &model.Page{
-		ID:        id,
-		SpaceID:   "sp-1",
-		Title:     title,
-		Slug:      strings.ReplaceAll(strings.ToLower(title), " ", "-"),
-		Content:   prosemirror,
-		ParentID:  parent,
-		Position:  position,
-		Icon:      "📄",
-		CreatedAt: now.Add(-24 * time.Hour),
-		UpdatedAt: now,
+		ID:          id,
+		SpaceID:     "sp-1",
+		WorkspaceID: "ws-1",
+		Title:       title,
+		Slug:        strings.ReplaceAll(strings.ToLower(title), " ", "-"),
+		Content:     prosemirror,
+		ParentID:    parent,
+		Position:    position,
+		Icon:        "📄",
+		CreatedAt:   now.Add(-24 * time.Hour),
+		UpdatedAt:   now,
 	}
 }
 
@@ -61,7 +81,7 @@ func TestToMarkdown_IncludesYAMLFrontmatter(t *testing.T) {
 		byID: map[string]*model.Page{"pg-1": makePage("pg-1", "Auth Flow", samplePM, nil, 1)},
 	}, &fakeSpaces{})
 
-	md, err := exp.ToMarkdown(context.Background(), "pg-1", ExportOptions{})
+	md, err := exp.ToMarkdown(context.Background(), "pg-1", []string{"ws-1"}, ExportOptions{})
 	if err != nil {
 		t.Fatalf("ToMarkdown: %v", err)
 	}
@@ -82,16 +102,16 @@ func TestToMarkdown_IncludesChildrenInPositionOrder(t *testing.T) {
 	child2 := makePage("pg-3", "Child 2", samplePM, &parent, 2)
 	exp := newExporter(&fakePages{
 		byID: map[string]*model.Page{
-			parent:  makePage(parent, "Parent", samplePM, nil, 1),
-			"pg-2":  child1,
-			"pg-3":  child2,
+			parent: makePage(parent, "Parent", samplePM, nil, 1),
+			"pg-2": child1,
+			"pg-3": child2,
 		},
 		bySpace: map[string][]model.Page{
 			"sp-1": {*child2, *child1}, // intentionally reversed
 		},
 	}, &fakeSpaces{})
 
-	md, err := exp.ToMarkdown(context.Background(), parent, ExportOptions{IncludeChildren: true})
+	md, err := exp.ToMarkdown(context.Background(), parent, []string{"ws-1"}, ExportOptions{IncludeChildren: true})
 	if err != nil {
 		t.Fatalf("ToMarkdown: %v", err)
 	}
@@ -106,13 +126,62 @@ func TestToMarkdown_IncludesChildrenInPositionOrder(t *testing.T) {
 	}
 }
 
+// ─── SEC-4 L2: workspace scoping ───
+
+// A page that lives in a workspace the caller doesn't belong to (or
+// that doesn't exist) must resolve to page.ErrNotFound — never a
+// silent export of another workspace's private content. Covers every
+// public entry point since they all funnel through gatherPages.
+func TestExport_ForeignOrMissingPageIsNotFound(t *testing.T) {
+	// pg-1 lives in ws-1; the caller only belongs to ws-2.
+	exp := newExporter(&fakePages{
+		byID: map[string]*model.Page{"pg-1": makePage("pg-1", "Secret", samplePM, nil, 1)},
+	}, &fakeSpaces{})
+	callerWS := []string{"ws-2"}
+
+	t.Run("foreign workspace", func(t *testing.T) {
+		if _, err := exp.ToMarkdown(context.Background(), "pg-1", callerWS, ExportOptions{}); !errors.Is(err, page.ErrNotFound) {
+			t.Fatalf("ToMarkdown: want page.ErrNotFound, got %v", err)
+		}
+		if _, err := exp.ToHTML(context.Background(), "pg-1", callerWS, ExportOptions{}); !errors.Is(err, page.ErrNotFound) {
+			t.Fatalf("ToHTML: want page.ErrNotFound, got %v", err)
+		}
+		var buf bytes.Buffer
+		if err := exp.ToPDF(context.Background(), "pg-1", callerWS, ExportOptions{}, &buf); !errors.Is(err, page.ErrNotFound) {
+			t.Fatalf("ToPDF: want page.ErrNotFound, got %v", err)
+		}
+		if buf.Len() != 0 {
+			t.Fatalf("ToPDF streamed %d bytes for a foreign page", buf.Len())
+		}
+		buf.Reset()
+		if err := exp.ToDocx(context.Background(), "pg-1", callerWS, ExportOptions{}, &buf); !errors.Is(err, page.ErrNotFound) {
+			t.Fatalf("ToDocx: want page.ErrNotFound, got %v", err)
+		}
+		if err := exp.ExportPage(context.Background(), "pg-1", callerWS, ExportOptions{Format: FormatMD}, &buf); !errors.Is(err, page.ErrNotFound) {
+			t.Fatalf("ExportPage: want page.ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("nonexistent id", func(t *testing.T) {
+		if _, err := exp.ToMarkdown(context.Background(), "does-not-exist", []string{"ws-1"}, ExportOptions{}); !errors.Is(err, page.ErrNotFound) {
+			t.Fatalf("want page.ErrNotFound, got %v", err)
+		}
+	})
+
+	t.Run("empty workspace set matches nothing", func(t *testing.T) {
+		if _, err := exp.ToMarkdown(context.Background(), "pg-1", nil, ExportOptions{}); !errors.Is(err, page.ErrNotFound) {
+			t.Fatalf("want page.ErrNotFound, got %v", err)
+		}
+	})
+}
+
 // ─── ToHTML ───
 
 func TestToHTML_IncludesInlineCSSAndBody(t *testing.T) {
 	exp := newExporter(&fakePages{
 		byID: map[string]*model.Page{"pg-1": makePage("pg-1", "Deploy Guide", samplePM, nil, 1)},
 	}, &fakeSpaces{})
-	html, err := exp.ToHTML(context.Background(), "pg-1", ExportOptions{})
+	html, err := exp.ToHTML(context.Background(), "pg-1", []string{"ws-1"}, ExportOptions{})
 	if err != nil {
 		t.Fatalf("ToHTML: %v", err)
 	}
@@ -136,7 +205,7 @@ func TestToHTML_IncludesTOCWhenRequested(t *testing.T) {
 	exp := newExporter(&fakePages{
 		byID: map[string]*model.Page{"pg-1": makePage("pg-1", "Guide", pm, nil, 1)},
 	}, &fakeSpaces{})
-	html, err := exp.ToHTML(context.Background(), "pg-1", ExportOptions{IncludeTOC: true})
+	html, err := exp.ToHTML(context.Background(), "pg-1", []string{"ws-1"}, ExportOptions{IncludeTOC: true})
 	if err != nil {
 		t.Fatalf("ToHTML: %v", err)
 	}
@@ -157,7 +226,7 @@ func TestToHTML_EscapesAngleBracketsInContent(t *testing.T) {
 	exp := newExporter(&fakePages{
 		byID: map[string]*model.Page{"pg-1": makePage("pg-1", "Title", pm, nil, 1)},
 	}, &fakeSpaces{})
-	html, _ := exp.ToHTML(context.Background(), "pg-1", ExportOptions{})
+	html, _ := exp.ToHTML(context.Background(), "pg-1", []string{"ws-1"}, ExportOptions{})
 	if strings.Contains(html, "<script>alert(1)</script>") {
 		t.Fatalf("raw script tag leaked into HTML: %s", html)
 	}
@@ -173,7 +242,7 @@ func TestToPDF_WritesPDFBytes(t *testing.T) {
 		byID: map[string]*model.Page{"pg-1": makePage("pg-1", "Title", samplePM, nil, 1)},
 	}, &fakeSpaces{})
 	var buf bytes.Buffer
-	if err := exp.ToPDF(context.Background(), "pg-1", ExportOptions{}, &buf); err != nil {
+	if err := exp.ToPDF(context.Background(), "pg-1", []string{"ws-1"}, ExportOptions{}, &buf); err != nil {
 		t.Fatalf("ToPDF: %v", err)
 	}
 	if buf.Len() == 0 {
@@ -191,7 +260,7 @@ func TestToDocx_WritesValidZipWithDocumentXML(t *testing.T) {
 		byID: map[string]*model.Page{"pg-1": makePage("pg-1", "Doc Title", samplePM, nil, 1)},
 	}, &fakeSpaces{})
 	var buf bytes.Buffer
-	if err := exp.ToDocx(context.Background(), "pg-1", ExportOptions{}, &buf); err != nil {
+	if err := exp.ToDocx(context.Background(), "pg-1", []string{"ws-1"}, ExportOptions{}, &buf); err != nil {
 		t.Fatalf("ToDocx: %v", err)
 	}
 	if buf.Len() == 0 {

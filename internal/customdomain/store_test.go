@@ -132,18 +132,18 @@ func TestVerify_TxtMatch_FlipsVerifiedAndSSL(t *testing.T) {
 	store, pool := newMockStore(t, resolver)
 
 	// Look up current row.
-	pool.ExpectQuery(`SELECT.*FROM custom_domains WHERE id`).
-		WithArgs("d-1").
+	pool.ExpectQuery(`SELECT.*FROM custom_domains WHERE id = \$1 AND workspace_id = ANY\(\$2\)`).
+		WithArgs("d-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(domainCols()).AddRow(
 			"d-1", "ws-1", "docs.company.com", (*string)(nil), false,
 			"talyvor-verify-abc123", "pending", "u-admin", now, now,
 		))
 	// UPDATE flips verified + ssl_status.
-	pool.ExpectExec(`UPDATE custom_domains SET verified = true`).
-		WithArgs("d-1").
+	pool.ExpectExec(`(?s)UPDATE custom_domains SET verified = true.*WHERE id = \$1 AND workspace_id = ANY\(\$2\)`).
+		WithArgs("d-1", []string{"ws-1"}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	verified, err := store.Verify(context.Background(), "d-1")
+	verified, err := store.Verify(context.Background(), "d-1", []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -160,14 +160,14 @@ func TestVerify_NoMatch_ReturnsFalse(t *testing.T) {
 		},
 	}
 	store, pool := newMockStore(t, resolver)
-	pool.ExpectQuery(`SELECT.*FROM custom_domains WHERE id`).
-		WithArgs("d-1").
+	pool.ExpectQuery(`SELECT.*FROM custom_domains WHERE id = \$1 AND workspace_id = ANY\(\$2\)`).
+		WithArgs("d-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(domainCols()).AddRow(
 			"d-1", "ws-1", "docs.company.com", (*string)(nil), false,
 			"talyvor-verify-abc123", "pending", "u-admin", now, now,
 		))
 
-	verified, err := store.Verify(context.Background(), "d-1")
+	verified, err := store.Verify(context.Background(), "d-1", []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -180,14 +180,14 @@ func TestVerify_AlreadyVerifiedIsIdempotent(t *testing.T) {
 	now := time.Now().UTC()
 	resolver := &fakeResolver{} // not consulted — already verified
 	store, pool := newMockStore(t, resolver)
-	pool.ExpectQuery(`SELECT.*FROM custom_domains WHERE id`).
-		WithArgs("d-1").
+	pool.ExpectQuery(`SELECT.*FROM custom_domains WHERE id = \$1 AND workspace_id = ANY\(\$2\)`).
+		WithArgs("d-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(domainCols()).AddRow(
 			"d-1", "ws-1", "docs.company.com", (*string)(nil), true,
 			"talyvor-verify-abc123", "active", "u-admin", now, now,
 		))
 
-	verified, err := store.Verify(context.Background(), "d-1")
+	verified, err := store.Verify(context.Background(), "d-1", []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
@@ -200,10 +200,10 @@ func TestVerify_AlreadyVerifiedIsIdempotent(t *testing.T) {
 
 func TestDelete_RemovesByIDWithinWorkspace(t *testing.T) {
 	store, pool := newMockStore(t, &fakeResolver{})
-	pool.ExpectExec(`DELETE FROM custom_domains WHERE id`).
-		WithArgs("d-1", "ws-1").
+	pool.ExpectExec(`DELETE FROM custom_domains WHERE id = \$1 AND workspace_id = ANY\(\$2\)`).
+		WithArgs("d-1", []string{"ws-1"}).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
-	if err := store.Delete(context.Background(), "d-1", "ws-1"); err != nil {
+	if err := store.Delete(context.Background(), "d-1", []string{"ws-1"}); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 }

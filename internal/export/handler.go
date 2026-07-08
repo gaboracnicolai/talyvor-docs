@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/model"
 	"github.com/talyvor/docs/internal/page"
 )
@@ -46,14 +48,30 @@ func (h *Handler) Export(w http.ResponseWriter, r *http.Request) {
 		Watermark:       q.Get("watermark"),
 	}
 
-	// Look up the page so we can derive a filename. The exporter
-	// itself will re-fetch — kept simple for now, the second call
-	// is cheap (in-process cache hit in most setups).
+	// SEC-4 L2: the source read is scoped to the caller's verified
+	// workspace set (resolved from membership, never from a client
+	// header/body). A page in a workspace the caller doesn't belong to
+	// resolves to page.ErrNotFound → 404, so a member of workspace A
+	// can't export workspace B's private page.
+	wsIDs := authz.WorkspaceIDs(r.Context())
+
+	// Look up the page so we can derive a filename. Scoped to the same
+	// workspace set — a foreign id yields page.ErrNotFound → 404 here
+	// before any content is streamed.
 	rootTitle := "untitled"
 	if e, ok := h.exp.pages.(interface {
-		GetByID(context.Context, string) (*model.Page, error)
+		GetByIDInWorkspaces(context.Context, string, []string) (*model.Page, error)
 	}); ok {
-		if p, _ := e.GetByID(r.Context(), pageID); p != nil {
+		p, err := e.GetByIDInWorkspaces(r.Context(), pageID, wsIDs)
+		if err != nil {
+			if errors.Is(err, page.ErrNotFound) {
+				writeErr(w, http.StatusNotFound, "page not found")
+				return
+			}
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if p != nil {
 			rootTitle = p.Title
 		}
 	}
@@ -61,9 +79,13 @@ func (h *Handler) Export(w http.ResponseWriter, r *http.Request) {
 	// Buffer into the cap. Anything past MaxExportBytes returns 413.
 	var buf limitedBuffer
 	buf.cap = MaxExportBytes
-	if err := h.exp.ExportPage(r.Context(), pageID, opts, &buf); err != nil {
+	if err := h.exp.ExportPage(r.Context(), pageID, wsIDs, opts, &buf); err != nil {
 		if err == errExceedsLimit {
 			writeErr(w, http.StatusRequestEntityTooLarge, "export exceeds 50MB cap")
+			return
+		}
+		if errors.Is(err, page.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "page not found")
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, err.Error())

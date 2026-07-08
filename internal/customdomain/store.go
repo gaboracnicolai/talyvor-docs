@@ -30,6 +30,12 @@ import (
 // table.
 const MaxDomainsPerWorkspace = 5
 
+// ErrNotFound is returned by the admin by-id operations when the
+// target row does not exist within the caller's verified workspace
+// set. Handlers map it to 404 so a foreign id is indistinguishable
+// from a missing one (no cross-workspace existence oracle).
+var ErrNotFound = errors.New("customdomain: not found in workspace")
+
 type CustomDomain struct {
 	ID          string    `json:"id"`
 	WorkspaceID string    `json:"workspace_id"`
@@ -186,13 +192,13 @@ func (s *Store) GetByDomain(ctx context.Context, domain string) (*CustomDomain, 
 	return scan(row)
 }
 
-func (s *Store) GetByWorkspace(ctx context.Context, workspaceID string) ([]CustomDomain, error) {
+func (s *Store) GetByWorkspace(ctx context.Context, wsIDs []string) ([]CustomDomain, error) {
 	if s.pool == nil {
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+cols+` FROM custom_domains WHERE workspace_id = $1 ORDER BY created_at ASC`,
-		workspaceID,
+		`SELECT `+cols+` FROM custom_domains WHERE workspace_id = ANY($1) ORDER BY created_at ASC`,
+		wsIDs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("customdomain: list: %w", err)
@@ -213,13 +219,19 @@ func (s *Store) GetByWorkspace(ctx context.Context, workspaceID string) ([]Custo
 // expected verify_token. Already-verified records return true
 // without re-querying DNS, so the endpoint can be called
 // repeatedly without paying for the lookup every time.
-func (s *Store) Verify(ctx context.Context, id string) (bool, error) {
+func (s *Store) Verify(ctx context.Context, id string, wsIDs []string) (bool, error) {
 	if s.pool == nil {
 		return false, errors.New("customdomain: no pool")
 	}
-	row := s.pool.QueryRow(ctx, `SELECT `+cols+` FROM custom_domains WHERE id = $1`, id)
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+cols+` FROM custom_domains WHERE id = $1 AND workspace_id = ANY($2)`,
+		id, wsIDs,
+	)
 	cd, err := scan(row)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, ErrNotFound
+		}
 		return false, fmt.Errorf("customdomain: not found: %w", err)
 	}
 	if cd.Verified {
@@ -233,13 +245,17 @@ func (s *Store) Verify(ctx context.Context, id string) (bool, error) {
 	}
 	for _, r := range records {
 		if strings.TrimSpace(r) == cd.VerifyToken {
-			if _, err := s.pool.Exec(ctx,
+			tag, err := s.pool.Exec(ctx,
 				`UPDATE custom_domains
                 SET verified = true, ssl_status = 'active', updated_at = NOW()
-                WHERE id = $1`,
-				id,
-			); err != nil {
+                WHERE id = $1 AND workspace_id = ANY($2)`,
+				id, wsIDs,
+			)
+			if err != nil {
 				return false, fmt.Errorf("customdomain: mark verified: %w", err)
+			}
+			if tag.RowsAffected() == 0 {
+				return false, ErrNotFound
 			}
 			return true, nil
 		}
@@ -247,13 +263,19 @@ func (s *Store) Verify(ctx context.Context, id string) (bool, error) {
 	return false, nil
 }
 
-func (s *Store) Delete(ctx context.Context, id, workspaceID string) error {
+func (s *Store) Delete(ctx context.Context, id string, wsIDs []string) error {
 	if s.pool == nil {
 		return errors.New("customdomain: no pool")
 	}
-	_, err := s.pool.Exec(ctx,
-		`DELETE FROM custom_domains WHERE id = $1 AND workspace_id = $2`,
-		id, workspaceID,
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM custom_domains WHERE id = $1 AND workspace_id = ANY($2)`,
+		id, wsIDs,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
