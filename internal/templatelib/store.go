@@ -29,6 +29,13 @@ import (
 	"github.com/talyvor/docs/internal/model"
 )
 
+// ErrNotFound signals a by-id / scoped op resolved to no row IN THE CALLER'S
+// WORKSPACES — the handler maps it to 404 so existence never leaks. Distinct
+// from a raw DB error so a real failure isn't masked as not-found. Built-ins
+// are workspace-less and short-circuit BEFORE any scoped query, so they never
+// surface this error.
+var ErrNotFound = errors.New("templatelib: not found in workspace")
+
 type TemplateCategory string
 
 const (
@@ -115,7 +122,7 @@ func scan(s interface{ Scan(...any) error }) (*LibraryTemplate, error) {
 // by category and/or a free-text search over name+description+tags.
 // Filters run in Go because the row count is bounded and we keep
 // the rule engine testable without per-case SQL.
-func (s *Store) List(ctx context.Context, workspaceID string, category *TemplateCategory, search string) ([]LibraryTemplate, error) {
+func (s *Store) List(ctx context.Context, wsIDs []string, category *TemplateCategory, search string) ([]LibraryTemplate, error) {
 	out := Builtins()
 	// Hydrate per-process use counts onto the returned built-ins.
 	for i := range out {
@@ -123,8 +130,8 @@ func (s *Store) List(ctx context.Context, workspaceID string, category *Template
 	}
 	if s.pool != nil {
 		rows, err := s.pool.Query(ctx,
-			`SELECT `+cols+` FROM library_templates WHERE workspace_id = $1 ORDER BY created_at DESC`,
-			workspaceID,
+			`SELECT `+cols+` FROM library_templates WHERE workspace_id = ANY($1) ORDER BY created_at DESC`,
+			wsIDs,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("templatelib: list: %w", err)
@@ -174,21 +181,35 @@ func filterSearch(in []LibraryTemplate, q string) []LibraryTemplate {
 
 // GetByID returns either a built-in (looked up by stable ID) or a
 // DB-backed custom template.
-func (s *Store) GetByID(ctx context.Context, id string) (*LibraryTemplate, error) {
+func (s *Store) GetByID(ctx context.Context, id string, wsIDs []string) (*LibraryTemplate, error) {
 	if t := builtinByID(id); t != nil {
 		t.UseCount = s.useCountFor(id)
 		return t, nil
 	}
 	if s.pool == nil {
-		return nil, errors.New("templatelib: not found")
+		return nil, ErrNotFound
 	}
-	row := s.pool.QueryRow(ctx, `SELECT `+cols+` FROM library_templates WHERE id = $1`, id)
-	return scan(row)
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+cols+` FROM library_templates WHERE id = $1 AND workspace_id = ANY($2)`,
+		id, wsIDs,
+	)
+	t, err := scan(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
 }
 
 // ─── CreateFromPage ──────────────────────────────────
 
-func (s *Store) CreateFromPage(ctx context.Context, pageID, workspaceID, createdBy, name, description string, category TemplateCategory) (*LibraryTemplate, error) {
+// CreateFromPage templates an existing page. wsIDs is the caller's VERIFIED
+// workspace set: the SOURCE page read is scoped to it so a member can't
+// template-copy a foreign workspace's page (pgx.ErrNoRows → ErrNotFound).
+// workspaceID is the NEW template's owner (the create-target).
+func (s *Store) CreateFromPage(ctx context.Context, pageID, workspaceID, createdBy, name, description string, category TemplateCategory, wsIDs []string) (*LibraryTemplate, error) {
 	if s.pool == nil {
 		return nil, errors.New("templatelib: no pool")
 	}
@@ -203,8 +224,12 @@ func (s *Store) CreateFromPage(ctx context.Context, pageID, workspaceID, created
 		contentText string
 	)
 	if err := s.pool.QueryRow(ctx,
-		`SELECT content, content_text FROM pages WHERE id = $1`, pageID,
+		`SELECT content, content_text FROM pages WHERE id = $1 AND workspace_id = ANY($2)`,
+		pageID, wsIDs,
 	).Scan(&content, &contentText); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("templatelib: source page not found: %w", err)
 	}
 	row := s.pool.QueryRow(ctx,
@@ -220,10 +245,13 @@ func (s *Store) CreateFromPage(ctx context.Context, pageID, workspaceID, created
 
 // ─── UseTemplate ─────────────────────────────────────
 
-// UseTemplate creates a new page from the template and bumps the
-// appropriate counter (in-memory for built-ins, DB for customs).
-// Returns the freshly minted page.
-func (s *Store) UseTemplate(ctx context.Context, templateID, spaceID, workspaceID, createdBy string) (*model.Page, error) {
+// UseTemplate mints a page from the template and bumps the appropriate counter
+// (in-memory for built-ins, DB for customs); it returns the freshly minted page.
+// wsIDs is the caller's VERIFIED workspace set, scoping the TEMPLATE read +
+// use_count bump so a member can't mint from a foreign workspace's custom
+// template (0 rows → ErrNotFound). workspaceID is the TARGET space's workspace
+// — the owner of the NEW page, distinct from the template-read scope.
+func (s *Store) UseTemplate(ctx context.Context, templateID, spaceID, workspaceID, createdBy string, wsIDs []string) (*model.Page, error) {
 	if s.pages == nil {
 		return nil, errors.New("templatelib: no page creator")
 	}
@@ -244,15 +272,22 @@ func (s *Store) UseTemplate(ctx context.Context, templateID, spaceID, workspaceI
 
 	// Custom path — read content, bump use_count, create page.
 	if s.pool == nil {
-		return nil, errors.New("templatelib: template not found")
+		return nil, ErrNotFound
 	}
-	row := s.pool.QueryRow(ctx, `SELECT `+cols+` FROM library_templates WHERE id = $1`, templateID)
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+cols+` FROM library_templates WHERE id = $1 AND workspace_id = ANY($2)`,
+		templateID, wsIDs,
+	)
 	t, err := scan(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
 	if err != nil {
 		return nil, fmt.Errorf("templatelib: not found: %w", err)
 	}
 	if _, err := s.pool.Exec(ctx,
-		`UPDATE library_templates SET use_count = use_count + 1 WHERE id = $1`, templateID,
+		`UPDATE library_templates SET use_count = use_count + 1 WHERE id = $1 AND workspace_id = ANY($2)`,
+		templateID, wsIDs,
 	); err != nil {
 		return nil, fmt.Errorf("templatelib: bump use_count: %w", err)
 	}
@@ -290,16 +325,25 @@ func (s *Store) bumpBuiltin(id string) {
 // Delete removes a workspace template. Built-ins are immutable and
 // can't be deleted — we surface a typed error so the handler can
 // map it to a 400/403.
-func (s *Store) Delete(ctx context.Context, id, workspaceID string) error {
+func (s *Store) Delete(ctx context.Context, id string, wsIDs []string) error {
 	if builtinByID(id) != nil {
 		return errors.New("templatelib: built-in templates cannot be deleted")
 	}
 	if s.pool == nil {
 		return errors.New("templatelib: no pool")
 	}
-	_, err := s.pool.Exec(ctx,
-		`DELETE FROM library_templates WHERE id = $1 AND workspace_id = $2`,
-		id, workspaceID,
+	// Scope by the caller's VERIFIED workspace SET, never a raw path param:
+	// a template in a workspace the caller doesn't belong to is invisible
+	// (0 rows affected → ErrNotFound → 404), never deleted cross-tenant.
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM library_templates WHERE id = $1 AND workspace_id = ANY($2)`,
+		id, wsIDs,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

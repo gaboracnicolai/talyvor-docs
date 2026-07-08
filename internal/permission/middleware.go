@@ -31,7 +31,7 @@ func RequireAccess(store *Store, resolver ResourceResolver, minAccess AccessLeve
 				return
 			}
 			memberID := authz.ActorOrEmpty(r.Context())
-			level, err := store.Check(r.Context(), memberID, res)
+			level, err := store.Check(r.Context(), memberID, res, authz.WorkspaceIDs(r.Context()))
 			if err != nil {
 				writeForbidden(w)
 				return
@@ -96,7 +96,7 @@ func PageResolverFromParam(paramName string, looker PageLookup, store *Store) Re
 		// We use the SPACE creator (not the page creator) for the
 		// default-admin contract — admins of a space should
 		// transitively admin every page in it.
-		spacePerms, _ := store.ListForResource(ctx, ResourceSpace, md.SpaceID)
+		spacePerms, _ := store.ListForResource(ctx, ResourceSpace, md.SpaceID, authz.WorkspaceIDs(ctx))
 		return resourceContext{
 			Type:       ResourcePage,
 			ID:         id,

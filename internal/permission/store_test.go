@@ -72,12 +72,43 @@ func TestRevoke_DeletesByResourceAndSubject(t *testing.T) {
 	}
 }
 
+func TestRevokeByID_ScopedToWorkspaces_Deletes(t *testing.T) {
+	store, pool := newMockStore(t)
+
+	pool.ExpectExec(`DELETE FROM permissions WHERE id = \$1 AND workspace_id = ANY\(\$2\)`).
+		WithArgs("p-1", []string{"ws-1"}).
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+
+	if err := store.RevokeByID(context.Background(), "p-1", []string{"ws-1"}); err != nil {
+		t.Fatalf("RevokeByID: %v", err)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
+func TestRevokeByID_ForeignWorkspace_ReturnsErrNotFound(t *testing.T) {
+	store, pool := newMockStore(t)
+
+	// 0 rows affected — the grant is outside the caller's workspaces.
+	pool.ExpectExec(`DELETE FROM permissions WHERE id = \$1 AND workspace_id = ANY\(\$2\)`).
+		WithArgs("p-foreign", []string{"ws-1"}).
+		WillReturnResult(pgxmock.NewResult("DELETE", 0))
+
+	if err := store.RevokeByID(context.Background(), "p-foreign", []string{"ws-1"}); err != ErrNotFound {
+		t.Fatalf("want ErrNotFound for a grant outside the caller's workspaces, got %v", err)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
+
 func TestListForResource_ReturnsAllGrants(t *testing.T) {
 	store, pool := newMockStore(t)
 	now := time.Now().UTC()
 
-	pool.ExpectQuery(`SELECT.*FROM permissions WHERE resource_type`).
-		WithArgs("space", "sp-1").
+	pool.ExpectQuery(`SELECT.*FROM permissions WHERE resource_type.*workspace_id = ANY`).
+		WithArgs("space", "sp-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows([]string{
 			"id", "resource_type", "resource_id", "subject_type", "subject_id",
 			"access", "workspace_id", "granted_by", "created_at",
@@ -85,7 +116,7 @@ func TestListForResource_ReturnsAllGrants(t *testing.T) {
 			AddRow("p-1", "space", "sp-1", "member", "u-1", "edit", "ws-1", "u-admin", now).
 			AddRow("p-2", "space", "sp-1", "team", "t-1", "view", "ws-1", "u-admin", now))
 
-	out, err := store.ListForResource(context.Background(), ResourceSpace, "sp-1")
+	out, err := store.ListForResource(context.Background(), ResourceSpace, "sp-1", []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("ListForResource: %v", err)
 	}

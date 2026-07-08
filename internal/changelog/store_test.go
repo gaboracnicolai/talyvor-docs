@@ -105,14 +105,14 @@ func TestCreateEntry_AcceptsSemverAndDates(t *testing.T) {
 func TestPublishEntry_SetsTimestamp(t *testing.T) {
 	store, pool := newMockStore(t, &fakeTrack{})
 	now := time.Now().UTC()
-	pool.ExpectQuery(`UPDATE changelog_entries SET published_at`).
-		WithArgs("e-1").
+	pool.ExpectQuery(`UPDATE changelog_entries SET published_at.*workspace_id = ANY`).
+		WithArgs("e-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(entryCols()).AddRow(
 			"e-1", "pg-1", "ws-1", "v2.1.0", "Auth refresh", "Summary",
 			"feature", []string{}, "{}", &now,
 			"u-author", now, now,
 		))
-	out, err := store.PublishEntry(context.Background(), "e-1")
+	out, err := store.PublishEntry(context.Background(), "e-1", []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("PublishEntry: %v", err)
 	}
@@ -123,10 +123,10 @@ func TestPublishEntry_SetsTimestamp(t *testing.T) {
 
 func TestDeleteEntry_DeletesByID(t *testing.T) {
 	store, pool := newMockStore(t, &fakeTrack{})
-	pool.ExpectExec(`DELETE FROM changelog_entries WHERE id`).
-		WithArgs("e-1").
+	pool.ExpectExec(`DELETE FROM changelog_entries WHERE id.*workspace_id = ANY`).
+		WithArgs("e-1", []string{"ws-1"}).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
-	if err := store.DeleteEntry(context.Background(), "e-1"); err != nil {
+	if err := store.DeleteEntry(context.Background(), "e-1", []string{"ws-1"}); err != nil {
 		t.Fatalf("DeleteEntry: %v", err)
 	}
 }
@@ -135,10 +135,10 @@ func TestDeleteEntry_DeletesByID(t *testing.T) {
 
 func TestListEntries_OrdersByPublishedDescThenCreated(t *testing.T) {
 	store, pool := newMockStore(t, &fakeTrack{})
-	pool.ExpectQuery(`SELECT.*FROM changelog_entries WHERE page_id.*ORDER BY published_at DESC NULLS LAST, created_at DESC`).
-		WithArgs("pg-1", 20, 0).
+	pool.ExpectQuery(`SELECT.*FROM changelog_entries WHERE page_id.*workspace_id = ANY.*ORDER BY published_at DESC NULLS LAST, created_at DESC`).
+		WithArgs("pg-1", []string{"ws-1"}, 20, 0).
 		WillReturnRows(pgxmock.NewRows(entryCols()))
-	_, err := store.ListEntries(context.Background(), "pg-1", nil, 20, 0)
+	_, err := store.ListEntries(context.Background(), "pg-1", nil, 20, 0, []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("ListEntries: %v", err)
 	}
@@ -146,11 +146,11 @@ func TestListEntries_OrdersByPublishedDescThenCreated(t *testing.T) {
 
 func TestListEntries_FiltersByType(t *testing.T) {
 	store, pool := newMockStore(t, &fakeTrack{})
-	pool.ExpectQuery(`SELECT.*FROM changelog_entries WHERE page_id.*type = `).
-		WithArgs("pg-1", "feature", 20, 0).
+	pool.ExpectQuery(`SELECT.*FROM changelog_entries WHERE page_id.*type = .*workspace_id = ANY`).
+		WithArgs("pg-1", "feature", []string{"ws-1"}, 20, 0).
 		WillReturnRows(pgxmock.NewRows(entryCols()))
 	tp := EntryFeature
-	if _, err := store.ListEntries(context.Background(), "pg-1", &tp, 20, 0); err != nil {
+	if _, err := store.ListEntries(context.Background(), "pg-1", &tp, 20, 0, []string{"ws-1"}); err != nil {
 		t.Fatalf("ListEntries by type: %v", err)
 	}
 }
@@ -259,10 +259,10 @@ func TestGenerateFromIssues_GracefulWhenTrackUnavailable(t *testing.T) {
 
 func TestGetPublicFeed_OnlyReturnsPublished(t *testing.T) {
 	store, pool := newMockStore(t, &fakeTrack{})
-	pool.ExpectQuery(`SELECT.*FROM changelog_entries WHERE workspace_id.*published_at IS NOT NULL`).
-		WithArgs("ws-1", 10).
+	pool.ExpectQuery(`SELECT.*FROM changelog_entries WHERE workspace_id = ANY.*published_at IS NOT NULL`).
+		WithArgs([]string{"ws-1"}, 10).
 		WillReturnRows(pgxmock.NewRows(entryCols()))
-	_, err := store.GetPublicFeed(context.Background(), "ws-1", 10)
+	_, err := store.GetPublicFeed(context.Background(), []string{"ws-1"}, 10)
 	if err != nil {
 		t.Fatalf("GetPublicFeed: %v", err)
 	}
@@ -270,10 +270,10 @@ func TestGetPublicFeed_OnlyReturnsPublished(t *testing.T) {
 
 func TestGetPublicFeed_ClampsLimit(t *testing.T) {
 	store, pool := newMockStore(t, &fakeTrack{})
-	pool.ExpectQuery(`FROM changelog_entries WHERE workspace_id`).
-		WithArgs("ws-1", 100).
+	pool.ExpectQuery(`FROM changelog_entries WHERE workspace_id = ANY`).
+		WithArgs([]string{"ws-1"}, 100).
 		WillReturnRows(pgxmock.NewRows(entryCols()))
-	if _, err := store.GetPublicFeed(context.Background(), "ws-1", 9999); err != nil {
+	if _, err := store.GetPublicFeed(context.Background(), []string{"ws-1"}, 9999); err != nil {
 		t.Fatalf("GetPublicFeed: %v", err)
 	}
 }

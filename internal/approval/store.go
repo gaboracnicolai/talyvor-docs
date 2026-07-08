@@ -171,12 +171,33 @@ func (s *Store) RequestApproval(ctx context.Context, pageID, workspaceID, reques
 // state. All-approved → ApprovalApproved (+ pages.doc_status =
 // approved). Any-rejected → ApprovalRejected (+ rejected). Mixed
 // with pending → no aggregate flip.
-func (s *Store) Decide(ctx context.Context, requestID, reviewerID, decision, comment string) error {
+//
+// wsIDs is the caller's verified workspace set (SEC-4 L2). The whole
+// operation is gated on the request living in one of those workspaces
+// — if not, we return ErrNotFound BEFORE any decision write, so a
+// caller can't drive a request they can't see. Once that check
+// passes, the subsequent bare-id statements (page lookup, request +
+// page flips) are safe: the request is confirmed in-workspace and its
+// page_id is owned by the same request.
+func (s *Store) Decide(ctx context.Context, requestID, reviewerID, decision, comment string, wsIDs []string) error {
 	if s.pool == nil {
 		return errors.New("approval: no pool")
 	}
 	if !validDecisions[decision] {
 		return fmt.Errorf("approval: invalid decision %q", decision)
+	}
+
+	// Scope gate: the request must live in one of the caller's
+	// workspaces before we touch any decision row.
+	var inWorkspace bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM approval_requests WHERE id = $1 AND workspace_id = ANY($2))`,
+		requestID, wsIDs,
+	).Scan(&inWorkspace); err != nil {
+		return fmt.Errorf("approval: scope check: %w", err)
+	}
+	if !inWorkspace {
+		return ErrNotFound
 	}
 
 	if _, err := s.pool.Exec(ctx,
@@ -259,23 +280,64 @@ func (s *Store) aggregate(ctx context.Context, requestID string) (ApprovalStatus
 	return ApprovalPending, nil
 }
 
+// ─── SEC-4 Layer 2: workspace-scoped by-id ops ─────────────
+//
+// ErrNotFound signals a by-id op resolved to no row IN THE CALLER'S
+// WORKSPACES — the handler maps it to 404. Distinct from a raw DB
+// error so a real failure is never masked as not-found. Each by-id
+// method below takes the caller's verified workspace set (wsIDs,
+// resolved from membership, never from a client header/body) and
+// filters on it: approval_requests scopes directly on workspace_id;
+// review_decisions has no workspace_id so it scopes through its parent
+// request; page-touching ops scope on pages.workspace_id. wsIDs empty
+// (caller has no membership) matches nothing → ErrNotFound / empty
+// list. This is the IDOR cure.
+var ErrNotFound = errors.New("approval: not found in workspace")
+
+// PageInWorkspaces reports whether pageID belongs to one of the caller's verified workspaces —
+// SEC-4 L2: the page-scoped read endpoints 404 a foreign page id (no existence oracle) rather than
+// returning an empty 200.
+func (s *Store) PageInWorkspaces(ctx context.Context, pageID string, wsIDs []string) (bool, error) {
+	if s.pool == nil {
+		return false, nil
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM pages WHERE id = $1 AND workspace_id = ANY($2))`, pageID, wsIDs).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 // ─── Lookups ─────────────────────────────────────────
 
-func (s *Store) GetRequest(ctx context.Context, requestID string) (*ApprovalRequest, error) {
+func (s *Store) GetRequest(ctx context.Context, requestID string, wsIDs []string) (*ApprovalRequest, error) {
 	if s.pool == nil {
 		return nil, errors.New("approval: no pool")
 	}
-	row := s.pool.QueryRow(ctx, `SELECT `+requestCols+` FROM approval_requests WHERE id = $1`, requestID)
-	return scanRequest(row)
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+requestCols+` FROM approval_requests WHERE id = $1 AND workspace_id = ANY($2)`,
+		requestID, wsIDs)
+	req, err := scanRequest(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return req, nil
 }
 
-func (s *Store) GetDecisions(ctx context.Context, requestID string) ([]ReviewDecision, error) {
+func (s *Store) GetDecisions(ctx context.Context, requestID string, wsIDs []string) ([]ReviewDecision, error) {
 	if s.pool == nil {
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+decisionCols+` FROM review_decisions WHERE request_id = $1 ORDER BY created_at ASC`,
-		requestID,
+		`SELECT `+decisionCols+` FROM review_decisions
+        WHERE request_id = $1
+          AND request_id IN (SELECT id FROM approval_requests WHERE workspace_id = ANY($2))
+        ORDER BY created_at ASC`,
+		requestID, wsIDs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("approval: list decisions: %w", err)
@@ -292,13 +354,16 @@ func (s *Store) GetDecisions(ctx context.Context, requestID string) ([]ReviewDec
 	return out, rows.Err()
 }
 
-func (s *Store) ListByPage(ctx context.Context, pageID string) ([]ApprovalRequest, error) {
+func (s *Store) ListByPage(ctx context.Context, pageID string, wsIDs []string) ([]ApprovalRequest, error) {
 	if s.pool == nil {
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+requestCols+` FROM approval_requests WHERE page_id = $1 ORDER BY created_at DESC`,
-		pageID,
+		`SELECT `+requestCols+` FROM approval_requests
+        WHERE page_id = $1
+          AND page_id IN (SELECT id FROM pages WHERE workspace_id = ANY($2))
+        ORDER BY created_at DESC`,
+		pageID, wsIDs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("approval: list by page: %w", err)
@@ -318,7 +383,13 @@ func (s *Store) ListByPage(ctx context.Context, pageID string) ([]ApprovalReques
 // ListPending returns every request where the named reviewer still
 // has a pending decision. Powers the reviewer's "My approvals"
 // inbox + the sidebar badge count.
-func (s *Store) ListPending(ctx context.Context, reviewerID, workspaceID string) ([]ApprovalRequest, error) {
+//
+// wsIDs is the caller's verified workspace set (SEC-4 L2). Previously
+// this scoped on a single workspace id sourced from a URL param
+// (chi.URLParam "wsID") — a deceptive shape that let a caller name a
+// workspace they don't belong to. Now the scope is ANY($2) over the
+// caller's membership set, so a foreign workspace simply yields no rows.
+func (s *Store) ListPending(ctx context.Context, reviewerID string, wsIDs []string) ([]ApprovalRequest, error) {
 	if s.pool == nil {
 		return nil, nil
 	}
@@ -327,9 +398,9 @@ func (s *Store) ListPending(ctx context.Context, reviewerID, workspaceID string)
         FROM approval_requests a
         JOIN review_decisions d ON d.request_id = a.id
         WHERE d.reviewer_id = $1 AND d.decision = 'pending'
-          AND a.workspace_id = $2 AND a.status = 'pending'
+          AND a.workspace_id = ANY($2) AND a.status = 'pending'
         ORDER BY a.created_at DESC`,
-		reviewerID, workspaceID,
+		reviewerID, wsIDs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("approval: list pending: %w", err)
@@ -350,22 +421,29 @@ func (s *Store) ListPending(ctx context.Context, reviewerID, workspaceID string)
 
 // PublishApproved confirms the approved page is live. It re-checks
 // the doc_status as a guard against a stale UI fire-and-forget POST.
-func (s *Store) PublishApproved(ctx context.Context, pageID string) error {
+//
+// wsIDs is the caller's verified workspace set (SEC-4 L2). Both the
+// status read and the publish write scope on pages.workspace_id, so a
+// page outside the caller's workspaces is invisible → ErrNotFound.
+func (s *Store) PublishApproved(ctx context.Context, pageID string, wsIDs []string) error {
 	if s.pool == nil {
 		return errors.New("approval: no pool")
 	}
 	var status string
 	if err := s.pool.QueryRow(ctx,
-		`SELECT doc_status FROM pages WHERE id = $1`, pageID,
+		`SELECT doc_status FROM pages WHERE id = $1 AND workspace_id = ANY($2)`, pageID, wsIDs,
 	).Scan(&status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
 		return fmt.Errorf("approval: page not found: %w", err)
 	}
 	if status != string(DocApproved) {
 		return errors.New("approval: page must be approved before publishing")
 	}
 	if _, err := s.pool.Exec(ctx,
-		`UPDATE pages SET doc_status = $1 WHERE id = $2`,
-		string(DocApproved), pageID,
+		`UPDATE pages SET doc_status = $1 WHERE id = $2 AND workspace_id = ANY($3)`,
+		string(DocApproved), pageID, wsIDs,
 	); err != nil {
 		return err
 	}
@@ -375,13 +453,16 @@ func (s *Store) PublishApproved(ctx context.Context, pageID string) error {
 // SetStatus is the small write surface other packages use to
 // reset a page back to draft (e.g. on edit). Centralised here so
 // the state-machine logic stays in one place.
-func (s *Store) SetStatus(ctx context.Context, pageID string, status DocStatus) error {
+//
+// wsIDs is the caller's verified workspace set (SEC-4 L2): the write
+// only lands on a page in one of those workspaces.
+func (s *Store) SetStatus(ctx context.Context, pageID string, status DocStatus, wsIDs []string) error {
 	if s.pool == nil {
 		return errors.New("approval: no pool")
 	}
 	_, err := s.pool.Exec(ctx,
-		`UPDATE pages SET doc_status = $1 WHERE id = $2`,
-		string(status), pageID,
+		`UPDATE pages SET doc_status = $1 WHERE id = $2 AND workspace_id = ANY($3)`,
+		string(status), pageID, wsIDs,
 	)
 	return err
 }

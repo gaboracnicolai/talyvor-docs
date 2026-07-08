@@ -92,6 +92,19 @@ func scan(s interface{ Scan(...any) error }) (*Permission, error) {
 	return &p, nil
 }
 
+// ─── SEC-4 Layer 2: workspace-scoped by-id ops ─────────────
+//
+// The permissions table carries workspace_id directly, so a by-id op scopes with a single
+// `AND workspace_id = ANY($n)` predicate. The wsIDs slice is the caller's VERIFIED membership set
+// (authz.WorkspaceIDs) — never a URL/body value — so a grant in a workspace the caller doesn't
+// belong to is invisible: 0 rows → ErrNotFound → 404, no existence oracle. wsIDs empty (caller has
+// no membership) matches nothing → ErrNotFound. This is the fail-closed cure for the cross-tenant
+// leak: RevokeByID could otherwise delete ANY grant (including admin) in ANY workspace by its id.
+
+// ErrNotFound signals a by-id op resolved to no row IN THE CALLER'S WORKSPACES — the handler maps
+// it to 404. Distinct from a raw DB error so a real failure is never masked as not-found.
+var ErrNotFound = errors.New("permission: not found in workspace")
+
 // Grant inserts or updates a permission. UNIQUE on (resource,
 // subject) collapses duplicates so re-granting becomes an access
 // upgrade rather than a duplicate row.
@@ -134,26 +147,39 @@ func (s *Store) Revoke(ctx context.Context, resourceType ResourceType, resourceI
 }
 
 // RevokeByID removes a single grant by its primary key. Used by the
-// REST handler that exposes permission IDs.
-func (s *Store) RevokeByID(ctx context.Context, id string) error {
+// REST handler that exposes permission IDs. Scoped to the caller's verified workspaces (wsIDs):
+// a grant outside them can't be deleted — 0 rows affected → ErrNotFound → 404. This is the worst
+// op to leave unscoped, since a cross-tenant caller could otherwise revoke any grant (incl. admin)
+// in a workspace they don't belong to.
+func (s *Store) RevokeByID(ctx context.Context, id string, wsIDs []string) error {
 	if s.pool == nil {
 		return errors.New("permission: no pool")
 	}
-	_, err := s.pool.Exec(ctx, `DELETE FROM permissions WHERE id = $1`, id)
-	return err
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM permissions WHERE id = $1 AND workspace_id = ANY($2)`, id, wsIDs)
+	if err != nil {
+		return fmt.Errorf("permission: revoke by id: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ListForResource returns every grant attached to the given resource.
 // The result is sorted by created_at so the UI shows the original
-// owner first.
-func (s *Store) ListForResource(ctx context.Context, resourceType ResourceType, resourceID string) ([]Permission, error) {
+// owner first. Scoped to the caller's verified workspaces (wsIDs): a resource in a foreign
+// workspace yields an empty list, never another tenant's grants. No ErrNotFound — a list of a
+// foreign/absent resource is legitimately empty, not an error.
+func (s *Store) ListForResource(ctx context.Context, resourceType ResourceType, resourceID string, wsIDs []string) ([]Permission, error) {
 	if s.pool == nil {
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+cols+` FROM permissions WHERE resource_type = $1 AND resource_id = $2
+          AND workspace_id = ANY($3)
         ORDER BY created_at ASC`,
-		string(resourceType), resourceID,
+		string(resourceType), resourceID, wsIDs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("permission: list: %w", err)
@@ -268,8 +294,8 @@ func resolveAccess(res resourceContext, memberID string, perms []Permission) Acc
 // space / page lookup) and pass it alongside the resource's own
 // grants. Storing the lookup outside this package means handlers
 // can wire any storage layer.
-func (s *Store) Check(ctx context.Context, memberID string, res resourceContext) (AccessLevel, error) {
-	perms, err := s.ListForResource(ctx, res.Type, res.ID)
+func (s *Store) Check(ctx context.Context, memberID string, res resourceContext, wsIDs []string) (AccessLevel, error) {
+	perms, err := s.ListForResource(ctx, res.Type, res.ID, wsIDs)
 	if err != nil {
 		return AccessNone, err
 	}

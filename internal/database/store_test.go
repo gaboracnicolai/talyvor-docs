@@ -72,12 +72,12 @@ func TestUpdateSchema_PersistsColumns(t *testing.T) {
 	}
 	encoded, _ := json.Marshal(schema)
 
-	pool.ExpectQuery(`UPDATE databases SET schema`).
-		WithArgs(pgxmock.AnyArg(), "db-1").
+	pool.ExpectQuery(`UPDATE databases SET schema.*workspace_id = ANY\(\$3\)`).
+		WithArgs(pgxmock.AnyArg(), "db-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(testDBCols()).
 			AddRow("db-1", "pg-1", "ws-1", "Roadmap", encoded, now, now))
 
-	got, err := store.UpdateSchema(context.Background(), "db-1", schema)
+	got, err := store.UpdateSchema(context.Background(), "db-1", schema, []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("UpdateSchema: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestUpdateSchema_RejectsTooManyColumns(t *testing.T) {
 	for i := range cols {
 		cols[i] = ColumnDef{ID: "c", Name: "x", Type: ColText}
 	}
-	_, err := store.UpdateSchema(context.Background(), "db-1", cols)
+	_, err := store.UpdateSchema(context.Background(), "db-1", cols, []string{"ws-1"})
 	if err == nil {
 		t.Fatal("expected error past MaxColumns")
 	}
@@ -105,6 +105,9 @@ func TestCreateRow_StoresValuesAsJSONB(t *testing.T) {
 	now := time.Now().UTC()
 	values := map[string]any{"c-1": "Auth", "c-2": "todo"}
 
+	pool.ExpectQuery(`SELECT EXISTS.*FROM databases WHERE id = \$1 AND workspace_id = ANY\(\$2\)`).
+		WithArgs("db-1", []string{"ws-1"}).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 	pool.ExpectQuery(`INSERT INTO database_rows`).
 		WithArgs("db-1", pgxmock.AnyArg(), float64(1)).
 		WillReturnRows(pgxmock.NewRows(testRowCols()).
@@ -114,7 +117,7 @@ func TestCreateRow_StoresValuesAsJSONB(t *testing.T) {
 		DatabaseID: "db-1",
 		Values:     values,
 		Position:   1,
-	})
+	}, []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("CreateRow: %v", err)
 	}
@@ -129,15 +132,15 @@ func TestUpdateRow_MergesValues(t *testing.T) {
 	// Existing row has c-1=Auth, c-2=todo. The patch updates only c-2.
 	existing := mustJSON(map[string]any{"c-1": "Auth", "c-2": "todo"})
 
-	pool.ExpectQuery(`SELECT values FROM database_rows WHERE id`).
-		WithArgs("r-1").
+	pool.ExpectQuery(`SELECT values FROM database_rows WHERE id.*workspace_id = ANY\(\$2\)`).
+		WithArgs("r-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows([]string{"values"}).AddRow(existing))
-	pool.ExpectQuery(`UPDATE database_rows SET values`).
-		WithArgs(pgxmock.AnyArg(), "r-1").
+	pool.ExpectQuery(`UPDATE database_rows SET values.*workspace_id = ANY\(\$3\)`).
+		WithArgs(pgxmock.AnyArg(), "r-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(testRowCols()).
 			AddRow("r-1", "db-1", mustJSON(map[string]any{"c-1": "Auth", "c-2": "doing"}), float64(1), now, now))
 
-	got, err := store.UpdateRow(context.Background(), "r-1", map[string]any{"c-2": "doing"})
+	got, err := store.UpdateRow(context.Background(), "r-1", map[string]any{"c-2": "doing"}, []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("UpdateRow: %v", err)
 	}
@@ -148,10 +151,10 @@ func TestUpdateRow_MergesValues(t *testing.T) {
 
 func TestDeleteRow_DeletesByID(t *testing.T) {
 	store, pool := newMockStore(t)
-	pool.ExpectExec(`DELETE FROM database_rows WHERE id`).
-		WithArgs("r-1").
+	pool.ExpectExec(`DELETE FROM database_rows WHERE id.*workspace_id = ANY\(\$2\)`).
+		WithArgs("r-1", []string{"ws-1"}).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
-	if err := store.DeleteRow(context.Background(), "r-1"); err != nil {
+	if err := store.DeleteRow(context.Background(), "r-1", []string{"ws-1"}); err != nil {
 		t.Fatalf("DeleteRow: %v", err)
 	}
 }
@@ -169,13 +172,13 @@ func TestListRows_AppliesFilterAndSort(t *testing.T) {
 
 	// We don't pin exact SQL since the predicate is built dynamically,
 	// but the regex must catch the operator we expect to see.
-	pool.ExpectQuery(`SELECT.*FROM database_rows WHERE database_id.*ORDER BY`).
-		WithArgs("db-1").
+	pool.ExpectQuery(`SELECT.*FROM database_rows WHERE database_id.*workspace_id = ANY\(\$2\).*ORDER BY`).
+		WithArgs("db-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(testRowCols()).
 			AddRow("r-1", "db-1", mustJSON(map[string]any{"c-1": "Apple", "c-2": "todo"}), float64(1), now, now).
 			AddRow("r-2", "db-1", mustJSON(map[string]any{"c-1": "Bear", "c-2": "todo"}), float64(2), now, now))
 
-	out, err := store.ListRows(context.Background(), "db-1", view)
+	out, err := store.ListRows(context.Background(), "db-1", view, []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("ListRows: %v", err)
 	}
@@ -193,11 +196,11 @@ func TestListRows_AppliesFilterAndSort(t *testing.T) {
 func TestListRows_NoViewReturnsByPosition(t *testing.T) {
 	store, pool := newMockStore(t)
 	now := time.Now().UTC()
-	pool.ExpectQuery(`SELECT.*FROM database_rows WHERE database_id.*ORDER BY position`).
-		WithArgs("db-1").
+	pool.ExpectQuery(`SELECT.*FROM database_rows WHERE database_id.*workspace_id = ANY\(\$2\).*ORDER BY position`).
+		WithArgs("db-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(testRowCols()).
 			AddRow("r-1", "db-1", mustJSON(map[string]any{"c-1": "First"}), float64(1), now, now))
-	out, err := store.ListRows(context.Background(), "db-1", nil)
+	out, err := store.ListRows(context.Background(), "db-1", nil, []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("ListRows: %v", err)
 	}
@@ -211,6 +214,9 @@ func TestListRows_NoViewReturnsByPosition(t *testing.T) {
 func TestCreateView_StoresTableView(t *testing.T) {
 	store, pool := newMockStore(t)
 	now := time.Now().UTC()
+	pool.ExpectQuery(`SELECT EXISTS.*FROM databases WHERE id = \$1 AND workspace_id = ANY\(\$2\)`).
+		WithArgs("db-1", []string{"ws-1"}).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 	pool.ExpectQuery(`INSERT INTO database_views`).
 		WithArgs("db-1", "All items", "table", pgxmock.AnyArg(), "c-1", "asc", "", pgxmock.AnyArg()).
 		WillReturnRows(pgxmock.NewRows(testViewCols()).AddRow(
@@ -224,7 +230,7 @@ func TestCreateView_StoresTableView(t *testing.T) {
 		Type:       ViewTable,
 		SortBy:     "c-1",
 		SortDir:    "asc",
-	})
+	}, []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("CreateView: %v", err)
 	}
@@ -236,12 +242,12 @@ func TestCreateView_StoresTableView(t *testing.T) {
 func TestListViews_ReturnsAll(t *testing.T) {
 	store, pool := newMockStore(t)
 	now := time.Now().UTC()
-	pool.ExpectQuery(`SELECT.*FROM database_views WHERE database_id`).
-		WithArgs("db-1").
+	pool.ExpectQuery(`SELECT.*FROM database_views WHERE database_id.*workspace_id = ANY\(\$2\)`).
+		WithArgs("db-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(testViewCols()).
 			AddRow("v-1", "db-1", "Table", "table", []byte("[]"), "", "asc", "", []string{}, now).
 			AddRow("v-2", "db-1", "Kanban", "kanban", []byte("[]"), "", "asc", "c-status", []string{}, now))
-	out, err := store.ListViews(context.Background(), "db-1")
+	out, err := store.ListViews(context.Background(), "db-1", []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("ListViews: %v", err)
 	}

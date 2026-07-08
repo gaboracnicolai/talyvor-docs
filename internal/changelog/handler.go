@@ -3,6 +3,7 @@ package changelog
 import (
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -65,7 +66,8 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 		et := EntryType(t)
 		typ = &et
 	}
-	out, err := h.store.ListEntries(r.Context(), chi.URLParam(r, "pageID"), typ, limit, offset)
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	out, err := h.store.ListEntries(r.Context(), chi.URLParam(r, "pageID"), typ, limit, offset, wsIDs)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -77,9 +79,14 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
-	e, err := h.store.GetEntry(r.Context(), chi.URLParam(r, "id"))
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	e, err := h.store.GetEntry(r.Context(), chi.URLParam(r, "id"), wsIDs)
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, e)
@@ -91,7 +98,12 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	e, err := h.store.UpdateEntry(r.Context(), chi.URLParam(r, "id"), updates)
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	e, err := h.store.UpdateEntry(r.Context(), chi.URLParam(r, "id"), updates, wsIDs)
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -100,7 +112,13 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
-	if err := h.store.DeleteEntry(r.Context(), chi.URLParam(r, "id")); err != nil {
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	err := h.store.DeleteEntry(r.Context(), chi.URLParam(r, "id"), wsIDs)
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -108,7 +126,12 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
-	e, err := h.store.PublishEntry(r.Context(), chi.URLParam(r, "id"))
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	e, err := h.store.PublishEntry(r.Context(), chi.URLParam(r, "id"), wsIDs)
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -167,8 +190,11 @@ type rss struct {
 }
 
 func (h *Handler) Feed(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
-	entries, err := h.store.GetPublicFeed(r.Context(), wsID, 50)
+	// SEC-4 L2 DECEPTIVE shape: the feed is scoped to the caller's VERIFIED workspace set,
+	// never the {wsID} URL param — otherwise any caller could read another workspace's
+	// published feed by naming its id in the path.
+	wsIDs := authz.WorkspaceIDs(r.Context())
+	entries, err := h.store.GetPublicFeed(r.Context(), wsIDs, 50)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

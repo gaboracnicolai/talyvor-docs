@@ -48,6 +48,7 @@ type ExportOptions struct {
 // *space.Store satisfy them structurally.
 type pageReader interface {
 	GetByID(ctx context.Context, id string) (*model.Page, error)
+	GetByIDInWorkspaces(ctx context.Context, id string, wsIDs []string) (*model.Page, error)
 	List(ctx context.Context, filter page.PageFilter) ([]model.Page, error)
 }
 
@@ -71,26 +72,26 @@ func newExporter(pages pageReader, spaces spaceReader) *Exporter {
 // ExportPage is the top-level entry point used by the HTTP handler.
 // It dispatches to the right backend based on opts.Format and
 // streams the resulting bytes into w.
-func (e *Exporter) ExportPage(ctx context.Context, pageID string, opts ExportOptions, w io.Writer) error {
+func (e *Exporter) ExportPage(ctx context.Context, pageID string, wsIDs []string, opts ExportOptions, w io.Writer) error {
 	switch opts.Format {
 	case FormatMD:
-		md, err := e.ToMarkdown(ctx, pageID, opts)
+		md, err := e.ToMarkdown(ctx, pageID, wsIDs, opts)
 		if err != nil {
 			return err
 		}
 		_, err = io.WriteString(w, md)
 		return err
 	case FormatHTML:
-		body, err := e.ToHTML(ctx, pageID, opts)
+		body, err := e.ToHTML(ctx, pageID, wsIDs, opts)
 		if err != nil {
 			return err
 		}
 		_, err = io.WriteString(w, body)
 		return err
 	case FormatPDF:
-		return e.ToPDF(ctx, pageID, opts, w)
+		return e.ToPDF(ctx, pageID, wsIDs, opts, w)
 	case FormatDocx:
-		return e.ToDocx(ctx, pageID, opts, w)
+		return e.ToDocx(ctx, pageID, wsIDs, opts, w)
 	}
 	return fmt.Errorf("export: unsupported format %q", opts.Format)
 }
@@ -98,8 +99,12 @@ func (e *Exporter) ExportPage(ctx context.Context, pageID string, opts ExportOpt
 // gatherPages returns the root page followed by its children (in
 // position order) when opts.IncludeChildren is set. This is the
 // expansion every format walks before rendering.
-func (e *Exporter) gatherPages(ctx context.Context, pageID string, includeChildren bool) ([]model.Page, error) {
-	root, err := e.pages.GetByID(ctx, pageID)
+func (e *Exporter) gatherPages(ctx context.Context, pageID string, wsIDs []string, includeChildren bool) ([]model.Page, error) {
+	// SEC-4 L2: scope the source read to the caller's verified
+	// workspace set. A foreign / nonexistent id resolves to no row →
+	// page.ErrNotFound, which the handler maps to 404 — a member of
+	// workspace A can no longer export workspace B's private page.
+	root, err := e.pages.GetByIDInWorkspaces(ctx, pageID, wsIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -117,6 +122,13 @@ func (e *Exporter) gatherPages(ctx context.Context, pageID string, includeChildr
 	var children []model.Page
 	for _, p := range siblings {
 		if p.ID == root.ID {
+			continue
+		}
+		// Belt-and-braces: only include children that share the root's
+		// verified workspace. The root read above is the load-bearing
+		// scope check; this keeps a cross-workspace child (should one
+		// ever share a space) out of the export too.
+		if p.WorkspaceID != root.WorkspaceID {
 			continue
 		}
 		if p.ParentID != nil && *p.ParentID == root.ID {
@@ -151,8 +163,8 @@ func slugFilename(title, ext string) string {
 // ToMarkdown emits a clean markdown document with YAML frontmatter
 // pulled from the page metadata. When IncludeChildren is set, each
 // child page renders below a horizontal rule with its own subhead.
-func (e *Exporter) ToMarkdown(ctx context.Context, pageID string, opts ExportOptions) (string, error) {
-	pages, err := e.gatherPages(ctx, pageID, opts.IncludeChildren)
+func (e *Exporter) ToMarkdown(ctx context.Context, pageID string, wsIDs []string, opts ExportOptions) (string, error) {
+	pages, err := e.gatherPages(ctx, pageID, wsIDs, opts.IncludeChildren)
 	if err != nil {
 		return "", err
 	}
@@ -198,8 +210,8 @@ hr{border:0;border-top:1px solid #ddd;margin:2em 0}
 .watermark{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-30deg);font-size:6em;color:rgba(0,0,0,0.05);pointer-events:none;z-index:-1}
 footer{margin-top:3em;padding-top:1em;border-top:1px solid #eee;color:#888;font-size:0.85em;text-align:center}`
 
-func (e *Exporter) ToHTML(ctx context.Context, pageID string, opts ExportOptions) (string, error) {
-	pages, err := e.gatherPages(ctx, pageID, opts.IncludeChildren)
+func (e *Exporter) ToHTML(ctx context.Context, pageID string, wsIDs []string, opts ExportOptions) (string, error) {
+	pages, err := e.gatherPages(ctx, pageID, wsIDs, opts.IncludeChildren)
 	if err != nil {
 		return "", err
 	}
@@ -430,8 +442,8 @@ func wrapMarks(text string, marks []any) string {
 
 // ─── PDF ─────────────────────────────────────────────
 
-func (e *Exporter) ToPDF(ctx context.Context, pageID string, opts ExportOptions, w io.Writer) error {
-	pages, err := e.gatherPages(ctx, pageID, opts.IncludeChildren)
+func (e *Exporter) ToPDF(ctx context.Context, pageID string, wsIDs []string, opts ExportOptions, w io.Writer) error {
+	pages, err := e.gatherPages(ctx, pageID, wsIDs, opts.IncludeChildren)
 	if err != nil {
 		return err
 	}
@@ -618,8 +630,8 @@ var docxStaticParts = map[string]string{
 </w:styles>`,
 }
 
-func (e *Exporter) ToDocx(ctx context.Context, pageID string, opts ExportOptions, w io.Writer) error {
-	pages, err := e.gatherPages(ctx, pageID, opts.IncludeChildren)
+func (e *Exporter) ToDocx(ctx context.Context, pageID string, wsIDs []string, opts ExportOptions, w io.Writer) error {
+	pages, err := e.gatherPages(ctx, pageID, wsIDs, opts.IncludeChildren)
 	if err != nil {
 		return err
 	}

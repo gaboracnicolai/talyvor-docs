@@ -28,6 +28,17 @@ const (
 	MaxRows    = 10_000
 )
 
+// SEC-4 Layer 2: by-id ops scope to the caller's VERIFIED workspace set (resolved from
+// membership by Layer 1), passed as wsIDs. `databases` carries workspace_id directly; the
+// child tables (database_rows, database_views) join back to `databases` on database_id. A row
+// whose owning database lives in a workspace the caller doesn't belong to is invisible →
+// ErrNotFound → 404, never leaking existence. wsIDs empty (no membership) matches nothing.
+// The workspace filter comes from verified membership, never a client header/body — the IDOR cure.
+
+// ErrNotFound signals a by-id op resolved to no row IN THE CALLER'S WORKSPACES — the handler
+// maps it to 404. Distinct from a raw DB error so a real failure is never masked as not-found.
+var ErrNotFound = errors.New("database: not found in workspace")
+
 // ─── Types ───────────────────────────────────────────
 
 type ColumnType string
@@ -123,7 +134,7 @@ const dbCols = `id, page_id, workspace_id, name, schema, created_at, updated_at`
 
 func scanDatabase(s interface{ Scan(...any) error }) (*Database, error) {
 	var (
-		d        Database
+		d         Database
 		rawSchema []byte
 	)
 	if err := s.Scan(&d.ID, &d.PageID, &d.WorkspaceID, &d.Name, &rawSchema, &d.CreatedAt, &d.UpdatedAt); err != nil {
@@ -164,15 +175,36 @@ func (s *Store) CreateDatabase(ctx context.Context, d Database) (*Database, erro
 	return scanDatabase(row)
 }
 
-func (s *Store) GetDatabase(ctx context.Context, id string) (*Database, error) {
+// assertDatabaseInWorkspaces returns ErrNotFound unless database id lives in one of wsIDs. Used
+// by the child-table ops (rows/views) to gate an INSERT keyed by a caller-supplied database_id.
+func (s *Store) assertDatabaseInWorkspaces(ctx context.Context, databaseID string, wsIDs []string) error {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM databases WHERE id = $1 AND workspace_id = ANY($2))`,
+		databaseID, wsIDs,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("database: scope check: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) GetDatabase(ctx context.Context, id string, wsIDs []string) (*Database, error) {
 	if s.pool == nil {
 		return nil, errors.New("database: no pool")
 	}
-	row := s.pool.QueryRow(ctx, `SELECT `+dbCols+` FROM databases WHERE id = $1`, id)
-	return scanDatabase(row)
+	row := s.pool.QueryRow(ctx,
+		`SELECT `+dbCols+` FROM databases WHERE id = $1 AND workspace_id = ANY($2)`, id, wsIDs)
+	d, err := scanDatabase(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return d, err
 }
 
-func (s *Store) UpdateSchema(ctx context.Context, id string, schema []ColumnDef) (*Database, error) {
+func (s *Store) UpdateSchema(ctx context.Context, id string, schema []ColumnDef, wsIDs []string) (*Database, error) {
 	if s.pool == nil {
 		return nil, errors.New("database: no pool")
 	}
@@ -181,10 +213,14 @@ func (s *Store) UpdateSchema(ctx context.Context, id string, schema []ColumnDef)
 	}
 	encoded, _ := json.Marshal(schema)
 	row := s.pool.QueryRow(ctx,
-		`UPDATE databases SET schema = $1, updated_at = NOW() WHERE id = $2 RETURNING `+dbCols,
-		encoded, id,
+		`UPDATE databases SET schema = $1, updated_at = NOW() WHERE id = $2 AND workspace_id = ANY($3) RETURNING `+dbCols,
+		encoded, id, wsIDs,
 	)
-	return scanDatabase(row)
+	d, err := scanDatabase(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return d, err
 }
 
 func validateSchema(cols []ColumnDef) error {
@@ -213,12 +249,17 @@ func scanRow(s interface{ Scan(...any) error }) (*Row, error) {
 	return &r, nil
 }
 
-func (s *Store) CreateRow(ctx context.Context, r Row) (*Row, error) {
+func (s *Store) CreateRow(ctx context.Context, r Row, wsIDs []string) (*Row, error) {
 	if s.pool == nil {
 		return nil, errors.New("database: no pool")
 	}
 	if r.DatabaseID == "" {
 		return nil, errors.New("database: database_id required")
+	}
+	// A member of A can't add rows to B's database: the target database must live in the
+	// caller's verified workspace set.
+	if err := s.assertDatabaseInWorkspaces(ctx, r.DatabaseID, wsIDs); err != nil {
+		return nil, err
 	}
 	if r.Values == nil {
 		r.Values = map[string]any{}
@@ -237,7 +278,7 @@ func (s *Store) CreateRow(ctx context.Context, r Row) (*Row, error) {
 // do the merge in Go (read-modify-write) because pgx's `||` JSONB
 // operator silently overwrites entire object keys and we want a
 // per-cell semantics — patch{c-2: doing} should keep c-1 intact.
-func (s *Store) UpdateRow(ctx context.Context, id string, patch map[string]any) (*Row, error) {
+func (s *Store) UpdateRow(ctx context.Context, id string, patch map[string]any, wsIDs []string) (*Row, error) {
 	if s.pool == nil {
 		return nil, errors.New("database: no pool")
 	}
@@ -246,8 +287,12 @@ func (s *Store) UpdateRow(ctx context.Context, id string, patch map[string]any) 
 	}
 	var existing []byte
 	if err := s.pool.QueryRow(ctx,
-		`SELECT values FROM database_rows WHERE id = $1`, id,
+		`SELECT values FROM database_rows WHERE id = $1
+        AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($2))`, id, wsIDs,
 	).Scan(&existing); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, fmt.Errorf("database: row not found: %w", err)
 	}
 	merged := map[string]any{}
@@ -259,18 +304,31 @@ func (s *Store) UpdateRow(ctx context.Context, id string, patch map[string]any) 
 	}
 	encoded, _ := json.Marshal(merged)
 	row := s.pool.QueryRow(ctx,
-		`UPDATE database_rows SET values = $1, updated_at = NOW() WHERE id = $2 RETURNING `+rowCols,
-		encoded, id,
+		`UPDATE database_rows SET values = $1, updated_at = NOW() WHERE id = $2
+        AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($3)) RETURNING `+rowCols,
+		encoded, id, wsIDs,
 	)
-	return scanRow(row)
+	r, err := scanRow(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return r, err
 }
 
-func (s *Store) DeleteRow(ctx context.Context, id string) error {
+func (s *Store) DeleteRow(ctx context.Context, id string, wsIDs []string) error {
 	if s.pool == nil {
 		return errors.New("database: no pool")
 	}
-	_, err := s.pool.Exec(ctx, `DELETE FROM database_rows WHERE id = $1`, id)
-	return err
+	tag, err := s.pool.Exec(ctx,
+		`DELETE FROM database_rows WHERE id = $1
+        AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($2))`, id, wsIDs)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ListRows fetches every row for the database, then applies the
@@ -278,13 +336,15 @@ func (s *Store) DeleteRow(ctx context.Context, id string) error {
 // rather than building dynamic WHERE clauses against JSONB because
 // the row counts are bounded (MaxRows = 10K) and the rule engine
 // stays unit-testable.
-func (s *Store) ListRows(ctx context.Context, databaseID string, view *DatabaseView) ([]Row, error) {
+func (s *Store) ListRows(ctx context.Context, databaseID string, view *DatabaseView, wsIDs []string) ([]Row, error) {
 	if s.pool == nil {
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+rowCols+` FROM database_rows WHERE database_id = $1 ORDER BY position ASC`,
-		databaseID,
+		`SELECT `+rowCols+` FROM database_rows WHERE database_id = $1
+        AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($2))
+        ORDER BY position ASC`,
+		databaseID, wsIDs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("database: list rows: %w", err)
@@ -468,9 +528,13 @@ func scanView(s interface{ Scan(...any) error }) (*DatabaseView, error) {
 	return &v, nil
 }
 
-func (s *Store) CreateView(ctx context.Context, v DatabaseView) (*DatabaseView, error) {
+func (s *Store) CreateView(ctx context.Context, v DatabaseView, wsIDs []string) (*DatabaseView, error) {
 	if s.pool == nil {
 		return nil, errors.New("database: no pool")
+	}
+	// A member of A can't add views to B's database.
+	if err := s.assertDatabaseInWorkspaces(ctx, v.DatabaseID, wsIDs); err != nil {
+		return nil, err
 	}
 	if v.Type == "" {
 		v.Type = ViewTable
@@ -497,13 +561,15 @@ func (s *Store) CreateView(ctx context.Context, v DatabaseView) (*DatabaseView, 
 	return scanView(row)
 }
 
-func (s *Store) ListViews(ctx context.Context, databaseID string) ([]DatabaseView, error) {
+func (s *Store) ListViews(ctx context.Context, databaseID string, wsIDs []string) ([]DatabaseView, error) {
 	if s.pool == nil {
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+viewSelectCols+` FROM database_views WHERE database_id = $1 ORDER BY created_at ASC`,
-		databaseID,
+		`SELECT `+viewSelectCols+` FROM database_views WHERE database_id = $1
+        AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($2))
+        ORDER BY created_at ASC`,
+		databaseID, wsIDs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("database: list views: %w", err)
@@ -523,7 +589,7 @@ func (s *Store) ListViews(ctx context.Context, databaseID string) ([]DatabaseVie
 // UpdateView accepts a partial map of fields to change. We
 // allow-list the keys so callers can't smuggle in arbitrary SQL
 // fragments via column names.
-func (s *Store) UpdateView(ctx context.Context, id string, updates map[string]any) (*DatabaseView, error) {
+func (s *Store) UpdateView(ctx context.Context, id string, updates map[string]any, wsIDs []string) (*DatabaseView, error) {
 	if s.pool == nil {
 		return nil, errors.New("database: no pool")
 	}
@@ -554,10 +620,18 @@ func (s *Store) UpdateView(ctx context.Context, id string, updates map[string]an
 		return nil, errors.New("database: no updatable fields")
 	}
 	args = append(args, id)
+	idPos := idx
+	idx++
+	args = append(args, wsIDs)
 	row := s.pool.QueryRow(ctx,
-		fmt.Sprintf(`UPDATE database_views SET %s WHERE id = $%d RETURNING %s`,
-			strings.Join(setParts, ", "), idx, viewSelectCols),
+		fmt.Sprintf(`UPDATE database_views SET %s WHERE id = $%d
+        AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($%d)) RETURNING %s`,
+			strings.Join(setParts, ", "), idPos, idx, viewSelectCols),
 		args...,
 	)
-	return scanView(row)
+	v, err := scanView(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return v, err
 }

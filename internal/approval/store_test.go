@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/pashagolub/pgxmock/v4"
 )
 
@@ -100,6 +101,12 @@ func TestRequestApproval_RejectsMissingPage(t *testing.T) {
 
 func TestDecide_AllApproved_FlipsRequestAndPageToApproved(t *testing.T) {
 	store, pool := newMockStore(t)
+	wsIDs := []string{"ws-1"}
+
+	// SEC-4 L2: scope gate — request must be in the caller's workspaces.
+	pool.ExpectQuery(`SELECT EXISTS.*FROM approval_requests WHERE id.*workspace_id = ANY`).
+		WithArgs("req-1", wsIDs).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 
 	// Update this reviewer's decision.
 	pool.ExpectExec(`UPDATE review_decisions SET decision`).
@@ -124,7 +131,7 @@ func TestDecide_AllApproved_FlipsRequestAndPageToApproved(t *testing.T) {
 		WithArgs("approved", "pg-1").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	if err := store.Decide(context.Background(), "req-1", "u-alice", "approved", "lgtm"); err != nil {
+	if err := store.Decide(context.Background(), "req-1", "u-alice", "approved", "lgtm", wsIDs); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -134,6 +141,12 @@ func TestDecide_AllApproved_FlipsRequestAndPageToApproved(t *testing.T) {
 
 func TestDecide_AnyRejected_FlipsToRejected(t *testing.T) {
 	store, pool := newMockStore(t)
+	wsIDs := []string{"ws-1"}
+
+	// SEC-4 L2: scope gate.
+	pool.ExpectQuery(`SELECT EXISTS.*FROM approval_requests WHERE id.*workspace_id = ANY`).
+		WithArgs("req-1", wsIDs).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 
 	pool.ExpectExec(`UPDATE review_decisions SET decision`).
 		WithArgs("rejected", "missing edge case", "req-1", "u-bob").
@@ -156,7 +169,7 @@ func TestDecide_AnyRejected_FlipsToRejected(t *testing.T) {
 		WithArgs("rejected", "pg-1").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	if err := store.Decide(context.Background(), "req-1", "u-bob", "rejected", "missing edge case"); err != nil {
+	if err := store.Decide(context.Background(), "req-1", "u-bob", "rejected", "missing edge case", wsIDs); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -166,6 +179,12 @@ func TestDecide_AnyRejected_FlipsToRejected(t *testing.T) {
 
 func TestDecide_StillPending_LeavesRequestStatusAlone(t *testing.T) {
 	store, pool := newMockStore(t)
+	wsIDs := []string{"ws-1"}
+
+	// SEC-4 L2: scope gate.
+	pool.ExpectQuery(`SELECT EXISTS.*FROM approval_requests WHERE id.*workspace_id = ANY`).
+		WithArgs("req-1", wsIDs).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 
 	pool.ExpectExec(`UPDATE review_decisions SET decision`).
 		WithArgs("approved", "", "req-1", "u-alice").
@@ -180,7 +199,7 @@ func TestDecide_StillPending_LeavesRequestStatusAlone(t *testing.T) {
 	// NOTE: no UPDATE on approval_requests or pages — the second
 	// reviewer hasn't decided yet.
 
-	if err := store.Decide(context.Background(), "req-1", "u-alice", "approved", ""); err != nil {
+	if err := store.Decide(context.Background(), "req-1", "u-alice", "approved", "", wsIDs); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -190,8 +209,26 @@ func TestDecide_StillPending_LeavesRequestStatusAlone(t *testing.T) {
 
 func TestDecide_RejectsUnknownDecisionValue(t *testing.T) {
 	store, _ := newMockStore(t)
-	if err := store.Decide(context.Background(), "req-1", "u-a", "maybe", ""); err == nil {
+	if err := store.Decide(context.Background(), "req-1", "u-a", "maybe", "", []string{"ws-1"}); err == nil {
 		t.Fatal("expected error on invalid decision")
+	}
+}
+
+func TestDecide_RejectsRequestOutsideWorkspaces(t *testing.T) {
+	store, pool := newMockStore(t)
+	wsIDs := []string{"ws-other"}
+
+	// Scope gate returns false → ErrNotFound, no decision write.
+	pool.ExpectQuery(`SELECT EXISTS.*FROM approval_requests WHERE id.*workspace_id = ANY`).
+		WithArgs("req-1", wsIDs).
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
+
+	err := store.Decide(context.Background(), "req-1", "u-alice", "approved", "lgtm", wsIDs)
+	if err != ErrNotFound {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
 	}
 }
 
@@ -201,13 +238,13 @@ func TestListPending_FiltersByReviewerWithPendingDecisions(t *testing.T) {
 	store, pool := newMockStore(t)
 	now := time.Now().UTC()
 
-	pool.ExpectQuery(`FROM approval_requests.*JOIN review_decisions.*reviewer_id`).
-		WithArgs("u-alice", "ws-1").
+	pool.ExpectQuery(`FROM approval_requests.*JOIN review_decisions.*reviewer_id.*workspace_id = ANY`).
+		WithArgs("u-alice", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(testRequestCols()).
 			AddRow("req-1", "pg-1", "ws-1", "u-author", []string{"u-alice"},
 				"please look", (*time.Time)(nil), "pending", now, now))
 
-	out, err := store.ListPending(context.Background(), "u-alice", "ws-1")
+	out, err := store.ListPending(context.Background(), "u-alice", []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("ListPending: %v", err)
 	}
@@ -220,23 +257,25 @@ func TestListPending_FiltersByReviewerWithPendingDecisions(t *testing.T) {
 
 func TestPublishApproved_SucceedsWhenApproved(t *testing.T) {
 	store, pool := newMockStore(t)
-	pool.ExpectQuery(`SELECT doc_status FROM pages WHERE id`).
-		WithArgs("pg-1").
+	wsIDs := []string{"ws-1"}
+	pool.ExpectQuery(`SELECT doc_status FROM pages WHERE id.*workspace_id = ANY`).
+		WithArgs("pg-1", wsIDs).
 		WillReturnRows(pgxmock.NewRows([]string{"doc_status"}).AddRow("approved"))
-	pool.ExpectExec(`UPDATE pages SET doc_status`).
-		WithArgs("approved", "pg-1").
+	pool.ExpectExec(`UPDATE pages SET doc_status.*workspace_id = ANY`).
+		WithArgs("approved", "pg-1", wsIDs).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	if err := store.PublishApproved(context.Background(), "pg-1"); err != nil {
+	if err := store.PublishApproved(context.Background(), "pg-1", wsIDs); err != nil {
 		t.Fatalf("PublishApproved: %v", err)
 	}
 }
 
 func TestPublishApproved_FailsWhenStatusNotApproved(t *testing.T) {
 	store, pool := newMockStore(t)
-	pool.ExpectQuery(`SELECT doc_status FROM pages WHERE id`).
-		WithArgs("pg-1").
+	wsIDs := []string{"ws-1"}
+	pool.ExpectQuery(`SELECT doc_status FROM pages WHERE id.*workspace_id = ANY`).
+		WithArgs("pg-1", wsIDs).
 		WillReturnRows(pgxmock.NewRows([]string{"doc_status"}).AddRow("draft"))
-	err := store.PublishApproved(context.Background(), "pg-1")
+	err := store.PublishApproved(context.Background(), "pg-1", wsIDs)
 	if err == nil {
 		t.Fatal("expected error when status != approved")
 	}
@@ -245,18 +284,30 @@ func TestPublishApproved_FailsWhenStatusNotApproved(t *testing.T) {
 	}
 }
 
+func TestPublishApproved_NotFoundOutsideWorkspaces(t *testing.T) {
+	store, pool := newMockStore(t)
+	wsIDs := []string{"ws-other"}
+	pool.ExpectQuery(`SELECT doc_status FROM pages WHERE id.*workspace_id = ANY`).
+		WithArgs("pg-1", wsIDs).
+		WillReturnError(pgx.ErrNoRows)
+	err := store.PublishApproved(context.Background(), "pg-1", wsIDs)
+	if err != ErrNotFound {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
 // ─── GetDecisions ─────────────────────────────────────
 
 func TestGetDecisions_ReturnsAllForRequest(t *testing.T) {
 	store, pool := newMockStore(t)
 	now := time.Now().UTC()
-	pool.ExpectQuery(`SELECT.*FROM review_decisions WHERE request_id`).
-		WithArgs("req-1").
+	pool.ExpectQuery(`SELECT.*FROM review_decisions WHERE request_id.*approval_requests WHERE workspace_id = ANY`).
+		WithArgs("req-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(testDecisionCols()).
 			AddRow("d-1", "req-1", "u-alice", "approved", "lgtm", now).
 			AddRow("d-2", "req-1", "u-bob", "pending", "", now))
 
-	out, err := store.GetDecisions(context.Background(), "req-1")
+	out, err := store.GetDecisions(context.Background(), "req-1", []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("GetDecisions: %v", err)
 	}

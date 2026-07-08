@@ -51,11 +51,11 @@ func libCols() []string {
 
 func TestList_ReturnsAllBuiltins_NoDBRows(t *testing.T) {
 	store, pool, _ := newMockStore(t)
-	pool.ExpectQuery(`SELECT.*FROM library_templates WHERE workspace_id`).
-		WithArgs("ws-1").
+	pool.ExpectQuery(`SELECT.*FROM library_templates WHERE workspace_id = ANY`).
+		WithArgs([]string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(libCols()))
 
-	out, err := store.List(context.Background(), "ws-1", nil, "")
+	out, err := store.List(context.Background(), []string{"ws-1"}, nil, "")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -74,14 +74,14 @@ func TestList_MergesWorkspaceAndBuiltins(t *testing.T) {
 	wsID := "ws-1"
 	customCreatedBy := "alice"
 	now := time.Now().UTC()
-	pool.ExpectQuery(`SELECT.*FROM library_templates WHERE workspace_id`).
-		WithArgs(wsID).
+	pool.ExpectQuery(`SELECT.*FROM library_templates WHERE workspace_id = ANY`).
+		WithArgs([]string{wsID}).
 		WillReturnRows(pgxmock.NewRows(libCols()).AddRow(
 			"t-1", "Custom RFC", "internal version", "engineering", "📝",
 			[]string{"rfc"}, "{}", "Custom body", false,
 			&wsID, &customCreatedBy, 3, now,
 		))
-	out, err := store.List(context.Background(), wsID, nil, "")
+	out, err := store.List(context.Background(), []string{wsID}, nil, "")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -104,12 +104,12 @@ func TestList_MergesWorkspaceAndBuiltins(t *testing.T) {
 
 func TestList_FiltersByCategory(t *testing.T) {
 	store, pool, _ := newMockStore(t)
-	pool.ExpectQuery(`SELECT.*FROM library_templates WHERE workspace_id`).
-		WithArgs("ws-1").
+	pool.ExpectQuery(`SELECT.*FROM library_templates WHERE workspace_id = ANY`).
+		WithArgs([]string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(libCols()))
 
 	cat := CatEngineering
-	out, err := store.List(context.Background(), "ws-1", &cat, "")
+	out, err := store.List(context.Background(), []string{"ws-1"}, &cat, "")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -125,11 +125,11 @@ func TestList_FiltersByCategory(t *testing.T) {
 
 func TestList_FiltersBySearchQuery(t *testing.T) {
 	store, pool, _ := newMockStore(t)
-	pool.ExpectQuery(`SELECT.*FROM library_templates WHERE workspace_id`).
-		WithArgs("ws-1").
+	pool.ExpectQuery(`SELECT.*FROM library_templates WHERE workspace_id = ANY`).
+		WithArgs([]string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(libCols()))
 
-	out, err := store.List(context.Background(), "ws-1", nil, "RFC")
+	out, err := store.List(context.Background(), []string{"ws-1"}, nil, "RFC")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -151,9 +151,9 @@ func TestCreateFromPage_StoresWorkspaceTemplate(t *testing.T) {
 	store, pool, _ := newMockStore(t)
 	now := time.Now().UTC()
 
-	// 1. Look up page content + content_text.
-	pool.ExpectQuery(`SELECT content, content_text FROM pages WHERE id`).
-		WithArgs("pg-1").
+	// 1. Look up page content + content_text (scoped to the caller's set).
+	pool.ExpectQuery(`SELECT content, content_text FROM pages WHERE id = \$1 AND workspace_id = ANY`).
+		WithArgs("pg-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows([]string{"content", "content_text"}).
 			AddRow(`{"type":"doc","content":[{"type":"paragraph"}]}`, "hello"))
 	// 2. Insert library row.
@@ -171,7 +171,7 @@ func TestCreateFromPage_StoresWorkspaceTemplate(t *testing.T) {
 	got, err := store.CreateFromPage(context.Background(),
 		"pg-1", "ws-1", "alice",
 		"Standup notes", "Daily standup template",
-		CatOperations)
+		CatOperations, []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("CreateFromPage: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestUseTemplate_FromBuiltin_CreatesPageAndCounts(t *testing.T) {
 	}
 	t1 := builtins[0]
 
-	got, err := store.UseTemplate(context.Background(), t1.ID, "sp-1", "ws-1", "bob")
+	got, err := store.UseTemplate(context.Background(), t1.ID, "sp-1", "ws-1", "bob", nil)
 	if err != nil {
 		t.Fatalf("UseTemplate: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestUseTemplate_FromBuiltin_CreatesPageAndCounts(t *testing.T) {
 		t.Fatalf("want use_count=1 after one use, got %d", store.UseCountForBuiltin(t1.ID))
 	}
 	// Use it again — counter should bump.
-	if _, err := store.UseTemplate(context.Background(), t1.ID, "sp-1", "ws-1", "bob"); err != nil {
+	if _, err := store.UseTemplate(context.Background(), t1.ID, "sp-1", "ws-1", "bob", nil); err != nil {
 		t.Fatalf("UseTemplate (2nd): %v", err)
 	}
 	if store.UseCountForBuiltin(t1.ID) != 2 {
@@ -220,20 +220,20 @@ func TestUseTemplate_FromCustom_IncrementsDBUseCount(t *testing.T) {
 	now := time.Now().UTC()
 	wsID := "ws-1"
 
-	// Lookup the custom template.
-	pool.ExpectQuery(`SELECT.*FROM library_templates WHERE id`).
-		WithArgs("t-custom").
+	// Lookup the custom template (scoped to the caller's verified set).
+	pool.ExpectQuery(`SELECT.*FROM library_templates WHERE id = \$1 AND workspace_id = ANY`).
+		WithArgs("t-custom", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(libCols()).AddRow(
 			"t-custom", "Custom doc", "", "general", "📄",
 			[]string{}, `{"type":"doc","content":[{"type":"paragraph"}]}`, "body",
 			false, &wsID, ptrStr("alice"), 0, now,
 		))
-	// Then bump use_count.
-	pool.ExpectExec(`UPDATE library_templates SET use_count`).
-		WithArgs("t-custom").
+	// Then bump use_count (same scope).
+	pool.ExpectExec(`UPDATE library_templates SET use_count.*WHERE id = \$1 AND workspace_id = ANY`).
+		WithArgs("t-custom", []string{"ws-1"}).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	got, err := store.UseTemplate(context.Background(), "t-custom", "sp-1", "ws-1", "bob")
+	got, err := store.UseTemplate(context.Background(), "t-custom", "sp-1", "ws-1", "bob", []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("UseTemplate: %v", err)
 	}
@@ -252,10 +252,10 @@ func TestUseTemplate_FromCustom_IncrementsDBUseCount(t *testing.T) {
 
 func TestDelete_AllowsWorkspaceTemplate(t *testing.T) {
 	store, pool, _ := newMockStore(t)
-	pool.ExpectExec(`DELETE FROM library_templates WHERE id`).
-		WithArgs("t-1", "ws-1").
+	pool.ExpectExec(`DELETE FROM library_templates WHERE id = \$1 AND workspace_id = ANY`).
+		WithArgs("t-1", []string{"ws-1"}).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
-	if err := store.Delete(context.Background(), "t-1", "ws-1"); err != nil {
+	if err := store.Delete(context.Background(), "t-1", []string{"ws-1"}); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 }
@@ -266,7 +266,7 @@ func TestDelete_RejectsBuiltin(t *testing.T) {
 	if len(builtins) == 0 {
 		t.Fatal("no built-ins")
 	}
-	if err := store.Delete(context.Background(), builtins[0].ID, "ws-1"); err == nil {
+	if err := store.Delete(context.Background(), builtins[0].ID, []string{"ws-1"}); err == nil {
 		t.Fatal("expected error deleting built-in")
 	}
 }
