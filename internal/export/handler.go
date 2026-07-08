@@ -13,6 +13,7 @@ import (
 	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/model"
 	"github.com/talyvor/docs/internal/page"
+	"github.com/talyvor/docs/internal/permission"
 )
 
 // MaxExportBytes caps a single export at 50MB. The constraint is
@@ -23,12 +24,23 @@ import (
 // honest about the trade-off rather than pretending to stream.
 const MaxExportBytes = 50 << 20
 
-type Handler struct{ exp *Exporter }
+type Handler struct {
+	exp     *Exporter
+	pageEnf *permission.Enforcer // A3: by-page access (view)
+}
 
 func NewHandler(exp *Exporter) *Handler { return &Handler{exp: exp} }
 
+// WithAccess wires the A3 access enforcer. Without it the routes mount unguarded (tests).
+func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
+	h.pageEnf = pageEnf
+	return h
+}
+
 func (h *Handler) Mount(r chi.Router) {
-	r.Get("/spaces/{spaceID}/pages/{pageID}/export", h.Export)
+	// Exporting the full page content is a read → View (a member with no
+	// grant on a private page must not export it).
+	r.With(h.pageEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}/pages/{pageID}/export", h.Export)
 }
 
 func (h *Handler) Export(w http.ResponseWriter, r *http.Request) {

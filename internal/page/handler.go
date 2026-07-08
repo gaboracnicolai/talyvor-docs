@@ -12,6 +12,7 @@ import (
 	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/model"
+	"github.com/talyvor/docs/internal/permission"
 )
 
 // Comments moved to internal/comment in the threaded-comments
@@ -19,11 +20,19 @@ import (
 // backwards compatibility — pool is no longer used here but main
 // still hands it in for symmetry with other handlers.
 type Handler struct {
-	store *Store
+	store    *Store
+	pageEnf  *permission.Enforcer // A3: by-page access (view/edit)
+	spaceEnf *permission.Enforcer // A3: by-space access for the space-scoped create/list routes
 }
 
 func NewHandler(store *Store, _ *pgxpool.Pool) *Handler {
 	return &Handler{store: store}
+}
+
+// WithAccess wires the A3 access enforcers. Without it the routes mount unguarded (tests).
+func (h *Handler) WithAccess(pageEnf, spaceEnf *permission.Enforcer) *Handler {
+	h.pageEnf, h.spaceEnf = pageEnf, spaceEnf
+	return h
 }
 
 // Mount registers every page-scoped route under /v1. Comments,
@@ -31,17 +40,19 @@ func NewHandler(store *Store, _ *pgxpool.Pool) *Handler {
 // same handler so the page surface is one chi sub-router.
 func (h *Handler) Mount(r chi.Router) {
 	r.Route("/spaces/{spaceID}/pages", func(r chi.Router) {
-		r.Post("/", h.Create)
-		r.Get("/", h.List)
-		r.Get("/{pageID}", h.Get)
-		r.Patch("/{pageID}", h.Update)
-		r.Delete("/{pageID}", h.Delete)
+		// Create a page in / list a space's pages → space-level (Edit to add, View to list).
+		r.With(h.spaceEnf.Require(permission.AccessEdit)).Post("/", h.Create)
+		r.With(h.spaceEnf.Require(permission.AccessView)).Get("/", h.List)
+		// Per-page: read=View, content mutation=Edit.
+		r.With(h.pageEnf.Require(permission.AccessView)).Get("/{pageID}", h.Get)
+		r.With(h.pageEnf.Require(permission.AccessEdit)).Patch("/{pageID}", h.Update)
+		r.With(h.pageEnf.Require(permission.AccessEdit)).Delete("/{pageID}", h.Delete)
 
-		r.Post("/{pageID}/view", h.RecordView)
-		r.Post("/{pageID}/verify", h.Verify)
+		r.With(h.pageEnf.Require(permission.AccessView)).Post("/{pageID}/view", h.RecordView)
+		r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/{pageID}/verify", h.Verify)
 
-		r.Get("/{pageID}/versions", h.GetVersions)
-		r.Post("/{pageID}/versions/{version}/restore", h.RestoreVersion)
+		r.With(h.pageEnf.Require(permission.AccessView)).Get("/{pageID}/versions", h.GetVersions)
+		r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/{pageID}/versions/{version}/restore", h.RestoreVersion)
 
 		// Comment routes live in internal/comment as of the threaded-
 		// comments rework. The legacy handlers below stay for the

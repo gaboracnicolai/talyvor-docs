@@ -200,6 +200,61 @@ func main() {
 		}, nil
 	})
 
+	// A3: within-workspace resource access control. The resolvers scope their metadata lookups to the
+	// caller's VERIFIED workspaces (GetByIDInWorkspaces) — so a foreign resource resolves to not-found
+	// (RequireAccess → 404, composing with the SEC-4 L2 layer), and an in-workspace resource is then
+	// gated on the member's grant/role by resolveAccess (403 if under-privileged).
+	spaceLooker := func(ctx context.Context, id string) (permission.SpaceMeta, error) {
+		sp, err := spaceStore.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.SpaceMeta{}, err
+		}
+		return permission.SpaceMeta{Private: sp.Private, CreatedBy: sp.CreatedBy}, nil
+	}
+	pageLooker := func(ctx context.Context, id string) (permission.PageMeta, error) {
+		pg, err := pageStore.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.PageMeta{}, err
+		}
+		sp, err := spaceStore.GetByIDInWorkspaces(ctx, pg.SpaceID, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.PageMeta{}, err
+		}
+		return permission.PageMeta{
+			SpaceID: pg.SpaceID, SpaceCreatedBy: sp.CreatedBy, SpacePrivate: sp.Private, PageCreatedBy: pg.CreatedBy,
+		}, nil
+	}
+	spaceEnf := permission.NewEnforcer(permStore, permission.SpaceResolverFromParam("spaceID", spaceLooker))
+	pageEnf := permission.NewEnforcer(permStore, permission.PageResolverFromParam("pageID", pageLooker, permStore))
+	// /blocks/{blockID} routes resolve the owning page from the block id (blocks carry page_id).
+	blockPageLooker := func(ctx context.Context, blockID string) (string, permission.PageMeta, error) {
+		var pageID string
+		if err := pool.QueryRow(ctx, `SELECT page_id FROM blocks WHERE id=$1`, blockID).Scan(&pageID); err != nil {
+			return "", permission.PageMeta{}, err
+		}
+		md, err := pageLooker(ctx, pageID)
+		if err != nil {
+			return "", permission.PageMeta{}, err
+		}
+		return pageID, md, nil
+	}
+	blockEnf := permission.NewEnforcer(permStore, permission.PageResolverFromBlock("blockID", blockPageLooker, permStore))
+
+	spaceHandler.WithAccess(spaceEnf)
+	pageHandler.WithAccess(pageEnf, spaceEnf)
+	commentHandler.WithAccess(pageEnf)
+	shareHandler.WithAccess(pageEnf)
+	blockHandler.WithAccess(pageEnf, blockEnf)
+	lockHandler.WithAccess(pageEnf)
+	linkHandler.WithAccess(pageEnf)
+	analyticsHandler.WithAccess(pageEnf)
+	dbHandler.WithAccess(pageEnf)
+	changelogHandler.WithAccess(pageEnf)
+	freshHandler.WithAccess(pageEnf)
+	exportHandler.WithAccess(pageEnf)
+	approvalHandler.WithAccess(pageEnf)
+	permHandler.WithAccess(spaceEnf, pageEnf)
+
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
 	// frames through the engine's per-client send channels.

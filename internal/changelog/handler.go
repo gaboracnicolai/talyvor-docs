@@ -10,20 +10,31 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/talyvor/docs/internal/authz"
+	"github.com/talyvor/docs/internal/permission"
 )
 
-type Handler struct{ store *Store }
+type Handler struct {
+	store   *Store
+	pageEnf *permission.Enforcer // A3: by-page access (view/edit)
+}
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
 
+// WithAccess wires the A3 access enforcer. Without it the routes mount unguarded (tests).
+func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
+	h.pageEnf = pageEnf
+	return h
+}
+
 func (h *Handler) Mount(r chi.Router) {
-	r.Post("/spaces/{spaceID}/pages/{pageID}/changelog/entries", h.Create)
-	r.Get("/spaces/{spaceID}/pages/{pageID}/changelog/entries", h.List)
-	r.Get("/spaces/{spaceID}/pages/{pageID}/changelog/entries/{id}", h.Get)
-	r.Patch("/spaces/{spaceID}/pages/{pageID}/changelog/entries/{id}", h.Update)
-	r.Delete("/spaces/{spaceID}/pages/{pageID}/changelog/entries/{id}", h.Delete)
-	r.Post("/spaces/{spaceID}/pages/{pageID}/changelog/entries/{id}/publish", h.Publish)
-	r.Post("/spaces/{spaceID}/pages/{pageID}/changelog/generate", h.Generate)
+	// Per-page: read=View, entry mutation (create/update/delete/publish/generate)=Edit.
+	r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/spaces/{spaceID}/pages/{pageID}/changelog/entries", h.Create)
+	r.With(h.pageEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}/pages/{pageID}/changelog/entries", h.List)
+	r.With(h.pageEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}/pages/{pageID}/changelog/entries/{id}", h.Get)
+	r.With(h.pageEnf.Require(permission.AccessEdit)).Patch("/spaces/{spaceID}/pages/{pageID}/changelog/entries/{id}", h.Update)
+	r.With(h.pageEnf.Require(permission.AccessEdit)).Delete("/spaces/{spaceID}/pages/{pageID}/changelog/entries/{id}", h.Delete)
+	r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/spaces/{spaceID}/pages/{pageID}/changelog/entries/{id}/publish", h.Publish)
+	r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/spaces/{spaceID}/pages/{pageID}/changelog/generate", h.Generate)
 	r.Get("/workspaces/{wsID}/changelog/feed", h.Feed)
 }
 
