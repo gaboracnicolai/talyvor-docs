@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/page"
 )
 
@@ -66,6 +67,12 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	wsID := chi.URLParam(r, "wsID")
+	// A4D: {wsID} comes from the URL — authorize it against the caller's verified memberships before
+	// searching, or a member of any workspace could read another workspace's document body text.
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if len(q) < 2 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query must be at least 2 characters"})
@@ -92,11 +99,11 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		ft   []page.SearchResult
-		sem  []SemanticResult
-		ftEr error
+		ft    []page.SearchResult
+		sem   []SemanticResult
+		ftEr  error
 		semEr error
-		wg   sync.WaitGroup
+		wg    sync.WaitGroup
 	)
 	// Run both queries concurrently when type=all; sequentially when
 	// the caller asked for just one. Semantic search has its own

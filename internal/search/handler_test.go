@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/lensintegration"
 	"github.com/talyvor/docs/internal/model"
 	"github.com/talyvor/docs/internal/page"
@@ -27,6 +28,14 @@ func (f *fakePages) SearchWithRank(_ context.Context, _, _ string, _ *string, _,
 func newRouter(t *testing.T, pages fullTextSearcher, sem *SemanticSearch) http.Handler {
 	t.Helper()
 	r := chi.NewRouter()
+	// Mirror production: authz stamps verified memberships before handlers. These tests call as a
+	// member of ws-1 (the workspace in the URL).
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx := authz.WithMemberships(req.Context(), "u@ws1.com", []authz.Membership{{WorkspaceID: "ws-1", MemberID: "m"}})
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	})
 	r.Route("/v1", func(r chi.Router) {
 		NewHandler(pages, sem).Mount(r)
 	})
