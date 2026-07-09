@@ -6,6 +6,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/talyvor/docs/internal/authz"
 )
 
 type Handler struct{ imp *ConfluenceImporter }
@@ -69,6 +71,12 @@ func (h *Handler) Confluence(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "workspace_id and space_id are required")
 		return
 	}
+	// A4D: the workspace_id came from the multipart form — authorize it against the caller's verified
+	// memberships, or a member of A could plant pages into workspace B by naming it.
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeErr(w, http.StatusForbidden, "forbidden")
+		return
+	}
 	result, err := h.imp.ImportExport(r.Context(), wsID, spaceID, bytes.NewReader(body))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -85,6 +93,12 @@ func (h *Handler) Notion(w http.ResponseWriter, r *http.Request) {
 	}
 	if wsID == "" || spaceID == "" {
 		writeErr(w, http.StatusBadRequest, "workspace_id and space_id are required")
+		return
+	}
+	// A4D: the workspace_id came from the multipart form — authorize it against the caller's verified
+	// memberships, or a member of A could plant pages into workspace B by naming it.
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeErr(w, http.StatusForbidden, "forbidden")
 		return
 	}
 	result, err := h.imp.ImportFromNotion(r.Context(), wsID, spaceID, bytes.NewReader(body))

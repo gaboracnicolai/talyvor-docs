@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/model"
 )
 
@@ -69,6 +70,10 @@ func writeAIErr(w http.ResponseWriter, err error) {
 
 func (h *Handler) Write(w http.ResponseWriter, r *http.Request) {
 	wsID := chi.URLParam(r, "wsID")
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
 	var in struct {
 		Prompt  string `json:"prompt"`
 		Context string `json:"context"`
@@ -94,6 +99,10 @@ func (h *Handler) Write(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Transform(w http.ResponseWriter, r *http.Request) {
 	wsID := chi.URLParam(r, "wsID")
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
 	var in struct {
 		Action string `json:"action"`
 		Text   string `json:"text"`
@@ -133,6 +142,10 @@ func (h *Handler) Transform(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Translate(w http.ResponseWriter, r *http.Request) {
 	wsID := chi.URLParam(r, "wsID")
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
 	var in struct {
 		Text     string `json:"text"`
 		Language string `json:"language"`
@@ -164,6 +177,10 @@ type askResponse struct {
 
 func (h *Handler) Ask(w http.ResponseWriter, r *http.Request) {
 	wsID := chi.URLParam(r, "wsID")
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
 	var in struct {
 		Question string `json:"question"`
 	}
@@ -215,6 +232,10 @@ func pageURL(p model.Page) string {
 
 func (h *Handler) SuggestTitle(w http.ResponseWriter, r *http.Request) {
 	wsID := chi.URLParam(r, "wsID")
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
 	var in struct {
 		Content string `json:"content"`
 		PageID  string `json:"page_id"`

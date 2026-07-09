@@ -96,7 +96,13 @@ func (h *Handler) PageStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) WorkspaceStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := h.store.GetWorkspaceStats(r.Context(), chi.URLParam(r, "wsID"), daysParam(r))
+	wsID := chi.URLParam(r, "wsID")
+	// A4D: authorize the URL workspace against the caller's verified memberships.
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeErr(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	stats, err := h.store.GetWorkspaceStats(r.Context(), wsID, daysParam(r))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "stats failed")
 		return

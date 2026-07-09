@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/permission"
 )
 
@@ -39,7 +40,13 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 }
 
 func (h *Handler) Workspace(w http.ResponseWriter, r *http.Request) {
-	reports, err := h.engine.GetStaleReport(r.Context(), chi.URLParam(r, "wsID"))
+	wsID := chi.URLParam(r, "wsID")
+	// A4D: authorize the URL workspace against the caller's verified memberships before reporting.
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeErr(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	reports, err := h.engine.GetStaleReport(r.Context(), wsID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "freshness report failed")
 		return

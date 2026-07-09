@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/lensintegration"
 	"github.com/talyvor/docs/internal/model"
 )
@@ -29,6 +30,14 @@ func (f *fakePages) Search(_ context.Context, _ /*workspaceID*/, q string, _ int
 
 func newRouter(e *Engine, pages PageSearcher) http.Handler {
 	r := chi.NewRouter()
+	// Mirror production: the authz middleware stamps verified memberships before handlers run. Tests
+	// call the AI endpoints as a member of ws-1 (the workspace in the URL).
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx := authz.WithMemberships(req.Context(), "u@ws1.com", []authz.Membership{{WorkspaceID: "ws-1", MemberID: "m"}})
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	})
 	r.Route("/v1", func(r chi.Router) {
 		NewHandler(e, pages).Mount(r)
 	})
