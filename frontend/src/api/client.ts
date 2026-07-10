@@ -101,7 +101,6 @@ async function writeCache(path: string, data: unknown): Promise<void> {
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { body, headers, method = "GET", ...rest } = options;
   const token = localStorage.getItem("docs_api_key") ?? "";
-  const memberId = localStorage.getItem("docs_member_id") ?? "";
 
   const init: RequestInit = {
     ...rest,
@@ -109,7 +108,8 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(memberId ? { "X-Member-Id": memberId } : {}),
+      // X-Member-Id removed: since SEC-4 the server derives identity from the gateway-verified
+      // Authorization and ignores this client-sent header — dead weight, so stop sending it.
       ...(headers ?? {}),
     },
   };
