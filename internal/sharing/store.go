@@ -30,6 +30,12 @@ var validShareAccess = map[permission.AccessLevel]bool{
 
 const bcryptCost = 10
 
+// ErrShareLinkNotFound is returned when a revoke targets a link that does not belong to the given page
+// (or does not exist). The Revoke route's AccessAdmin gate proves the caller admins {pageID}; scoping the
+// delete to that page turns a cross-page revoke-by-id into a clean not-found rather than a cross-tenant
+// deletion.
+var ErrShareLinkNotFound = errors.New("sharing: share link not found for page")
+
 type ShareLink struct {
 	ID           string                 `json:"id"`
 	PageID       string                 `json:"page_id"`
@@ -202,10 +208,19 @@ func (s *Store) ListByPage(ctx context.Context, pageID string) ([]ShareLink, err
 	return out, rows.Err()
 }
 
-func (s *Store) Revoke(ctx context.Context, id string) error {
+// Revoke deletes a share link, scoped to pageID: the caller's AccessAdmin is verified against {pageID}
+// (route gate), NOT against the link {id}, so without the page_id predicate an admin of any page could
+// delete any other page's (any tenant's) share link by id. A link not under pageID → ErrShareLinkNotFound.
+func (s *Store) Revoke(ctx context.Context, id, pageID string) error {
 	if s.pool == nil {
 		return errors.New("sharing: no pool")
 	}
-	_, err := s.pool.Exec(ctx, `DELETE FROM share_links WHERE id = $1`, id)
-	return err
+	tag, err := s.pool.Exec(ctx, `DELETE FROM share_links WHERE id = $1 AND page_id = $2`, id, pageID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrShareLinkNotFound
+	}
+	return nil
 }

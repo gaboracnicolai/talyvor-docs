@@ -3,6 +3,7 @@ package sharing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -133,7 +134,14 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
-	if err := h.store.Revoke(r.Context(), chi.URLParam(r, "id")); err != nil {
+	// Scope the revoke to {pageID} (the page the AccessAdmin gate verified the caller admins), so a
+	// share-link id belonging to another page/tenant cannot be deleted → 404, no cross-page oracle.
+	err := h.store.Revoke(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "pageID"))
+	if errors.Is(err, ErrShareLinkNotFound) {
+		writeErr(w, http.StatusNotFound, "link not found")
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "revoke failed")
 		return
 	}

@@ -2,6 +2,7 @@ package sharing
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -160,12 +161,33 @@ func TestValidate_UnknownToken_ReturnsError(t *testing.T) {
 
 func TestRevoke_DeletesRow(t *testing.T) {
 	store, pool := newMockStore(t)
-	pool.ExpectExec(`DELETE FROM share_links`).
-		WithArgs("sl-1").
+	// The DELETE must be scoped by page_id (the page the AccessAdmin gate verified), not by id alone.
+	pool.ExpectExec(`DELETE FROM share_links WHERE id = \$1 AND page_id = \$2`).
+		WithArgs("sl-1", "page-A").
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 
-	if err := store.Revoke(context.Background(), "sl-1"); err != nil {
+	if err := store.Revoke(context.Background(), "sl-1", "page-A"); err != nil {
 		t.Fatalf("Revoke: %v", err)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("Revoke did not scope the delete by page_id: %v", err)
+	}
+}
+
+// The IDOR: an admin of page-A revokes a share link belonging to page-B (another tenant) by its id. With
+// the page_id predicate the DELETE matches 0 rows → ErrShareLinkNotFound, so page-B's link is NOT deleted.
+func TestRevoke_CrossPageLink_NotDeleted(t *testing.T) {
+	store, pool := newMockStore(t)
+	pool.ExpectExec(`DELETE FROM share_links WHERE id = \$1 AND page_id = \$2`).
+		WithArgs("link-of-B", "page-A").
+		WillReturnResult(pgxmock.NewResult("DELETE", 0)) // link-of-B is not under page-A → nothing deleted
+
+	err := store.Revoke(context.Background(), "link-of-B", "page-A")
+	if !errors.Is(err, ErrShareLinkNotFound) {
+		t.Errorf("cross-page revoke must return ErrShareLinkNotFound (link left intact), got %v", err)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Errorf("Revoke did not scope the delete by page_id: %v", err)
 	}
 }
 
