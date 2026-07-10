@@ -11,6 +11,13 @@
 #
 # NOTE (metavariable-regex is re.match-ANCHORED and the raw-string value includes the leading
 # backtick, so patterns need a `(?s).*` prefix to match anywhere in the SQL literal).
+#
+# BLIND SPOT (closed): rule (a) matches only INLINE STRING LITERAL SQL — its $SQL metavariable binds the
+# VARIABLE name for `sql := fmt.Sprintf(...); Exec(ctx, sql, ...)`, so the format literal was never checked.
+# That is the class that hid track's issue BulkUpdate. Rule
+# docs-by-id-write-requires-workspace-scope-sprintf (below) now covers Sprintf-constructed by-id writes,
+# with documented inline nosemgrep at page/store.go + space/store.go Update (safe: callers gate the id
+# upstream via assertInWorkspaces / the collab WithPageScope session binding).
 rules:
   - id: docs-by-id-write-requires-workspace-scope
     languages: [go]
@@ -57,3 +64,25 @@ rules:
         - "/internal/templatelib/"
         - "/internal/customdomain/"
         - "/internal/export/"
+
+  - id: docs-by-id-write-requires-workspace-scope-sprintf
+    languages: [go]
+    severity: ERROR
+    message: >
+      SEC-4 L2 (Sprintf variant): a by-id DELETE/UPDATE built with fmt.Sprintf has NO workspace scope in
+      its FORMAT literal — the same cross-tenant class as the inline-literal rule, but constructed
+      dynamically so that rule is BLIND to it (its $SQL metavariable binds the variable name, not the
+      format string). This is the blind spot that hid track's issue BulkUpdate. Scope it in-SQL
+      (AND workspace_id = ANY($n), $n = authz.WorkspaceIDs(ctx)); or, if an upstream assertInWorkspaces
+      gate 404s a foreign id BEFORE the by-id write, suppress with an inline nosemgrep + written reason.
+    patterns:
+      - pattern: fmt.Sprintf($FMT, ...)
+      - metavariable-regex:
+          metavariable: $FMT
+          regex: (?s).*(DELETE FROM|UPDATE)\s+\w+.*WHERE id = \$
+      - pattern-not:
+          patterns:
+            - pattern: fmt.Sprintf($FMT, ...)
+            - metavariable-regex:
+                metavariable: $FMT
+                regex: (?s).*workspace_id

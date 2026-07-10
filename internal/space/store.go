@@ -174,6 +174,7 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	n++
 	args = append(args, id)
 
+	//nosemgrep: docs-by-id-write-requires-workspace-scope-sprintf -- Update is a primitive reached only via UpdateInWorkspaces, which calls assertInWorkspaces(id, authz.WorkspaceIDs) first (404s a foreign space before this by-id write).
 	sql := fmt.Sprintf(`UPDATE spaces SET %s WHERE id = $%d RETURNING %s`,
 		strings.Join(set, ", "), n, columns)
 	return scan(s.pool.QueryRow(ctx, sql, args...))

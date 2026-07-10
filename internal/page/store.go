@@ -425,6 +425,7 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	args = append(args, time.Now().UTC())
 	n++
 	args = append(args, id)
+	//nosemgrep: docs-by-id-write-requires-workspace-scope-sprintf -- Update is a primitive; every caller authorizes the page upstream: UpdateInWorkspaces / RestoreVersion via assertInWorkspaces(id, authz.WorkspaceIDs), and the collab AutoSaver via the SEC-4 WithPageScope session binding. Not reachable with an un-authorized page id.
 	sql := fmt.Sprintf(`UPDATE pages SET %s WHERE id = $%d RETURNING %s`,
 		strings.Join(set, ", "), n, columns)
 
