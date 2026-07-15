@@ -50,12 +50,69 @@ func IsAdminFromContext(ctx context.Context) bool {
 	return ok && l == AccessAdmin
 }
 
+// actorCtxKey carries the member id RequireAccess resolved for this request, in the
+// workspace that owns the targeted resource. wsCtxKey carries that workspace.
+type actorCtxKey struct{}
+type wsCtxKey struct{}
+
+func withActor(ctx context.Context, memberID string) context.Context {
+	return context.WithValue(ctx, actorCtxKey{}, memberID)
+}
+
+func withWorkspace(ctx context.Context, wsID string) context.Context {
+	return context.WithValue(ctx, wsCtxKey{}, wsID)
+}
+
+// WorkspaceFromContext returns the workspace that OWNS the resource this route targets,
+// as resolved by RequireAccess from the resource itself (not from anything the client
+// sent). ok=false on an unguarded mount, so callers MUST fail closed.
+//
+// This is what lets a create-style handler DERIVE its tenant instead of requiring one:
+// page.Create used to take workspace_id from the request body and page.Store.Create
+// *required* it, so a caller could name any workspace and plant a row in another tenant.
+// The parent resource's workspace is the only trustworthy answer, and the middleware has
+// already authorized the caller against it.
+func WorkspaceFromContext(ctx context.Context) (string, bool) {
+	w, ok := ctx.Value(wsCtxKey{}).(string)
+	return w, ok && w != ""
+}
+
+// ActorFromContext returns the caller's member id IN THE WORKSPACE THAT OWNS the
+// resource this route targets, resolved by RequireAccess from the gateway-verified
+// membership set. ok=false when the route was mounted without an Enforcer, so callers
+// MUST fail closed on !ok rather than fall back to a client-supplied value.
+//
+// This is the cure for the `memberFromReq(r, in.MemberID)` pattern. That helper preferred
+// authz.ActorOrEmpty but fell back to the request BODY when it was empty — and it was
+// empty for every caller with != 1 memberships, which made the body authoritative for
+// exactly those callers (a two-workspace member could unlock another member's lock by
+// naming them in member_id). Unlike ActorOrEmpty, this is correct for ANY membership
+// count, so handlers need no fallback at all.
+func ActorFromContext(ctx context.Context) (string, bool) {
+	m, ok := ctx.Value(actorCtxKey{}).(string)
+	return m, ok && m != ""
+}
+
 // RequireAccess returns chi middleware that gates a resource route on the caller's WITHIN-workspace
-// access. The caller is the gateway-verified session member (authz.ActorOrEmpty — never a header).
+// access. The caller is the gateway-verified session member — never a header, never a body field.
 // Two deny statuses, composing cleanly with the SEC-4 L2 layer:
 //   - the resolver can't resolve the resource in the caller's verified workspace(s) → 404 (exactly
 //     like the by-id L2 layer: never leak the existence of an out-of-workspace resource);
 //   - resolved but the member lacks minAccess → 403 (authenticated-but-unauthorized).
+//
+// ACTOR RESOLUTION (the root fix). This used to call authz.ActorOrEmpty, which delegates to
+// SingleMemberID and returns "" for ANY caller whose membership count != 1. That silently made a
+// member of two workspaces a non-entity: resolveAccess skips the creator rule for an empty
+// memberID and no subject_type='member' grant can match "", so their real grants evaporated and
+// they collapsed to the `everyone`/public-space default. It also made every
+// `memberFromReq(r, in.MemberID)` body-fallback live for exactly those callers, handing the
+// request body the power to name the actor.
+//
+// The actor is now resolved PER-RESOURCE-WORKSPACE: MemberIDForWorkspace(ctx, res.WorkspaceID) —
+// the caller's member id in the workspace that owns the resource, from the verified membership
+// set. Correct for any membership count. Fail-closed: a resource whose workspace the caller does
+// not belong to (or a resolver that left WorkspaceID empty) yields no member id, and an empty
+// actor is denied outright below rather than evaluated as an anonymous member.
 func RequireAccess(store *Store, resolver ResourceResolver, minAccess AccessLevel) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +123,14 @@ func RequireAccess(store *Store, resolver ResourceResolver, minAccess AccessLeve
 				writeNotFound(w)
 				return
 			}
-			memberID := authz.ActorOrEmpty(r.Context())
+			memberID, ok := authz.MemberIDForWorkspace(r.Context(), res.WorkspaceID)
+			if !ok || memberID == "" {
+				// The caller is not a member of the workspace owning this resource, or the
+				// host's resolver failed to populate WorkspaceID. Either way we cannot name
+				// the actor, so we cannot authorize one. Deny.
+				writeForbidden(w)
+				return
+			}
 			level, err := store.Check(r.Context(), memberID, res, authz.WorkspaceIDs(r.Context()))
 			if err != nil {
 				writeForbidden(w)
@@ -76,11 +140,12 @@ func RequireAccess(store *Store, resolver ResourceResolver, minAccess AccessLeve
 				writeForbidden(w) // in my workspace, but under-privileged → 403
 				return
 			}
-			// Carry the resolved level forward. The middleware already computed the
-			// caller's true privilege on this resource; handlers that need it (e.g.
-			// pagelock's admin override) must read it from here rather than trust a
+			// Carry the resolved actor + level forward. The middleware has already done the
+			// only trustworthy version of both computations; handlers MUST read them from
+			// here (permission.ActorFromContext / IsAdminFromContext) rather than trust a
 			// self-asserted field in the request body.
-			next.ServeHTTP(w, r.WithContext(withLevel(r.Context(), level)))
+			ctx := withWorkspace(withActor(withLevel(r.Context(), level), memberID), res.WorkspaceID)
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
@@ -116,10 +181,11 @@ func SpaceResolverFromParam(paramName string, looker SpaceLookup) ResourceResolv
 			return resourceContext{}, err
 		}
 		return resourceContext{
-			Type:      ResourceSpace,
-			ID:        id,
-			Private:   md.Private,
-			CreatedBy: md.CreatedBy,
+			Type:        ResourceSpace,
+			ID:          id,
+			WorkspaceID: md.WorkspaceID,
+			Private:     md.Private,
+			CreatedBy:   md.CreatedBy,
 		}, nil
 	}
 }
@@ -131,11 +197,18 @@ type SpaceLookup func(ctx context.Context, spaceID string) (SpaceMeta, error)
 type PageLookup func(ctx context.Context, pageID string) (PageMeta, error)
 
 type SpaceMeta struct {
-	Private   bool
-	CreatedBy string
+	// WorkspaceID is the workspace that OWNS this space. RequireAccess resolves the
+	// caller's member id in THIS workspace (authz.MemberIDForWorkspace) to evaluate
+	// access — see the root fix note on RequireAccess. The host's looker must populate
+	// it; an empty value fails closed (the caller resolves to no member id).
+	WorkspaceID string
+	Private     bool
+	CreatedBy   string
 }
 
 type PageMeta struct {
+	// WorkspaceID is the workspace that OWNS this page. See SpaceMeta.WorkspaceID.
+	WorkspaceID    string
 	SpaceID        string
 	SpaceCreatedBy string
 	SpacePrivate   bool
@@ -158,12 +231,13 @@ func PageResolverFromParam(paramName string, looker PageLookup, store *Store) Re
 		// transitively admin every page in it.
 		spacePerms, _ := store.ListForResource(ctx, ResourceSpace, md.SpaceID, authz.WorkspaceIDs(ctx))
 		return resourceContext{
-			Type:       ResourcePage,
-			ID:         id,
-			SpaceID:    md.SpaceID,
-			Private:    md.SpacePrivate,
-			CreatedBy:  md.SpaceCreatedBy,
-			SpacePerms: spacePerms,
+			Type:        ResourcePage,
+			ID:          id,
+			WorkspaceID: md.WorkspaceID,
+			SpaceID:     md.SpaceID,
+			Private:     md.SpacePrivate,
+			CreatedBy:   md.SpaceCreatedBy,
+			SpacePerms:  spacePerms,
 		}, nil
 	}
 }
@@ -182,7 +256,7 @@ func PageResolverFromBlock(blockParam string, looker BlockPageLookup, store *Sto
 		}
 		spacePerms, _ := store.ListForResource(ctx, ResourceSpace, md.SpaceID, authz.WorkspaceIDs(ctx))
 		return resourceContext{
-			Type: ResourcePage, ID: pageID, SpaceID: md.SpaceID,
+			Type: ResourcePage, ID: pageID, WorkspaceID: md.WorkspaceID, SpaceID: md.SpaceID,
 			Private: md.SpacePrivate, CreatedBy: md.SpaceCreatedBy, SpacePerms: spacePerms,
 		}, nil
 	}

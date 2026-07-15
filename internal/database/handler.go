@@ -60,9 +60,14 @@ func (h *Handler) CreateDatabase(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.PageID = chi.URLParam(r, "pageID")
-	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
-		in.WorkspaceID = ws
+	// SEC: WorkspaceOrEmpty no-ops for a multi-workspace caller, leaving the BODY's
+	// workspace_id as the new database's tenancy key. Derive it from the parent page.
+	ws, ok := permission.WorkspaceFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the workspace for this page")
+		return
 	}
+	in.WorkspaceID = ws
 	db, err := h.store.CreateDatabase(r.Context(), in)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())

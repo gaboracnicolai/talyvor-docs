@@ -55,12 +55,23 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.PageID = chi.URLParam(r, "pageID")
-	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
-		in.WorkspaceID = ws
+	// SEC: this used to be an INVERTED fallback — `if in.CreatedBy == "" { ...verified }`
+	// PREFERRED the client's value, so any caller authored an entry as anyone, with no
+	// precondition. The workspace override next to it (WorkspaceOrEmpty) silently no-op'd
+	// for multi-workspace callers, leaving the body's workspace_id. Both now derive from
+	// the parent page, which pageEnf.Require already authorized.
+	ws, ok := permission.WorkspaceFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the workspace for this page")
+		return
 	}
-	if in.CreatedBy == "" {
-		in.CreatedBy = authz.ActorOrEmpty(r.Context())
+	actor, ok := permission.ActorFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the acting member for this page")
+		return
 	}
+	in.WorkspaceID = ws
+	in.CreatedBy = actor
 	out, err := h.store.CreateEntry(r.Context(), in)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -162,10 +173,20 @@ func (h *Handler) Generate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
-		in.WorkspaceID = ws
+	// SEC: same shape as Create above. WorkspaceOrEmpty no-ops for a multi-workspace
+	// caller, leaving the BODY's workspace_id as the tenancy key; ActorOrEmpty is "" for
+	// them, leaving the entry unattributed. Derive both from the parent page.
+	ws, ok := permission.WorkspaceFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the workspace for this page")
+		return
 	}
-	createdBy := authz.ActorOrEmpty(r.Context())
+	createdBy, ok := permission.ActorFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the acting member for this page")
+		return
+	}
+	in.WorkspaceID = ws
 	out, err := h.store.GenerateFromIssues(r.Context(),
 		in.WorkspaceID, chi.URLParam(r, "pageID"), createdBy,
 		in.IssueIDs, in.Version)

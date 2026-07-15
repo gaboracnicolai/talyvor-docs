@@ -94,6 +94,21 @@ func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
 
 	// SEC-4 gate: verified actor + page-in-membership, checked BEFORE the upgrade so a reject
 	// is a clean HTTP 404, not a half-open socket. Fail closed if no scoper is wired.
+	//
+	// NOT an authority hole: the ?member_id= query param is ignored (retired), so nothing
+	// client-supplied names the actor and there is no fallback to forge. This is the last
+	// caller of authz.ActorOrEmpty, which returns "" for any caller with != 1 memberships —
+	// so a MULTI-WORKSPACE member opens a session with an empty member id: their presence
+	// is unlabelled and CanEdit will not recognise them as the holder of their own lock.
+	// A functional residue of the same root, not a privilege bug.
+	//
+	// The REST paths resolve this via permission.ActorFromContext, populated by
+	// RequireAccess — but this route is mounted directly (no resource middleware), so there
+	// is no resolved actor in context. Fixing it needs PageScoper to also yield the page's
+	// workspace, so the actor can be resolved with authz.MemberIDForWorkspace. Deferred:
+	// see BUILD_STATE §3.
+	//
+	// nosemgrep: docs-no-ambiguous-actor-helpers -- LAST remaining caller, deliberately deferred. Not an authority hole: the ?member_id= query param is ignored and there is NO body fallback here, so nothing client-supplied can name the actor — the only effect is that a multi-workspace member gets an empty member id (unlabelled presence; CanEdit will not match them to their own lock). Every other call site is migrated to permission.ActorFromContext / authz.AuthorizeWorkspace. Fixing this one requires PageScoper to also yield the page's workspace so the actor can come from authz.MemberIDForWorkspace — tracked in BUILD_STATE §3. Do not copy this suppression to a handler that HAS a body fallback.
 	memberID := authz.ActorOrEmpty(r.Context())
 	inScope := false
 	if h.scope != nil {

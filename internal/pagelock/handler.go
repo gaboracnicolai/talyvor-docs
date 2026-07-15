@@ -5,7 +5,6 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/permission"
 )
 
@@ -39,37 +38,34 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-type lockBody struct {
-	MemberID string `json:"member_id"`
-}
+// These routes take NO authority from the request body. Both member_id and is_admin
+// used to live here and both were forgeable:
+//
+//   - is_admin let any Edit-tier member bypass "only the locker can unlock" (Run 1).
+//   - member_id NAMED THE ACTOR whenever authz.ActorOrEmpty was empty — which it was for
+//     every caller with != 1 memberships — so a two-workspace member unlocked another
+//     member's lock by sending {"member_id": "<locker>"}. The same caller could not use
+//     the feature honestly: with no verified actor, an empty body was rejected outright.
+//
+// Both now come from the verified identity: actorFor() below, and
+// permission.IsAdminFromContext in Unlock. The request body is not read at all — an
+// endpoint that takes no authority from the client cannot be lied to.
 
-// unlockBody no longer carries is_admin. It used to, and the store trusted it to
-// bypass the "only the locker can unlock" rule — so any Edit-tier member could steal
-// another member's lock with {"is_admin": true}, while a REAL admin who sent no claim
-// was denied. Admin status is now resolved from the gateway-verified identity against
-// the permission model (permission.IsAdminFromContext). A client that still sends
-// is_admin is simply ignored: the field is gone, and encoding/json drops unknown keys.
-type unlockBody struct {
-	MemberID string `json:"member_id"`
-}
-
-func memberFromReq(r *http.Request, fallback string) string {
-	if v := authz.ActorOrEmpty(r.Context()); v != "" {
-		return v
-	}
-	return fallback
+// actorFor resolves the acting member from the GATEWAY-VERIFIED identity, in the
+// workspace that owns this page. RequireAccess (which gates every route in this package's
+// Mount) resolves it via authz.MemberIDForWorkspace and stashes it — correct for ANY
+// membership count, so there is no fallback and nothing to forge. Empty only on an
+// unguarded mount, which fails closed at the call sites below.
+func actorFor(r *http.Request) string {
+	m, _ := permission.ActorFromContext(r.Context())
+	return m
 }
 
 func (h *Handler) Lock(w http.ResponseWriter, r *http.Request) {
 	pageID := chi.URLParam(r, "pageID")
-	var in lockBody
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		// Body is optional — fall back to the header.
-		in = lockBody{}
-	}
-	memberID := memberFromReq(r, in.MemberID)
+	memberID := actorFor(r)
 	if memberID == "" {
-		writeErr(w, http.StatusBadRequest, "member_id required")
+		writeErr(w, http.StatusForbidden, "cannot resolve the acting member for this page")
 		return
 	}
 	state, err := h.store.Lock(r.Context(), pageID, memberID)
@@ -85,13 +81,9 @@ func (h *Handler) Lock(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Unlock(w http.ResponseWriter, r *http.Request) {
 	pageID := chi.URLParam(r, "pageID")
-	var in unlockBody
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		in = unlockBody{}
-	}
-	memberID := memberFromReq(r, in.MemberID)
+	memberID := actorFor(r)
 	if memberID == "" {
-		writeErr(w, http.StatusBadRequest, "member_id required")
+		writeErr(w, http.StatusForbidden, "cannot resolve the acting member for this page")
 		return
 	}
 	// Admin status comes from the VERIFIED identity resolved against the permission

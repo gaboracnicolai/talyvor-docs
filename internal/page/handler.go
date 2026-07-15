@@ -48,7 +48,13 @@ func (h *Handler) Mount(r chi.Router) {
 		r.With(h.pageEnf.Require(permission.AccessEdit)).Patch("/{pageID}", h.Update)
 		r.With(h.pageEnf.Require(permission.AccessEdit)).Delete("/{pageID}", h.Delete)
 
-		r.With(h.pageEnf.Require(permission.AccessView)).Post("/{pageID}/view", h.RecordView)
+		// POST /{pageID}/view is deliberately NOT registered here — it is owned by
+		// internal/analytics, which registers the same absolute path and mounts AFTER this
+		// handler in main.go. analytics has therefore always served it; this package's
+		// registration was shadowed dead code, and analytics.RecordView subsumes it (it
+		// inserts page_views AND bumps view_count/last_viewed_at). One path, one owner:
+		// the duplicate meant a handler could look live while another one served.
+
 		r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/{pageID}/verify", h.Verify)
 
 		r.With(h.pageEnf.Require(permission.AccessView)).Get("/{pageID}/versions", h.GetVersions)
@@ -88,6 +94,30 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.SpaceID = spaceID
+	// SEC-4: model.Page carries workspace_id and created_by, and this decodes the whole
+	// struct from the body — so both used to be caller-supplied, and Store.Create REQUIRED
+	// a workspace_id rather than deriving one. A caller could create in a space they
+	// legitimately admin while naming ANOTHER tenant's workspace, landing the row in that
+	// tenant: every L2 query filters on workspace_id, so it surfaced in the victim's
+	// search/stale reports, attacker-authored and falsely attributed.
+	//
+	// Both values now come from the resource the route already authorized: the workspace
+	// is the PARENT SPACE's (resolved by spaceEnf's RequireAccess), and created_by is the
+	// caller's member id in that workspace. This mirrors space/handler.go's Create, which
+	// was fixed the same way. Deriving the workspace is also what lets an honest client
+	// stop sending one at all.
+	ws, ok := permission.WorkspaceFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "cannot resolve the workspace for this space")
+		return
+	}
+	in.WorkspaceID = ws
+	actor, ok := permission.ActorFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "cannot resolve the acting member for this space")
+		return
+	}
+	in.CreatedBy = actor
 	out, err := h.store.Create(r.Context(), in)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "CREATE_FAILED", err.Error())
@@ -135,7 +165,10 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 	// SEC-4: the editor identity for the lock guard is the VERIFIED member id, never a
 	// client-supplied header or body field. Overwrite any caller-provided updated_by.
-	if mid, ok := authz.SingleMemberID(r.Context()); ok {
+	// ActorFromContext (not authz.SingleMemberID) — the latter returns "" for any caller
+	// with != 1 memberships, which silently DROPPED updated_by for every multi-workspace
+	// member, leaving the column stale and the lock guard unable to recognise the locker.
+	if mid, ok := permission.ActorFromContext(r.Context()); ok {
 		updates["updated_by"] = mid
 	} else {
 		delete(updates, "updated_by")
@@ -183,22 +216,8 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 
 // ─── view / verify ────────────────────────────────────────
 
-func (h *Handler) RecordView(w http.ResponseWriter, r *http.Request) {
-	viewer, _ := authz.SingleMemberID(r.Context()) // verified actor, never X-Member-Id
-	err := h.store.RecordViewInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), viewer, authz.WorkspaceIDs(r.Context()))
-	if errors.Is(err, ErrNotFound) {
-		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
-		return
-	}
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "VIEW_FAILED", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
-}
-
 func (h *Handler) Verify(w http.ResponseWriter, r *http.Request) {
-	verifier, _ := authz.SingleMemberID(r.Context()) // verified actor, never X-Member-Id
+	verifier, _ := permission.ActorFromContext(r.Context()) // verified actor, resolved in THIS page's workspace
 	err := h.store.VerifyInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), verifier, authz.WorkspaceIDs(r.Context()))
 	if errors.Is(err, ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())

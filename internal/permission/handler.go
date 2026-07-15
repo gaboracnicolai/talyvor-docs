@@ -94,8 +94,18 @@ func (h *Handler) grant(w http.ResponseWriter, r *http.Request, resType Resource
 	// client-supplied in.WorkspaceID — a grant can never be written into a foreign workspace.
 	// (Verifying the target resource_id itself belongs to that workspace is a separate fix, out
 	// of scope here: this closes the workspace_id-spoof vector on the write path.)
-	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
-		in.WorkspaceID = ws
+	// WorkspaceOrEmpty no-ops for a multi-workspace caller, which left the BODY's
+	// workspace_id on the grant. Derive it from the resource the route authorized.
+	ws, ok := WorkspaceFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the workspace for this resource")
+		return
+	}
+	in.WorkspaceID = ws
+	grantedBy, ok := ActorFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the acting member for this resource")
+		return
 	}
 	p := Permission{
 		ResourceType: resType,
@@ -104,7 +114,7 @@ func (h *Handler) grant(w http.ResponseWriter, r *http.Request, resType Resource
 		SubjectID:    in.SubjectID,
 		Access:       in.Access,
 		WorkspaceID:  in.WorkspaceID,
-		GrantedBy:    authz.ActorOrEmpty(r.Context()),
+		GrantedBy:    grantedBy,
 	}
 	if err := h.store.Grant(r.Context(), p); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
