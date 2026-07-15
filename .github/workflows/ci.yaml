@@ -11,6 +11,25 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # A real Postgres, or the whole real-schema suite is green-by-absence:
+    # testutil.New(t) SKIPS when DOCS_TEST_DATABASE_URL is unset, so before this
+    # block every SEC-4 cross-tenant test silently skipped on every PR while CI
+    # stayed green. pgvector/pgvector:pg16 matches docker-compose.yaml — the
+    # migrations require the `vector` extension (0001_core.sql, 0004_search.sql).
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -20,7 +39,49 @@ jobs:
           go-version: "1.25"
           cache: true
       - run: go vet ./...
-      - run: go test -timeout 120s -race -count=1 ./...
+      # DOCS_TEST_DATABASE_URL is the ADMIN dsn: testutil.New(t) connects to it to
+      # CREATE/DROP an isolated per-test database, then applies the embedded
+      # migrations to that database. It must point at a maintenance db, not the
+      # per-test one.
+      - name: go test (real Postgres — real-PG tests must RUN, not skip)
+        run: go test -timeout 300s -race -count=1 ./...
+        env:
+          DOCS_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+      # Fail the build if the real-PG suite went back to skipping (a regression to
+      # green-by-absence would otherwise be invisible: skips do not fail a build).
+      - name: assert real-PG tests actually ran
+        run: |
+          set -euo pipefail
+          out=$(go test -v -count=1 -run 'RealPG|SEC4|A3' ./internal/... 2>&1)
+          skips=$(printf '%s' "$out" | grep -c '^--- SKIP' || true)
+          passes=$(printf '%s' "$out" | grep -c '^--- PASS' || true)
+          echo "real-PG suite: $passes passed, $skips skipped"
+          if [ "$skips" -ne 0 ]; then
+            echo "::error::$skips real-PG test(s) SKIPPED — DOCS_TEST_DATABASE_URL is not reaching the suite (green-by-absence regression)"
+            printf '%s\n' "$out" | grep '^--- SKIP' || true
+            exit 1
+          fi
+          if [ "$passes" -eq 0 ]; then
+            echo "::error::real-PG suite matched 0 tests — the -run filter or the suite moved"
+            exit 1
+          fi
+        env:
+          DOCS_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+
+  # The SEC-4 tenancy class-guard. Written in .semgrep/ since the SEC-4 work but
+  # never wired into CI — a rule that does not run is not a guardrail.
+  semgrep:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: semgrep/semgrep:1.165.0
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      # --error → non-zero exit on any finding, so this BLOCKS rather than reports.
+      - run: semgrep --config .semgrep/ --error --quiet
 
   frontend:
     runs-on: ubuntu-latest

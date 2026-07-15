@@ -242,7 +242,17 @@ func (h *Handler) RestoreVersion(w http.ResponseWriter, r *http.Request) {
 // ─── search + stale ───────────────────────────────────────
 
 func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
+	// SEC-4: {wsID} comes from the URL — attacker-controlled — so scoping the store op to it
+	// "looks scoped but isn't". Authorize it against the caller's VERIFIED membership set
+	// first, or a member of any workspace could read another workspace's document body text.
+	// Mirrors internal/search/handler.go's guard on the sibling /workspaces/{wsID}/search.
+	// Authorize BEFORE validating params so a foreign workspace cannot be probed via the
+	// difference between a 400 and a 403.
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized by AuthorizeWorkspace on the next line, before any store op
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "not a member of this workspace")
+		return
+	}
 	q := r.URL.Query().Get("q")
 	if q == "" {
 		writeErr(w, http.StatusBadRequest, "BAD_PARAMS", "q required")
@@ -266,7 +276,14 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Stale(w http.ResponseWriter, r *http.Request) {
-	out, err := h.store.GetStalePages(r.Context(), chi.URLParam(r, "wsID"))
+	// SEC-4: same deceptive shape as Search above — {wsID} is attacker-controlled, so
+	// authorize it against the verified membership set before the store op.
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized on the next line before any store op
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "not a member of this workspace")
+		return
+	}
+	out, err := h.store.GetStalePages(r.Context(), wsID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "STALE_FAILED", err.Error())
 		return

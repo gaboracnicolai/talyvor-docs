@@ -104,6 +104,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	if s.pool == nil {
 		return errors.New("block: store has no pool")
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- EXTERNALLY GATED (blocks carry page_id, not workspace_id): the sole caller is handler.go Delete, whose route is wrapped in blockEnf.Require in this package's Mount. blockEnf resolves via blockPageLooker (cmd/docs/main.go): its first hop `SELECT page_id FROM blocks WHERE id=$1` is unscoped, but it feeds that page id straight to pageLooker → GetByIDInWorkspaces, so a workspace-B block resolves to a workspace-B page → ErrNotFound → 404. NOTE: the gate is main.go's WithAccess wiring, NOT this file (Enforcer.Require is pass-through on a nil receiver).
 	_, err := s.pool.Exec(ctx, `DELETE FROM blocks WHERE id = $1`, id)
 	return err
 }

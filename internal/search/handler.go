@@ -66,9 +66,9 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	wsID := chi.URLParam(r, "wsID")
 	// A4D: {wsID} comes from the URL — authorize it against the caller's verified memberships before
 	// searching, or a member of any workspace could read another workspace's document body text.
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized by AuthorizeWorkspace on the next line, before any store op
 	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return

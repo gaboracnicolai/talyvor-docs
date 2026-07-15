@@ -517,6 +517,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	); err != nil {
 		return fmt.Errorf("page: reparent: %w", err)
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- Delete is a primitive reached only via DeleteInWorkspaces (store.go), which calls assertInWorkspaces(id, authz.WorkspaceIDs) first. Proven cross-tenant-404 by TestSEC4_CrossTenant_ByIDRoutes (real PG) with the Enforcer nil — the store gate alone carries it.
 	if _, err := s.pool.Exec(ctx, `DELETE FROM pages WHERE id = $1`, id); err != nil {
 		return fmt.Errorf("page: delete: %w", err)
 	}
@@ -533,6 +534,7 @@ func (s *Store) RecordView(ctx context.Context, pageID, viewerID string) error {
 	if s.pool == nil {
 		return errors.New("page: store has no pool")
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- RecordView is a primitive reached only via RecordViewInWorkspaces (store.go), which calls assertInWorkspaces(pageID, authz.WorkspaceIDs) first.
 	_, err := s.pool.Exec(ctx,
 		`UPDATE pages SET view_count = view_count + 1,
             last_viewed_at = NOW(), updated_at = NOW()

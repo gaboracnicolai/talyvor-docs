@@ -38,7 +38,21 @@ type DB struct {
 // the migrations require the `vector` extension (0001_core.sql, 0004_search.sql)
 // plus uuid-ossp + pg_trgm. A missing `vector` extension fails LOUD (below) rather
 // than as a cryptic mid-migration error.
+// New provisions an isolated database and applies the full schema. See NewBlank for
+// the variant that stops short of applying — used by the migration-runner tests,
+// which must start from a genuinely empty database.
 func New(t *testing.T) *DB {
+	t.Helper()
+	d := NewBlank(t)
+	applyMigrations(t, context.Background(), d.Pool)
+	return d
+}
+
+// NewBlank provisions an isolated database with the `vector` extension available but
+// NO schema applied — an empty database. internal/migrate's tests need this: a runner
+// that can only be tested against an already-migrated database proves nothing about
+// applying from zero.
+func NewBlank(t *testing.T) *DB {
 	t.Helper()
 	admin := os.Getenv("DOCS_TEST_DATABASE_URL")
 	if admin == "" {
@@ -80,9 +94,6 @@ func New(t *testing.T) *DB {
 			"available on this server. Point DOCS_TEST_DATABASE_URL at a pgvector/pgvector:pg16-class "+
 			"Postgres. underlying error: %v", err)
 	}
-
-	// 4. Apply every migration in NNNN order.
-	applyMigrations(t, ctx, pool)
 	return d
 }
 

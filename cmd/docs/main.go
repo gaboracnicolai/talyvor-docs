@@ -3,6 +3,16 @@
 // HTTP server on :4000 (configurable via DOCS_LISTEN_ADDR) serving
 // spaces / pages / blocks / comments / search. SIGTERM triggers a
 // graceful drain before closing the DB pool.
+//
+// Subcommands:
+//
+//	docs            serve (default)
+//	docs serve      serve, explicitly
+//	docs migrate    apply pending schema migrations, then exit
+//
+// The server also applies pending migrations on boot (fail-closed), so a plain
+// `docs` is self-sufficient. `docs migrate` exists for deployments that run schema
+// changes as a separate step (a k8s initContainer / migration job) ahead of rollout.
 package main
 
 import (
@@ -40,6 +50,7 @@ import (
 	"github.com/talyvor/docs/internal/mcp"
 	"github.com/talyvor/docs/internal/membership"
 	"github.com/talyvor/docs/internal/metrics"
+	"github.com/talyvor/docs/internal/migrate"
 	"github.com/talyvor/docs/internal/model"
 	"github.com/talyvor/docs/internal/page"
 	"github.com/talyvor/docs/internal/pagelink"
@@ -50,11 +61,67 @@ import (
 	"github.com/talyvor/docs/internal/space"
 	"github.com/talyvor/docs/internal/templatelib"
 	"github.com/talyvor/docs/internal/trackintegration"
+	"github.com/talyvor/docs/migrations"
 )
+
+// subcommand returns the requested subcommand, defaulting to "serve" so a bare
+// `docs` (and every existing Dockerfile ENTRYPOINT) keeps working unchanged.
+func subcommand() string {
+	if len(os.Args) < 2 {
+		return "serve"
+	}
+	return os.Args[1]
+}
+
+// runMigrate applies pending migrations and exits. It reads DOCS_DATABASE_URL
+// directly rather than going through config.Load(): a migration job needs a database
+// and nothing else, and should not be made to carry GATEWAY_AUTH_SECRET (which
+// config.Load correctly requires of the SERVER, whose every /v1 identity depends on
+// it). Exits non-zero on any failure — a migration step that fails quietly is worse
+// than one that fails loudly.
+func runMigrate() {
+	dsn := os.Getenv("DOCS_DATABASE_URL")
+	if dsn == "" {
+		slog.Error("migrate: DOCS_DATABASE_URL is required")
+		os.Exit(1)
+	}
+	ctx := context.Background()
+	pool, err := db.New(ctx, dsn)
+	if err != nil {
+		slog.Error("migrate: db init failed", slog.String("err", err.Error()))
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	applied, err := migrate.Apply(ctx, pool, migrations.FS)
+	if err != nil {
+		slog.Error("migrate: failed", slog.String("err", err.Error()))
+		os.Exit(1)
+	}
+	if len(applied) == 0 {
+		slog.Info("migrate: already up to date")
+		return
+	}
+	slog.Info("migrate: applied",
+		slog.Int("count", len(applied)),
+		slog.String("versions", strings.Join(applied, ",")))
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	switch sub := subcommand(); sub {
+	case "migrate":
+		runMigrate()
+		return
+	case "serve":
+		// fall through to the server below
+	default:
+		slog.Error("unknown subcommand", slog.String("subcommand", sub),
+			slog.String("usage", "docs [serve|migrate]"))
+		os.Exit(2)
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -71,6 +138,23 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+
+	// Apply pending migrations before serving a single request. FAIL-CLOSED: a server
+	// running against a schema it cannot verify is how you get silent data corruption,
+	// so a migration error is a boot failure, not a warning. Concurrent replicas
+	// serialise on the runner's advisory lock, and a re-run is a no-op.
+	appliedVersions, err := migrate.Apply(ctx, pool, migrations.FS)
+	if err != nil {
+		slog.Error("migrations failed", slog.String("err", err.Error()))
+		os.Exit(1)
+	}
+	if len(appliedVersions) > 0 {
+		slog.Info("migrations applied",
+			slog.Int("count", len(appliedVersions)),
+			slog.String("versions", strings.Join(appliedVersions, ",")))
+	} else {
+		slog.Info("migrations up to date")
+	}
 
 	spaceStore := space.NewStore(pool)
 	linkStore := pagelink.NewStore(pool)

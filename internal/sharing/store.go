@@ -172,6 +172,7 @@ func (s *Store) Validate(ctx context.Context, token, password string) (*ShareLin
 			return nil, errors.New("sharing: password mismatch")
 		}
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- bearer-secret pattern, not an IDOR surface: link.ID is not client-supplied, it is read off the row already found by `WHERE token = $1` (128-bit CSPRNG token) with the expiry + bcrypt checks passed above. There is no attacker-controlled id to scope.
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE share_links SET view_count = view_count + 1 WHERE id = $1`,
 		link.ID,
@@ -215,6 +216,7 @@ func (s *Store) Revoke(ctx context.Context, id, pageID string) error {
 	if s.pool == nil {
 		return errors.New("sharing: no pool")
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- FALSE POSITIVE: this IS scoped, by `AND page_id = $2` (the ce8bfe3 cross-tenant fix). The rule's pattern-not exclusion only recognises `workspace_id = ANY`, so it cannot see a page-scoped write. share_links is scoped THROUGH its page, and the caller's page is verified upstream by pageEnf.Require(AccessAdmin) (handler.go Mount); a foreign link id matches 0 rows → ErrShareLinkNotFound → 404.
 	tag, err := s.pool.Exec(ctx, `DELETE FROM share_links WHERE id = $1 AND page_id = $2`, id, pageID)
 	if err != nil {
 		return err
