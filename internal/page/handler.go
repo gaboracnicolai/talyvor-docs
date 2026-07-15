@@ -140,6 +140,14 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	} else {
 		delete(updates, "updated_by")
 	}
+	// Same rule for the lock guard's admin-bypass. `updates` IS the decoded request body,
+	// so a caller could send {"is_admin": true} and Store.Update would hand it to
+	// guard.CanEdit, which returns true outright for an admin — bypassing another
+	// member's page lock. Overwrite it with the level RequireAccess resolved from the
+	// gateway-verified identity. Assigning unconditionally (rather than deleting) also
+	// restores the override for REAL admins, who previously could not use it without
+	// asserting a flag the honest client never sent.
+	updates["is_admin"] = permission.IsAdminFromContext(r.Context())
 	out, err := h.store.UpdateInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), updates, authz.WorkspaceIDs(r.Context()))
 	if err != nil {
 		// Cross-tenant / unknown page → 404 (never leak existence).

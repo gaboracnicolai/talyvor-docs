@@ -43,9 +43,14 @@ type lockBody struct {
 	MemberID string `json:"member_id"`
 }
 
+// unlockBody no longer carries is_admin. It used to, and the store trusted it to
+// bypass the "only the locker can unlock" rule — so any Edit-tier member could steal
+// another member's lock with {"is_admin": true}, while a REAL admin who sent no claim
+// was denied. Admin status is now resolved from the gateway-verified identity against
+// the permission model (permission.IsAdminFromContext). A client that still sends
+// is_admin is simply ignored: the field is gone, and encoding/json drops unknown keys.
 type unlockBody struct {
 	MemberID string `json:"member_id"`
-	IsAdmin  bool   `json:"is_admin"`
 }
 
 func memberFromReq(r *http.Request, fallback string) string {
@@ -89,7 +94,12 @@ func (h *Handler) Unlock(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "member_id required")
 		return
 	}
-	if err := h.store.Unlock(r.Context(), pageID, memberID, in.IsAdmin); err != nil {
+	// Admin status comes from the VERIFIED identity resolved against the permission
+	// model by the same RequireAccess middleware that gates this route — never from the
+	// request body. Fails closed: an unguarded mount yields no level in context, so
+	// isAdmin is false and only the locker can unlock.
+	isAdmin := permission.IsAdminFromContext(r.Context())
+	if err := h.store.Unlock(r.Context(), pageID, memberID, isAdmin); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
