@@ -5,9 +5,9 @@
 #   frontend   nginx serving the built SPA (port 4001)
 #   postgres   pgvector-flavoured Postgres for full-text + semantic search
 #
-# Postgres init bootstraps the schema via the migrations directory —
-# files in /docker-entrypoint-initdb.d run in lexical order on first
-# boot, so the 000N_*.sql ordering is preserved automatically.
+# The docs service applies the schema itself on boot (internal/migrate, embedded
+# migrations, recorded in schema_migrations). It waits on postgres via the healthcheck
+# below, so a fresh volume and an existing one both converge to the current schema.
 
 services:
   docs:
@@ -16,6 +16,12 @@ services:
       - "4000:4000"
     environment:
       - DOCS_DATABASE_URL=postgres://docs:${POSTGRES_PASSWORD:-changeme}@postgres:5432/talyvor_docs?sslmode=disable
+      # SEC-4 Layer 1 root of trust. config.Load() REQUIRES this at >= 16 chars and
+      # exits(1) otherwise — correctly, since without it every /v1 identity is
+      # forgeable. It was absent from this file, so `docker compose up` (the README's
+      # quick start) crash-looped on a fail-closed boot check. The dev default below
+      # keeps the stack bootable; it is NOT safe for production.
+      - GATEWAY_AUTH_SECRET=${GATEWAY_AUTH_SECRET:-dev-only-insecure-gateway-secret-change-me}
       - DOCS_LENS_URL=${DOCS_LENS_URL:-}
       - DOCS_LENS_API_KEY=${DOCS_LENS_API_KEY:-}
       - DOCS_TRACK_URL=${DOCS_TRACK_URL:-}
@@ -46,7 +52,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
+      # The ./migrations:/docker-entrypoint-initdb.d mount is GONE. That hook runs only
+      # on first boot of an empty data directory, so it could bootstrap a new install
+      # but could never upgrade an existing one — adding a 00NN_*.sql to a running
+      # deployment did nothing, silently. The docs service now applies migrations on
+      # boot via its embedded runner (internal/migrate), which records every version in
+      # schema_migrations and works on both a fresh and an existing database.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U docs -d talyvor_docs"]
       interval: 5s

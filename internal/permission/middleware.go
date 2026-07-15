@@ -19,6 +19,37 @@ import (
 // here would create a dependency cycle.
 type ResourceResolver func(ctx context.Context, r *http.Request) (resourceContext, error)
 
+// levelCtxKey carries the access level RequireAccess resolved for this request.
+type levelCtxKey struct{}
+
+// withLevel stashes the resolved level on the request context.
+func withLevel(ctx context.Context, l AccessLevel) context.Context {
+	return context.WithValue(ctx, levelCtxKey{}, l)
+}
+
+// LevelFromContext returns the access level RequireAccess resolved for the caller on
+// the resource this route targets, computed from the GATEWAY-VERIFIED identity against
+// the permission model. ok is false when the route was mounted without an Enforcer, so
+// callers MUST fail closed on !ok rather than assume privilege.
+//
+// This exists so a handler can ask "is this caller an admin of this resource?" without
+// re-resolving, and — critically — without taking the caller's word for it. Before it,
+// pagelock's Unlock read `is_admin` out of the request BODY, which let any Edit-tier
+// member steal another member's lock with {"is_admin": true} while simultaneously
+// denying the override to real admins who did not lie about themselves.
+func LevelFromContext(ctx context.Context) (AccessLevel, bool) {
+	l, ok := ctx.Value(levelCtxKey{}).(AccessLevel)
+	return l, ok
+}
+
+// IsAdminFromContext reports whether the verified caller holds admin on the resource
+// this route targets. Fails closed: an unguarded mount (no Enforcer → no level in
+// context) is not admin.
+func IsAdminFromContext(ctx context.Context) bool {
+	l, ok := LevelFromContext(ctx)
+	return ok && l == AccessAdmin
+}
+
 // RequireAccess returns chi middleware that gates a resource route on the caller's WITHIN-workspace
 // access. The caller is the gateway-verified session member (authz.ActorOrEmpty — never a header).
 // Two deny statuses, composing cleanly with the SEC-4 L2 layer:
@@ -45,7 +76,11 @@ func RequireAccess(store *Store, resolver ResourceResolver, minAccess AccessLeve
 				writeForbidden(w) // in my workspace, but under-privileged → 403
 				return
 			}
-			next.ServeHTTP(w, r)
+			// Carry the resolved level forward. The middleware already computed the
+			// caller's true privilege on this resource; handlers that need it (e.g.
+			// pagelock's admin override) must read it from here rather than trust a
+			// self-asserted field in the request body.
+			next.ServeHTTP(w, r.WithContext(withLevel(r.Context(), level)))
 		})
 	}
 }

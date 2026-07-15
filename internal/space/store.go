@@ -184,6 +184,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	if s.pool == nil {
 		return errors.New("space: store has no pool")
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- Delete is a primitive reached only via DeleteInWorkspaces (store.go), which calls assertInWorkspaces(id, authz.WorkspaceIDs) first (404s a foreign space before this by-id write). Same pattern as Update above.
 	_, err := s.pool.Exec(ctx, `DELETE FROM spaces WHERE id = $1`, id)
 	return err
 }

@@ -101,6 +101,7 @@ func (s *Store) RecordView(ctx context.Context, view PageView) error {
 	); err != nil {
 		return fmt.Errorf("analytics: insert view: %w", err)
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- EXTERNALLY GATED (this package has no workspace concept): the sole caller is handler.go RecordView, whose route is wrapped in pageEnf.Require(permission.AccessView) in this package's Mount. pageEnf resolves via pageLooker → page.Store.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx)) in cmd/docs/main.go, so a foreign pageID 404s before the handler runs. NOTE: the gate is main.go's WithAccess wiring, NOT this file — dropping analyticsHandler.WithAccess(pageEnf) silently makes this a live cross-tenant write (Enforcer.Require is pass-through on a nil receiver).
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE pages SET view_count = view_count + 1, last_viewed_at = NOW() WHERE id = $1`,
 		view.PageID,

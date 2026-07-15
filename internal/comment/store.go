@@ -155,6 +155,7 @@ func (s *Store) Unresolve(ctx context.Context, commentID string) error {
 	if s.pool == nil {
 		return errors.New("comment: no pool")
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- Unresolve is a primitive reached only via UnresolveInWorkspaces (store.go), which calls assertInWorkspaces first (join on p.workspace_id = ANY($2)).
 	_, err := s.pool.Exec(ctx,
 		`UPDATE page_comments
         SET resolved = false, resolved_by = NULL, resolved_at = NULL, updated_at = NOW()
@@ -257,6 +258,7 @@ func (s *Store) Delete(ctx context.Context, commentID, requesterID string) error
 	if author != requesterID {
 		return errors.New("comment: only the author can delete")
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- Delete is a primitive reached only via DeleteInWorkspaces (store.go), which calls assertInWorkspaces first (join on p.workspace_id = ANY($2)); the author check above is the second gate.
 	_, err := s.pool.Exec(ctx, `DELETE FROM page_comments WHERE id = $1`, commentID)
 	return err
 }

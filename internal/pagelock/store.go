@@ -116,6 +116,7 @@ func (s *Store) Unlock(ctx context.Context, pageID, memberID string, isAdmin boo
 	if !isAdmin && (r.lockedBy == nil || *r.lockedBy != memberID) {
 		return errors.New("pagelock: only the locker or an admin can unlock")
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- EXTERNALLY GATED (this package has no workspace concept; read() above is unscoped too): the sole caller is handler.go Unlock, whose route is wrapped in pageEnf.Require(permission.AccessEdit) in this package's Mount → GetByIDInWorkspaces in cmd/docs/main.go 404s a foreign pageID before the handler runs. The isAdmin branch skips only the locker check above, never the route middleware, so both branches are equally cross-tenant-safe. NOTE: the gate is main.go's WithAccess wiring, NOT this file (Enforcer.Require is pass-through on a nil receiver). isAdmin is supplied by handler.go from permission.IsAdminFromContext (the gateway-verified identity resolved against the permission model) — it was previously read from the request body, which let any Edit-tier member steal a lock.
 	_, err = s.pool.Exec(ctx,
 		`UPDATE pages SET locked = false, locked_by = NULL, locked_at = NULL
         WHERE id = $1`,

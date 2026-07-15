@@ -140,6 +140,14 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	} else {
 		delete(updates, "updated_by")
 	}
+	// Same rule for the lock guard's admin-bypass. `updates` IS the decoded request body,
+	// so a caller could send {"is_admin": true} and Store.Update would hand it to
+	// guard.CanEdit, which returns true outright for an admin — bypassing another
+	// member's page lock. Overwrite it with the level RequireAccess resolved from the
+	// gateway-verified identity. Assigning unconditionally (rather than deleting) also
+	// restores the override for REAL admins, who previously could not use it without
+	// asserting a flag the honest client never sent.
+	updates["is_admin"] = permission.IsAdminFromContext(r.Context())
 	out, err := h.store.UpdateInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), updates, authz.WorkspaceIDs(r.Context()))
 	if err != nil {
 		// Cross-tenant / unknown page → 404 (never leak existence).
@@ -242,7 +250,17 @@ func (h *Handler) RestoreVersion(w http.ResponseWriter, r *http.Request) {
 // ─── search + stale ───────────────────────────────────────
 
 func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
+	// SEC-4: {wsID} comes from the URL — attacker-controlled — so scoping the store op to it
+	// "looks scoped but isn't". Authorize it against the caller's VERIFIED membership set
+	// first, or a member of any workspace could read another workspace's document body text.
+	// Mirrors internal/search/handler.go's guard on the sibling /workspaces/{wsID}/search.
+	// Authorize BEFORE validating params so a foreign workspace cannot be probed via the
+	// difference between a 400 and a 403.
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized by AuthorizeWorkspace on the next line, before any store op
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "not a member of this workspace")
+		return
+	}
 	q := r.URL.Query().Get("q")
 	if q == "" {
 		writeErr(w, http.StatusBadRequest, "BAD_PARAMS", "q required")
@@ -266,7 +284,14 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Stale(w http.ResponseWriter, r *http.Request) {
-	out, err := h.store.GetStalePages(r.Context(), chi.URLParam(r, "wsID"))
+	// SEC-4: same deceptive shape as Search above — {wsID} is attacker-controlled, so
+	// authorize it against the verified membership set before the store op.
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized on the next line before any store op
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "not a member of this workspace")
+		return
+	}
+	out, err := h.store.GetStalePages(r.Context(), wsID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "STALE_FAILED", err.Error())
 		return

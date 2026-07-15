@@ -55,6 +55,12 @@ rules:
       suppressed inline (documented limitation).
     patterns:
       - pattern: chi.URLParam($R, "wsID")
+    # BLIND SPOT (closed): this include list was exactly the 7 packages SEC-4's secondary
+    # sweep touched (6050788), so the rule structurally could not see the packages that
+    # sweep missed — and page + space had unguarded {wsID} routes for that entire time
+    # (GET /workspaces/{wsID}/pages/search, /pages/stale, /workspaces/{wsID}/spaces).
+    # A guardrail whose scope is "the code we already fixed" cannot catch the next miss.
+    # page/space/search are now included; search was already guarded and stays clean.
     paths:
       include:
         - "/internal/approval/"
@@ -64,6 +70,9 @@ rules:
         - "/internal/templatelib/"
         - "/internal/customdomain/"
         - "/internal/export/"
+        - "/internal/page/"
+        - "/internal/space/"
+        - "/internal/search/"
 
   - id: docs-by-id-write-requires-workspace-scope-sprintf
     languages: [go]

@@ -55,6 +55,19 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "BAD_JSON", err.Error())
 		return
 	}
+	// SEC-4: workspace_id arrives in the BODY here (there is no {wsID} path param on this
+	// route), so it is attacker-controlled exactly like a URL param would be. Authorize it
+	// against the caller's VERIFIED membership set before the insert, or any authenticated
+	// caller — including one with zero memberships — can plant a space in any workspace.
+	m, ok := authz.AuthorizeWorkspace(r.Context(), in.WorkspaceID)
+	if !ok {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "not a member of this workspace")
+		return
+	}
+	// Attribution comes from the gateway-verified identity, NEVER the body: permission's
+	// resolveAccess treats a space's creator as its admin, so a forged created_by is a
+	// self-granted admin rights. m.MemberID is the caller's member id IN this workspace.
+	in.CreatedBy = m.MemberID
 	out, err := h.store.Create(r.Context(), in)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "CREATE_FAILED", err.Error())
@@ -64,7 +77,14 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	out, err := h.store.List(r.Context(), chi.URLParam(r, "wsID"))
+	// SEC-4: {wsID} is attacker-controlled — "looks scoped, isn't". Authorize it against
+	// the verified membership set before listing.
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized on the next line before any store op
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "not a member of this workspace")
+		return
+	}
+	out, err := h.store.List(r.Context(), wsID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "LIST_FAILED", err.Error())
 		return
