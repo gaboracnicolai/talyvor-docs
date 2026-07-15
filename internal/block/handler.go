@@ -72,6 +72,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.PageID = chi.URLParam(r, "pageID")
+	// nosemgrep: docs-no-body-supplied-authority -- model.Block carries NO authority field: it is {ID, PageID, Type, Content, Position, ParentID, CreatedAt, UpdatedAt} — no workspace_id and no created_by, so there is nothing here for the body to forge. Tenancy comes from the parent page, which blockEnf/pageEnf authorized upstream (cmd/docs/main.go), and blocks are reached only via page_id. The rule is a shape rule and cannot see the struct's fields. IF model.Block EVER GAINS a workspace_id/created_by/*_by FIELD, DELETE THIS SUPPRESSION — the finding becomes real that day.
 	out, err := h.store.Create(r.Context(), in)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "CREATE_FAILED", err.Error())

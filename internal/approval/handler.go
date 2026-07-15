@@ -58,12 +58,20 @@ func (h *Handler) Request(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
-		in.WorkspaceID = ws
+	// SEC: WorkspaceOrEmpty no-ops for a multi-workspace caller (leaving the BODY's
+	// workspace_id), and ActorOrEmpty is "" for them — which fell through to attributing
+	// the request to the literal string "user". Derive both from the page the route
+	// authorized.
+	ws, ok := permission.WorkspaceFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the workspace for this page")
+		return
 	}
-	requestedBy := authz.ActorOrEmpty(r.Context())
-	if requestedBy == "" {
-		requestedBy = "user"
+	in.WorkspaceID = ws
+	requestedBy, ok := permission.ActorFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the acting member for this page")
+		return
 	}
 	req, err := h.store.RequestApproval(r.Context(),
 		pageID, in.WorkspaceID, requestedBy, in.Reviewers, in.Message, in.DueDate)
@@ -115,9 +123,9 @@ type decideBody struct {
 
 func (h *Handler) Decide(w http.ResponseWriter, r *http.Request) {
 	requestID := chi.URLParam(r, "requestID")
-	reviewerID := authz.ActorOrEmpty(r.Context())
-	if reviewerID == "" {
-		writeErr(w, http.StatusBadRequest, "verified identity required")
+	reviewerID, ok := permission.ActorFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the acting member for this page")
 		return
 	}
 	var in decideBody
@@ -151,12 +159,23 @@ func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Pending(w http.ResponseWriter, r *http.Request) {
-	wsIDs := authz.WorkspaceIDs(r.Context())
-	reviewerID := r.URL.Query().Get("reviewer_id")
-	if reviewerID == "" {
-		reviewerID = authz.ActorOrEmpty(r.Context())
+	// SEC: this route was ungated, took the reviewer from the QUERY STRING, and PREFERRED
+	// that value over the verified actor — so any member read another member's
+	// pending-approval queue with ?reviewer_id=victim. It also ignored its own {wsID},
+	// serving from the caller's whole workspace set instead.
+	//
+	// {wsID} is now authorized against the verified memberships, and AuthorizeWorkspace
+	// hands back the caller's Membership — so the reviewer is their member id IN that
+	// workspace (correct for any membership count, unlike ActorOrEmpty) and the results
+	// are scoped to the workspace the route names. "Pending for me, here" is the only
+	// question this endpoint can answer.
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized on the next line before any store op
+	m, ok := authz.AuthorizeWorkspace(r.Context(), wsID)
+	if !ok {
+		writeErr(w, http.StatusForbidden, "not a member of this workspace")
+		return
 	}
-	out, err := h.store.ListPending(r.Context(), reviewerID, wsIDs)
+	out, err := h.store.ListPending(r.Context(), m.MemberID, []string{wsID})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

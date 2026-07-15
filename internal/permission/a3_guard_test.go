@@ -43,7 +43,7 @@ func a3Chain(d *testutil.DB) http.Handler {
 		if err != nil {
 			return permission.SpaceMeta{}, err
 		}
-		return permission.SpaceMeta{Private: sp.Private, CreatedBy: sp.CreatedBy}, nil
+		return permission.SpaceMeta{WorkspaceID: sp.WorkspaceID, Private: sp.Private, CreatedBy: sp.CreatedBy}, nil
 	}
 	pageLooker := func(ctx context.Context, id string) (permission.PageMeta, error) {
 		pg, err := pageStore.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx))
@@ -54,7 +54,7 @@ func a3Chain(d *testutil.DB) http.Handler {
 		if err != nil {
 			return permission.PageMeta{}, err
 		}
-		return permission.PageMeta{SpaceID: pg.SpaceID, SpaceCreatedBy: sp.CreatedBy, SpacePrivate: sp.Private, PageCreatedBy: pg.CreatedBy}, nil
+		return permission.PageMeta{WorkspaceID: pg.WorkspaceID, SpaceID: pg.SpaceID, SpaceCreatedBy: sp.CreatedBy, SpacePrivate: sp.Private, PageCreatedBy: pg.CreatedBy}, nil
 	}
 	blockPageLooker := func(ctx context.Context, blockID string) (string, permission.PageMeta, error) {
 		var pageID string

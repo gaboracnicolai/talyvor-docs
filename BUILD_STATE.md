@@ -1,6 +1,6 @@
 # BUILD_STATE — talyvor-docs
 
-**Base:** `9bc98b2` · **Branch:** `docs-foundation-run1` · **Generated:** 2026-07-15
+**Base:** `9bc98b2` (Run 1) → `f238b90` (Run 2) · **Branch:** `docs-authority-class` · **Updated:** 2026-07-16
 
 This file is the honest current state of the repo, written to be trusted when planning
 the next run. Where something is thin, it says so. The README is a product pitch and is
@@ -144,132 +144,131 @@ fresh volume → `migrations applied count=14 versions=0001..0014` → `schema_m
 | CI as a gate | **Real.** Postgres service, 13 real-PG tests run, anti-regression assert, semgrep blocking |
 | SEC-4 cross-tenant (by-id) | **Closed**, and now actually tested on every PR |
 | SEC-4 cross-tenant (workspace routes) | **Closed this run** — page search/stale, space list/create |
-| Privilege from request body | **`is_admin` closed this run.** `member_id`/`author_id` fallback still open — see §3.1 |
+| Client-supplied authority | **CLOSED (Run 2).** Root + all 8 instances + a residual sweep; `ActorOrEmpty`/`WorkspaceOrEmpty` now banned by semgrep. One documented residual: `collab` (not an authority hole) |
 | Migration runner (bar A) | **Built.** Subcommand + `schema_migrations` + 5 fail-closed guards + boot apply |
 | Boot / quick start | **Works.** `docker compose up -d` → healthy |
-| Semgrep guardrail | **Runs, blocks, and covers page/space/search** |
+| Semgrep guardrail | **Runs, blocks.** Covers page/space/search (URL-param shape) **and the body-supplied shape** — 4 new rules, mutation-proven, catching 7/7 of the packages Run 2 fixed |
 
-**Test posture.** 27 packages green, `-race`, `go vet` clean. **14 real-PG tests** (was 9,
-all skipping) + 9 new migrate tests. Packages with real-PG coverage: `collab`, `comment`,
-`database`, `mcp`, `membership`, `migrate`, `page`, `pagelock`, `permission`, `space`,
-`trackintegration`.
+**Test posture.** 27 packages green, `-race`, `go vet` clean. **26 real-PG security /
+integration tests** (Run 1 inherited 9, all of them skipping) + 9 migrate tests. Packages
+with real-PG coverage: `analytics`, `approval`, `changelog`, `collab`, `comment`, `database`, `mcp`, `membership`, `migrate`, `page`, `pagelink`, `pagelock`, `permission`, `space`, `trackintegration`.
 
 Still true: **most store tests are pgxmock-only, and pgxmock never executes SQL** —
 `internal/comment/store.go` documents two real bugs (error 42702) that ten passing mock
 tests hid for six weeks until the real-PG harness ran them. Packages whose SQL has still
-never executed in a test: `analytics`, `approval`, `block`, `changelog`, `customdomain`,
-`pagelink`, `search`, `sharing`, `templatelib`. `authz` and `gatewayauth` — the auth
+never executed in a test: `block`, `customdomain`, `search`, `sharing`, `templatelib`. `authz` and `gatewayauth` — the auth
 boundary — still have **no direct unit tests**.
 
 ---
 
-## 3. Known-broken / NOT fixed (deliberately out of scope for Run 1)
+## 3. Known-broken / NOT fixed
 
-### ⭐ The client-supplied-authority class — swept, and it is NOT closed
+### ✅ The client-supplied-authority class — CLOSED (Run 2)
 
-The `is_admin` fix closed two instances. An adversarial sweep of every handler that takes
-a privilege / identity / tenancy value from client-controlled input found **eight more**,
-all live on `main`. Ranked. **This is the Run-2 backlog, in order.**
+Run 1's sweep found a systemic root plus 8 call-site instances. Run 2 closed all of them,
+root first, each red-first against real Postgres.
 
-1. **`page.Create` — cross-tenant write.** `page/handler.go`'s `Create` decodes
-   `model.Page` from the body and overrides **only** `SpaceID`; `workspace_id` and
-   `created_by` pass through to `store.Create`, which requires a non-empty `WorkspaceID`
-   (rather than deriving it from the space) and inserts it verbatim. So
-   `POST /v1/spaces/{my-space}/pages` with `{"workspace_id":"<victim-ws>"}` lands a row in
-   the victim's tenant: every L2 query filters `workspace_id = ANY(verified set)`, so the
-   page appears in the **victim's** search and stale reports, falsely attributed, and is
-   invisible to the attacker. This is the direct twin of the `POST /v1/spaces` hole closed
-   this run — `space/handler.go`'s `Create` now does exactly the right thing
-   (`AuthorizeWorkspace` then `CreatedBy = m.MemberID`); the page handler is missing the
-   identical guard. **Highest severity of anything still open.**
-2. **MCP `update_page` — lock bypass via `updated_by`.** `mcp/server.go` sets
-   `updates["updated_by"] = stringArg(args, "updated_by", ...)`, which
-   `page.Store.Update` feeds to `guard.CanEdit` as the editor identity — set it to the
-   lock holder's id and you edit through their lock, no `is_admin` needed. Root cause:
-   **`authz.AuthorizedMember` is dead code — zero callers repo-wide.** The MCP chokepoint
-   already resolves and stashes the verified actor (`WithAuthorized`), and every tool then
-   ignores it. Wiring it closes this and #5 in one edit.
-3. **`changelog.Create` — inverted fallback.** `changelog/handler.go` does
-   `if in.CreatedBy == "" { in.CreatedBy = authz.ActorOrEmpty(...) }` — it **prefers the
-   client's value**. Unconditional attribution forgery with no precondition at all (worse
-   than `memberFromReq`, which at least prefers the verified actor).
-4. **`pagelink.Create`** — `workspace_id` **and** `created_by` from the body, inserted
-   verbatim; the handler imports no authz.
-5. **MCP `verify_page` / `create_page`** — `verified_by` / `created_by` from client args.
-   (`create_page` is currently latent: it never sets `WorkspaceID`, so the real store
-   rejects it — it errors rather than forges.)
-6. **`analytics.RecordView`** — `viewer_id` from the body, never overridden, and it feeds
-   `COUNT(DISTINCT viewer_id)`: forges "who read this page". `workspace_id` *is*
-   overridden on the same handler; `viewer_id` is not. Note the route collision (§3.5) —
-   `page.RecordView` does this correctly via `authz.SingleMemberID` and may be the shadowed
-   one, which would mean the safe handler is dead code.
-7. **`approval.Pending`** — `reviewer_id` from the **query string**, verified actor used
-   only if absent; route ungated. Workspace-scoped, so not cross-tenant, but any member
-   reads another member's approval queue via `?reviewer_id=victim`.
-8. **The shared root: `authz.ActorOrEmpty` returns `""` for multi-workspace callers** —
-   see §3.1 below. It makes every `memberFromReq` fallback reachable, and it also makes
-   every `if ws := authz.WorkspaceOrEmpty(ctx); ws != "" { in.WorkspaceID = ws }` override
-   a **fail-open no-op** for those callers, leaving the client's `workspace_id` in place —
-   in `permission`, `sharing`, `analytics`, `approval`, and `changelog` handlers. Fix this
-   root before patching call sites individually.
+**The root (was §3.8).** `authz.ActorOrEmpty` → `SingleMemberID` returned `""` for ANY
+caller whose membership count `!= 1` — not just zero-membership callers, but every
+**multi-workspace member**. Two opposite failures from one line:
 
-Checked and clean (not findings): `collab` hardcodes `CanEdit(..., false)` and takes the
-actor from context; `importer` authorizes its multipart `workspace_id`; no non-gateway
-identity header (`X-Member-Id`, `X-Talyvor-Workspace`) survives anywhere outside
-`internal/gatewayauth`; the `page`/`space` update allowlists exclude `created_by`, so
-there is no mass-assignment there.
+- *Functional:* `permission.RequireAccess` evaluated them as `memberID ""`, so
+  `resolveAccess` skipped the creator rule and no `subject_type='member'` grant could
+  match. Their real grants evaporated; they collapsed to the `everyone`/public default.
+- *Security:* because the actor was `""`, every `memberFromReq(r, in.MemberID)` fallback
+  went live and the **request body named the actor**. Proven: a two-workspace member
+  unlocked another member's lock with `{"member_id":"<locker>"}`, and could not use the
+  feature honestly (an empty body was rejected outright — forge or nothing).
 
-### New findings from this run — not fixed, needs a decision
+Fixed by resolving the actor **per-resource-workspace**. `resourceContext` now carries the
+owning `WorkspaceID`; `RequireAccess` resolves the caller via
+`authz.MemberIDForWorkspace(ctx, res.WorkspaceID)` — correct for any membership count —
+and stashes both, plus the level, on the request context:
 
-1. **⭐ Identity forgery via the `member_id` / `author_id` body fallback — PROVEN, and the
-   top item for the next run.** `memberFromReq(r, in.MemberID)` (`pagelock/handler.go`)
-   and `memberFromReq(r, in.AuthorID)` (`comment/handler.go`) prefer the verified actor
-   but **fall back to the request body** when the context actor is empty.
+| accessor | what it returns |
+|---|---|
+| `permission.ActorFromContext(ctx)` | caller's member id **in the resource's workspace** |
+| `permission.WorkspaceFromContext(ctx)` | the workspace **owning** the gated resource |
+| `permission.IsAdminFromContext(ctx)` | caller's real level on that resource (Run 1) |
 
-   The root cause is systemic: `authz.ActorOrEmpty` → `authz.SingleMemberID` returns `""`
-   unless the caller has **exactly one** membership (`len(ms) != 1`). So for any member of
-   **two or more workspaces** the fallback is live and the body is believed.
+All fail closed on an unguarded mount. `authz.AuthorizeWorkspace(ctx, ws)` covers
+workspace-level routes (use the returned `Membership.MemberID`), `authz.AuthorizedMember`
+the MCP chokepoint. **`ActorOrEmpty`/`WorkspaceOrEmpty` are now banned by semgrep** — the
+migration is complete, so any new use is a regression.
 
-   Reproduced against real Postgres during this run: a member of two workspaces unlocked
-   another member's lock by sending `{"member_id": "<their id>"}` — **200, lock stolen**.
-   Reaching the Edit-gated route with an empty actor needs an `everyone: edit` grant on the
-   space, which is an ordinary setting for an internal wiki. The same shape reaches
-   `comment`'s "only the author can delete" check via `author_id`.
+**The root fix alone closed §3.8 and, via `ActorFromContext`, the `memberFromReq`
+fallbacks in `pagelock` and `comment` (its blast radius). It closed none of §3.1–3.7 on
+its own** — none of those routed their client value through `RequireAccess`; each needed
+its own fix.
 
-   Reproduction: seed a member into two workspaces, grant `everyone: edit` on the space,
-   have a single-workspace member lock the page, then `DELETE .../lock` as the
-   multi-workspace member with `{"member_id":"<locker's id>"}`.
+| Was | Now |
+|---|---|
+| **§3.1 `page.Create`** — body `workspace_id` planted a row in another tenant (surfacing in the **victim's** search/stale, falsely attributed) | Workspace **derived** from the parent space, `created_by` from the verified actor. The store no longer demands a client-supplied tenant, so an honest client sends none. |
+| **§3.2 MCP `update_page`** — `updated_by` arg impersonated the lock holder → edit **through** their lock | Actor from `authz.AuthorizedMember` (which the chokepoint already stashed and every tool ignored — it had **zero callers**) |
+| **§3.3 `changelog.Create`** — **inverted** fallback preferred the client's `created_by` outright | Verified actor, unconditionally; workspace derived from the page. Same fix applied to `Generate`. |
+| **§3.4 `pagelink.Create`** — body `workspace_id` + `created_by`, no authz import | Both derived from the parent page |
+| **§3.5 MCP `verify_page` / `create_page`** — `verified_by` / `created_by` from args (the default was the literal `"agent"`) | Verified actor; the three identity props are gone from the tool schema |
+| **§3.6 `analytics.RecordView`** — body `viewer_id` fed `COUNT(DISTINCT viewer_id)`, forging *who read a page* | Viewer + workspace derived. **Route collision resolved empirically**: a real-PG test proved `analytics` served the path and `page.RecordView` was the *shadowed* safe handler — the duplicate registration is removed, so the live handler is the safe one and there is one owner. |
+| **§3.7 `approval.Pending`** — `?reviewer_id=victim` read another member's queue; route **ungated**; `{wsID}` ignored | `{wsID}` authorized, reviewer is always the caller's member id in it, results scoped to it |
 
-   **Not fixed here deliberately.** It is a different bug from `is_admin` (identity
-   forgery, not privilege assertion) with an architectural root: the same
-   `ActorOrEmpty`-returns-`""` behaviour also means **multi-workspace members are
-   evaluated as `memberID ""` by `permission.RequireAccess` repo-wide**, so their
-   per-member grants never match and they only get access via `everyone` grants. Fixing it
-   properly means deciding how to resolve an actor per-resource-workspace
-   (`authz.MemberIDForWorkspace` exists but the handler needs the resource's workspace),
-   and it touches `pagelock`, `comment`, and `permission` together. Simply deleting the
-   fallback is secure but would fail-closed multi-workspace members out of locking and
-   commenting — a real functional tradeoff that is the caller's decision, not a fold-in.
+**Residual sweep beyond the enumerated 8.** The same root had left `WorkspaceOrEmpty`
+fail-open no-ops and `ActorOrEmpty` attribution gaps in `sharing`, `templatelib`,
+`permission`, `customdomain`, `database`, and `approval.Request`/`Decide` — including one
+that attributed a multi-workspace member's approval request to the literal string
+`"user"`. All migrated.
 
-2. **Comment routes gate on `{pageID}` but act on `{id}`** — `UnresolveInWorkspaces` /
+**The guardrail (§3.3 of Run 1's list) is closed too.** `.semgrep/body-supplied-authority.yml`
+adds four rules for the body-supplied shape the URL-param rule was blind to: (A) a
+body-decoded struct reaching a store with no approved resolver consulted, (B) an authority
+field read off the body and never assigned, (C) the inverted fallback, (D) a ban on the
+ambiguous helpers. Proven both directions and mutation-proven against freshly-injected
+instances. **Against the real pre-fix code at `f238b90` they catch 7 of the 7 packages this
+run fixed.** Honest limits are documented in the rule file: they are shape rules, not
+dataflow — they do not follow a decoded body across a function boundary, and semgrep
+patterns are not flow-ordered, so rule B can only flag a field the handler never assigns.
+Rule D is the exact one; the others are approximations over it.
+
+### Still open from this class — one, deliberate
+
+**`collab.ServeWS` is the last `ActorOrEmpty` caller** (carries a documented `nosemgrep`).
+**Not an authority hole**: the `?member_id=` query param is ignored and there is no body
+fallback, so nothing client-supplied can name the actor. The effect is the root's
+*functional* residue — a multi-workspace member opens a session with an empty member id, so
+their presence is unlabelled and `CanEdit` will not recognise them as the holder of their
+own lock. The WS route is mounted directly with no resource middleware, so there is no
+resolved actor in context; fixing it needs `PageScoper` to also yield the page's workspace
+so the actor can come from `authz.MemberIDForWorkspace`. Small, but it is an interface
+change to a package whose rewrite is already queued — folded into that work rather than
+done blind here.
+
+### Still open — deliberate deferrals
+
+1. **Comment routes gate on `{pageID}` but act on `{id}`** — `UnresolveInWorkspaces` /
    `DeleteInWorkspaces` assert only that the comment's page is *somewhere* in the caller's
-   workspace set, not that it is under the `{pageID}` that was authorized. Structurally the
-   same shape as the `ce8bfe3` share-revoke bug, one blast radius smaller: cross-tenant is
-   blocked, cross-page within a tenant is not.
-3. **`POST /v1/spaces` is not covered by any semgrep rule.** Its workspace id arrives in
-   the request *body*, and `docs-no-url-param-workspace-scope` only matches
-   `chi.URLParam`. The route is fixed and tested, but the guardrail would not catch this
-   shape recurring elsewhere.
-4. **Class-B `nosemgrep` suppressions are externally justified.** `analytics/store.go`,
+   workspace set, not that it is under the `{pageID}` the route authorized. Structurally
+   the same shape as the `ce8bfe3` share-revoke bug, one blast radius smaller: cross-tenant
+   is blocked, cross-page within a tenant is not. Deferred by decision — smaller blast
+   radius, and it is a resource-scoping bug rather than a client-authority one, so it did
+   not belong in the authority run. **This is the top candidate for the next run.**
+2. **`collab.ServeWS`'s empty actor for multi-workspace members** — see the section above.
+   Not an authority hole; folded into the queued collab work because it needs a
+   `PageScoper` interface change.
+3. **Class-B `nosemgrep` suppressions are externally justified.** `analytics/store.go`,
    `block/store.go`, `pagelock/store.go` have no workspace concept; their cross-tenant
    safety lives entirely in `cmd/docs/main.go`'s `WithAccess` wiring, and
    `Enforcer.Require` is **pass-through on a nil receiver** — so dropping a `WithAccess`
    call silently converts each into a live cross-tenant write with the alarm already
    suppressed. Each suppression names `main.go` as the load-bearing gate. The durable fix
-   is a wiring test asserting a foreign id 404s through the real chain.
-5. **Route collision:** `POST /v1/spaces/{spaceID}/pages/{pageID}/view` is registered by
-   both `page/handler.go` and `analytics/handler.go`; the later mount wins and one is dead.
-   Both are gated identically, so nothing is exposed.
+   is a wiring test asserting a foreign id 404s through the real chain. (Note this now cuts
+   deeper than cross-tenancy: `permission.ActorFromContext` / `WorkspaceFromContext` are
+   populated by `RequireAccess`, so a dropped `WithAccess` also empties the actor — which
+   fails closed at every call site added this run, by construction.)
+
+Closed since this file was last written: the `member_id`/`author_id` body fallback and its
+systemic root (Run 2 — see above); the `POST /v1/spaces` guardrail gap (rule A in
+`.semgrep/body-supplied-authority.yml` catches that exact shape — verified against
+`9bc98b2`); and the `POST /v1/spaces/{s}/pages/{p}/view` route collision (resolved: the
+duplicate registration is gone and the live handler is the safe one).
 
 ### Carried from recon, still true
 

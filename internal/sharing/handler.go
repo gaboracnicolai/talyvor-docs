@@ -9,7 +9,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/permission"
 )
 
@@ -89,9 +88,14 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
-		in.WorkspaceID = ws
+	// SEC: WorkspaceOrEmpty no-ops for a multi-workspace caller, which left the BODY's
+	// workspace_id on the share link. Derive it from the page the route authorized.
+	ws, ok := permission.WorkspaceFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the workspace for this page")
+		return
 	}
+	in.WorkspaceID = ws
 	if in.Access == "" {
 		in.Access = permission.AccessView
 	}
@@ -103,7 +107,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	link, err := h.store.Create(r.Context(),
 		chi.URLParam(r, "pageID"),
 		in.WorkspaceID,
-		authz.ActorOrEmpty(r.Context()),
+		shareActor(r),
 		in.Access,
 		expiresAt,
 		in.Password,
@@ -188,4 +192,12 @@ func (h *Handler) Public(w http.ResponseWriter, r *http.Request) {
 		"expires_at":   link.ExpiresAt,
 		"powered_by":   "Talyvor Docs",
 	})
+}
+
+// shareActor resolves the acting member from the verified identity, in the workspace that
+// owns the page this route authorized. Replaces authz.ActorOrEmpty, which returned "" for
+// any caller with != 1 memberships and left the link unattributed.
+func shareActor(r *http.Request) string {
+	m, _ := permission.ActorFromContext(r.Context())
+	return m
 }

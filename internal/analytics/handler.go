@@ -55,24 +55,39 @@ func daysParam(r *http.Request) int {
 }
 
 func (h *Handler) RecordView(w http.ResponseWriter, r *http.Request) {
+	// No viewer_id / workspace_id: both are derived from the verified caller and the
+	// authorized page. viewer_name is display text only, not identity.
 	var in struct {
-		ViewerID    string `json:"viewer_id"`
-		ViewerName  string `json:"viewer_name"`
-		Duration    int    `json:"duration_sec"`
-		WorkspaceID string `json:"workspace_id"`
+		ViewerName string `json:"viewer_name"`
+		Duration   int    `json:"duration_sec"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
-	// SEC-4: the workspace is the caller's VERIFIED membership, not a client header/body.
-	if ws := authz.WorkspaceOrEmpty(r.Context()); ws != "" {
-		in.WorkspaceID = ws
+	// SEC: the workspace AND the viewer both come from the resource this route already
+	// authorized — never the body.
+	//
+	// workspace_id was overridden here before, but via authz.WorkspaceOrEmpty, which
+	// returns "" for a multi-workspace caller and so silently NO-OP'd for exactly those
+	// callers, leaving the client's value. viewer_id was not overridden at all, and it
+	// feeds COUNT(DISTINCT viewer_id) / GROUP BY viewer_id — so the body could forge who
+	// read a page. WorkspaceFromContext / ActorFromContext are correct for any membership
+	// count.
+	ws, ok := permission.WorkspaceFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the workspace for this page")
+		return
+	}
+	viewer, ok := permission.ActorFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "cannot resolve the viewing member for this page")
+		return
 	}
 	err := h.store.RecordView(r.Context(), PageView{
 		PageID:      chi.URLParam(r, "pageID"),
-		WorkspaceID: in.WorkspaceID,
-		ViewerID:    in.ViewerID,
+		WorkspaceID: ws,
+		ViewerID:    viewer,
 		ViewerName:  in.ViewerName,
 		Duration:    in.Duration,
 	})

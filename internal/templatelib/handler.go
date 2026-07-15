@@ -71,11 +71,15 @@ func (h *Handler) FromPage(w http.ResponseWriter, r *http.Request) {
 	// foreign workspace to plant a template into. Reject with 404 (no leak).
 	wsIDs := authz.WorkspaceIDs(r.Context())
 	target := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized write-target: authz.AuthorizeWorkspace below rejects non-members before this workspace owns the new object
-	if _, ok := authz.AuthorizeWorkspace(r.Context(), target); !ok {
+	// AuthorizeWorkspace hands back the caller's Membership — use ITS member id. It is the
+	// caller's id in THIS workspace, correct for any membership count, unlike ActorOrEmpty
+	// which is "" for anyone with != 1 memberships (leaving the object unattributed).
+	m, ok := authz.AuthorizeWorkspace(r.Context(), target)
+	if !ok {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
-	creator := authz.ActorOrEmpty(r.Context())
+	creator := m.MemberID
 	tmpl, err := h.store.CreateFromPage(r.Context(),
 		in.PageID, target, creator,
 		in.Name, in.Description, in.Category, wsIDs,
@@ -111,11 +115,15 @@ func (h *Handler) Use(w http.ResponseWriter, r *http.Request) {
 	// member (else 404 — a raw path param can't name a foreign target).
 	wsIDs := authz.WorkspaceIDs(r.Context())
 	target := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized write-target: authz.AuthorizeWorkspace below rejects non-members before this workspace owns the new object
-	if _, ok := authz.AuthorizeWorkspace(r.Context(), target); !ok {
+	// AuthorizeWorkspace hands back the caller's Membership — use ITS member id. It is the
+	// caller's id in THIS workspace, correct for any membership count, unlike ActorOrEmpty
+	// which is "" for anyone with != 1 memberships (leaving the object unattributed).
+	m, ok := authz.AuthorizeWorkspace(r.Context(), target)
+	if !ok {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
-	creator := authz.ActorOrEmpty(r.Context())
+	creator := m.MemberID
 	if creator == "" {
 		creator = "user"
 	}

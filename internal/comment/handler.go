@@ -48,14 +48,19 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// memberFromReq resolves the actor from the SEC-4 verified identity (never a spoofable
-// header), falling back to the body-supplied value only when no verified actor is present
-// (e.g. tests without the middleware chain).
-func memberFromReq(r *http.Request, fallback string) string {
-	if v := authz.ActorOrEmpty(r.Context()); v != "" {
-		return v
-	}
-	return fallback
+// actorFor resolves the acting member from the GATEWAY-VERIFIED identity, in the workspace
+// that owns the parent page. RequireAccess (which gates every route in this package's
+// Mount) resolves it via authz.MemberIDForWorkspace and stashes it.
+//
+// This replaces memberFromReq(r, in.AuthorID), which fell back to the request BODY when
+// authz.ActorOrEmpty was empty — and it was empty for every caller with != 1 memberships.
+// So a two-workspace member could post a comment authored as anyone (and comment
+// authorship is load-bearing: Store.Delete gates on "only the author can delete"), while
+// the same member posting honestly got author_id "" and was rejected outright. Resolving
+// per-resource-workspace fixes both: there is no fallback, and nothing to forge.
+func actorFor(r *http.Request) string {
+	m, _ := permission.ActorFromContext(r.Context())
+	return m
 }
 
 // scoped404 maps a store scope miss (comment's page not in the caller's workspaces) to 404.
@@ -80,10 +85,12 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// createBody carries NO author_id: the author is the gateway-verified caller (actorFor),
+// never a client claim. A body that still sends author_id is ignored — the field is gone
+// and encoding/json drops unknown keys. author_name is display text only, not identity.
 type createBody struct {
 	Content    string  `json:"content"`
 	BlockID    *string `json:"block_id"`
-	AuthorID   string  `json:"author_id"`
 	AuthorName string  `json:"author_name"`
 }
 
@@ -96,7 +103,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	c, err := h.store.Create(r.Context(),
 		pageID, in.BlockID,
-		memberFromReq(r, in.AuthorID), in.AuthorName, in.Content)
+		actorFor(r), in.AuthorName, in.Content)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -118,7 +125,7 @@ func (h *Handler) Reply(w http.ResponseWriter, r *http.Request) {
 	}
 	c, err := h.store.ReplyInWorkspaces(r.Context(),
 		chi.URLParam(r, "id"),
-		memberFromReq(r, in.AuthorID), in.AuthorName, in.Content, authz.WorkspaceIDs(r.Context()))
+		actorFor(r), in.AuthorName, in.Content, authz.WorkspaceIDs(r.Context()))
 	if scoped404(w, err) {
 		return
 	}
@@ -129,14 +136,14 @@ func (h *Handler) Reply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, c)
 }
 
-type resolveBody struct {
-	ResolvedBy string `json:"resolved_by"`
-}
+// resolveBody is empty: who resolved a thread is the verified caller, not a body claim.
+// Retained as a type so the decode site keeps its shape if fields are added later.
+type resolveBody struct{}
 
 func (h *Handler) Resolve(w http.ResponseWriter, r *http.Request) {
 	var in resolveBody
 	_ = json.NewDecoder(r.Body).Decode(&in)
-	resolver := memberFromReq(r, in.ResolvedBy)
+	resolver := actorFor(r)
 	if resolver == "" {
 		writeErr(w, http.StatusBadRequest, "resolver required")
 		return
@@ -165,7 +172,7 @@ func (h *Handler) Unresolve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
-	requester := authz.ActorOrEmpty(r.Context())
+	requester := actorFor(r)
 	if requester == "" {
 		writeErr(w, http.StatusBadRequest, "verified identity required")
 		return

@@ -1,0 +1,177 @@
+# The CLIENT-SUPPLIED-AUTHORITY class guard.
+#
+# The sibling rule file (operate-by-id-tenancy.yml) guards values read from chi.URLParam.
+# It was structurally blind to the shape that produced every finding of this class: a
+# handler decodes the REQUEST BODY into a struct or map and then lets an identity /
+# tenancy / privilege field ride into a store. The caller asserts their own authority and
+# is believed.
+#
+# What that shape actually produced on main:
+#   - page.Create      body workspace_id  → a row planted in ANOTHER tenant's workspace
+#   - pagelink.Create  body workspace_id + created_by, no authz import at all
+#   - changelog.Create an INVERTED fallback preferring the client's created_by outright
+#   - analytics        body viewer_id feeding COUNT(DISTINCT viewer_id)
+#   - pagelock/page    body is_admin bypassing another member's page lock
+#
+# THE RULE OF THE CODEBASE: authority is never a request field. It is derived from the
+# resource the route already authorized —
+#   permission.WorkspaceFromContext(ctx)  the workspace owning the gated resource
+#   permission.ActorFromContext(ctx)      the caller's member id IN that workspace
+#   permission.IsAdminFromContext(ctx)    the caller's real level on that resource
+#   authz.AuthorizeWorkspace(ctx, ws)     for workspace-level routes; use the returned
+#                                         Membership.MemberID as the actor
+#   authz.AuthorizedMember(ctx)           inside the MCP chokepoint
+#
+# Do NOT use authz.ActorOrEmpty / authz.WorkspaceOrEmpty for this: both delegate to the
+# Single* helpers, which return "" for ANY caller with != 1 memberships. That is not a
+# rare case — it made every body-fallback live for multi-workspace members, and made every
+# `if ws := WorkspaceOrEmpty(ctx); ws != "" {...}` override a silent no-op for them.
+#
+# KNOWN LIMITS (documented, not hidden):
+#   - These are SHAPE rules, not dataflow. Rule A approximates "the handler never consulted
+#     an approved resolver"; a handler that calls one but then still passes a client value
+#     for a DIFFERENT field would not be caught.
+#   - Semgrep patterns are not flow-ordered, so rule B cannot distinguish "read after a
+#     verified assignment" from "read of the client's value". It therefore only flags an
+#     authority field the handler never assigns at all — the analytics shape.
+#   - Neither rule sees across a function boundary: a handler that passes the decoded body
+#     to a helper which then reaches the store is invisible to both.
+#   Anything these miss is caught the way this class was found in the first place: a
+#   real-Postgres test that asserts the stored row's tenancy and attribution.
+
+rules:
+  # ── A. A body-decoded struct reaching a store, in a handler that never consulted an
+  #       approved resolver. This is the cross-tenant WRITE shape (page.Create).
+  - id: docs-no-body-supplied-authority
+    languages: [go]
+    severity: ERROR
+    message: >
+      CLIENT-SUPPLIED AUTHORITY: this handler decodes the request body into $IN and passes it
+      to a store without ever calling permission.WorkspaceFromContext or
+      authz.AuthorizeWorkspace. If $IN's type carries workspace_id / created_by (model.Page,
+      PageLink, ChangelogEntry, model.Space all do), the CALLER chose the tenant and the
+      author — that is how page.Create let a caller plant a row in another tenant's
+      workspace, where SEC-4's `workspace_id = ANY(verified set)` filter then surfaced it to
+      the VICTIM. Derive the workspace from the resource the route authorized
+      (permission.WorkspaceFromContext) and the actor from permission.ActorFromContext, then
+      assign both onto $IN before the store call. See internal/space/handler.go Create and
+      internal/page/handler.go Create for the reference shape.
+    patterns:
+      - pattern-either:
+          - pattern: $STORE.$M($CTX, $IN)
+          - pattern: $STORE.$M($CTX, $A, $IN)
+          - pattern: $STORE.$M($CTX, $A, $B, $IN)
+      - pattern-inside: |
+          func $F(...) {
+            ...
+            json.NewDecoder($R.Body).Decode(&$IN)
+            ...
+          }
+      # Sanitized ONLY by an APPROVED resolver. Deliberately NOT satisfied by an assignment
+      # from authz.WorkspaceOrEmpty — that is the fail-open no-op this class is made of.
+      - pattern-not-inside: |
+          func $F(...) {
+            ...
+            permission.WorkspaceFromContext(...)
+            ...
+          }
+      - pattern-not-inside: |
+          func $F(...) {
+            ...
+            authz.AuthorizeWorkspace(...)
+            ...
+          }
+
+  # ── B. An authority FIELD read off a body-decoded struct that the handler never assigns.
+  #       This is the analytics shape: `ViewerID: in.ViewerID`.
+  - id: docs-no-body-supplied-authority-field
+    languages: [go]
+    severity: ERROR
+    message: >
+      CLIENT-SUPPLIED AUTHORITY: this reads an identity/tenancy/privilege field straight off
+      the decoded request body and never assigns it, so the value is whatever the caller
+      sent. analytics.RecordView did exactly this with viewer_id — which feeds
+      COUNT(DISTINCT viewer_id), so the body forged who read a page. Take the value from the
+      verified caller instead (permission.ActorFromContext / WorkspaceFromContext, or
+      authz.AuthorizeWorkspace's Membership.MemberID on a workspace-level route) and delete
+      the field from the request struct: an endpoint that accepts no authority cannot be
+      lied to.
+    patterns:
+      - pattern: $IN.$FIELD
+      - metavariable-regex:
+          metavariable: $FIELD
+          regex: ^(WorkspaceID|ViewerID|ReviewerID|AuthorID|ResolvedBy|CreatedBy|UpdatedBy|VerifiedBy|GrantedBy|RequestedBy|MemberID|IsAdmin)$
+      - pattern-inside: |
+          func $F(...) {
+            ...
+            json.NewDecoder($R.Body).Decode(&$IN)
+            ...
+          }
+      # A handler that ASSIGNS the field is taking control of it, not trusting the client.
+      # Only a never-assigned authority field is a finding.
+      - pattern-not-inside: |
+          func $F(...) {
+            ...
+            $IN.$FIELD = $V
+            ...
+          }
+      # Reading a claimed value in order to AUTHORIZE it is the correct pattern, not the
+      # bug — space.Create's `authz.AuthorizeWorkspace(ctx, in.WorkspaceID)` is the
+      # reference implementation. The bug is reading it and USING it; this read is what
+      # rejects a non-member.
+      - pattern-not-inside: authz.AuthorizeWorkspace(..., $IN.$FIELD, ...)
+
+  # ── D. The ROOT primitive itself. The shape rules above are approximations; this one is
+  #       exact, and it is the reason the class existed at all. Every call site has been
+  #       migrated, so any NEW use is a regression.
+  - id: docs-no-ambiguous-actor-helpers
+    languages: [go]
+    severity: ERROR
+    message: >
+      AMBIGUOUS ACTOR: authz.ActorOrEmpty / authz.WorkspaceOrEmpty delegate to SingleMemberID
+      / SingleWorkspace, which return "" for ANY caller whose membership count != 1 — not
+      just zero-membership callers, but every MULTI-WORKSPACE member. That is what created
+      this whole bug class: it made `if v := ActorOrEmpty(ctx); v != "" {...else body}`
+      fallbacks live (the body named the actor) and `if ws := WorkspaceOrEmpty(ctx); ws != ""
+      { in.WorkspaceID = ws }` overrides into silent no-ops (the body named the tenant), for
+      exactly those callers — while ALSO voiding their real per-member grants.
+      Use instead:
+        permission.ActorFromContext(ctx) / WorkspaceFromContext(ctx)  — on a route gated by
+          RequireAccess: the caller's member id, and the workspace, resolved from the
+          resource itself. Correct for any membership count.
+        authz.AuthorizeWorkspace(ctx, wsID)  — on a workspace-level route: authorize the
+          claimed workspace and use the returned Membership.MemberID as the actor.
+        authz.AuthorizedMember(ctx)  — inside the MCP chokepoint.
+      A route with no resource middleware and no workspace to authorize has no way to name
+      its actor; that is a wiring bug, not a case for these helpers.
+    patterns:
+      - pattern-either:
+          - pattern: authz.ActorOrEmpty(...)
+          - pattern: authz.WorkspaceOrEmpty(...)
+
+  # ── C. The INVERTED fallback: prefer the client's identity, consult the verified one only
+  #       if the client omitted it. The most dangerous shape in the class, because it needs
+  #       no precondition at all — it is unconditional forgery for every caller.
+  - id: docs-no-inverted-identity-fallback
+    languages: [go]
+    severity: ERROR
+    message: >
+      INVERTED IDENTITY FALLBACK: this prefers a CLIENT-supplied identity and only falls back
+      to the verified one when the client omits it — so any caller is whoever they say they
+      are. changelog.Create (`if in.CreatedBy == "" { in.CreatedBy = authz.ActorOrEmpty(...) }`)
+      and approval.Pending (the same shape over ?reviewer_id=) both shipped this. The verified
+      identity is not a default; it is the only answer. Assign it unconditionally and drop the
+      client field.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if $IN.$FIELD == "" {
+                $IN.$FIELD = $VERIFIED
+              }
+          - pattern: |
+              if $VAR == "" {
+                $VAR = $VERIFIED
+              }
+      - metavariable-regex:
+          metavariable: $VERIFIED
+          regex: (?s).*(ActorOrEmpty|WorkspaceOrEmpty|AuthorizedMember|ActorFromContext|WorkspaceFromContext|MemberIDForWorkspace|SingleMemberID|SingleWorkspace)

@@ -54,6 +54,7 @@ func v1LockChain(d *testutil.DB) http.Handler {
 			return permission.PageMeta{}, err
 		}
 		return permission.PageMeta{
+			WorkspaceID: pg.WorkspaceID,
 			SpaceID: pg.SpaceID, SpaceCreatedBy: sp.CreatedBy,
 			SpacePrivate: sp.Private, PageCreatedBy: pg.CreatedBy,
 		}, nil

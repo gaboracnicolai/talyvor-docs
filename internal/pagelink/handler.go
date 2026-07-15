@@ -59,6 +59,22 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	if in.LinkType == "" {
 		in.LinkType = "mention"
 	}
+	// SEC: PageLink carries workspace_id (the tenancy key on page_links — the table has no
+	// FK, it is an opaque Track id) and created_by, and this decodes the whole struct from
+	// the body. Both used to insert verbatim, with no authz in this handler at all. Derive
+	// them from the parent page, which pageEnf.Require already authorized.
+	ws, ok := permission.WorkspaceFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "cannot resolve the workspace for this page")
+		return
+	}
+	actor, ok := permission.ActorFromContext(r.Context())
+	if !ok {
+		writeErr(w, http.StatusForbidden, "FORBIDDEN", "cannot resolve the acting member for this page")
+		return
+	}
+	in.WorkspaceID = ws
+	in.CreatedBy = actor
 	if err := h.store.Upsert(r.Context(), in); err != nil {
 		writeErr(w, http.StatusBadRequest, "CREATE_FAILED", err.Error())
 		return

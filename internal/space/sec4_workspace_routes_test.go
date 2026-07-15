@@ -44,7 +44,7 @@ func v1SpaceChain(d *testutil.DB) http.Handler {
 		if err != nil {
 			return permission.SpaceMeta{}, err
 		}
-		return permission.SpaceMeta{Private: sp.Private, CreatedBy: sp.CreatedBy}, nil
+		return permission.SpaceMeta{WorkspaceID: sp.WorkspaceID, Private: sp.Private, CreatedBy: sp.CreatedBy}, nil
 	}
 	spaceEnf := permission.NewEnforcer(permStore, permission.SpaceResolverFromParam("spaceID", spaceLooker))
 	h := space.NewHandler(spaceStore)

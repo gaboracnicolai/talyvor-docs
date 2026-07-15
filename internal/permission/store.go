@@ -206,6 +206,11 @@ type resourceContext struct {
 	Type    ResourceType
 	ID      string
 	SpaceID string
+	// WorkspaceID is the workspace that OWNS this resource. RequireAccess resolves the
+	// caller's member id IN this workspace (authz.MemberIDForWorkspace) rather than
+	// using authz.ActorOrEmpty, which collapses to "" for any caller with != 1
+	// memberships and silently voided every per-member grant they held.
+	WorkspaceID string
 	// CreatedBy is the resource's author. Phase 8 honours the spec's
 	// "owner always admin" contract via this — Docs has no
 	// workspace-roles table.

@@ -293,7 +293,10 @@ func main() {
 		if err != nil {
 			return permission.SpaceMeta{}, err
 		}
-		return permission.SpaceMeta{Private: sp.Private, CreatedBy: sp.CreatedBy}, nil
+		// WorkspaceID is load-bearing: RequireAccess resolves the caller's member id in
+		// THIS workspace (authz.MemberIDForWorkspace) to evaluate access. Omitting it
+		// fails closed (no actor → 403), never open.
+		return permission.SpaceMeta{WorkspaceID: sp.WorkspaceID, Private: sp.Private, CreatedBy: sp.CreatedBy}, nil
 	}
 	pageLooker := func(ctx context.Context, id string) (permission.PageMeta, error) {
 		pg, err := pageStore.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx))
@@ -305,7 +308,8 @@ func main() {
 			return permission.PageMeta{}, err
 		}
 		return permission.PageMeta{
-			SpaceID: pg.SpaceID, SpaceCreatedBy: sp.CreatedBy, SpacePrivate: sp.Private, PageCreatedBy: pg.CreatedBy,
+			WorkspaceID: pg.WorkspaceID,
+			SpaceID:     pg.SpaceID, SpaceCreatedBy: sp.CreatedBy, SpacePrivate: sp.Private, PageCreatedBy: pg.CreatedBy,
 		}, nil
 	}
 	spaceEnf := permission.NewEnforcer(permStore, permission.SpaceResolverFromParam("spaceID", spaceLooker))

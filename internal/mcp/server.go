@@ -243,7 +243,6 @@ func (s *Server) toolsList() []toolSpec {
 				prop("title", "string", "Page title"),
 				prop("content", "string", "Page body in markdown"),
 				prop("parent_id", "string", "Optional parent page for nesting"),
-				prop("created_by", "string", "Author identifier (default \"agent\")"),
 			),
 		},
 		{
@@ -254,7 +253,6 @@ func (s *Server) toolsList() []toolSpec {
 				prop("page_id", "string", "Page identifier"),
 				prop("title", "string", "New title"),
 				prop("content", "string", "New body in markdown"),
-				prop("updated_by", "string", "Author identifier (default \"agent\")"),
 			),
 		},
 		{
@@ -290,7 +288,6 @@ func (s *Server) toolsList() []toolSpec {
 			InputSchema: schema(
 				required("page_id"),
 				prop("page_id", "string", "Page identifier"),
-				prop("verified_by", "string", "Verifier identifier (default \"agent\")"),
 			),
 		},
 		{
@@ -591,11 +588,19 @@ func (s *Server) toolCreatePage(ctx context.Context, args map[string]any) (any, 
 	}
 	md := stringArg(args, "content", "")
 	pm := MarkdownToProseMirror(md)
+	// SEC: the author is the VERIFIED caller, never a client-supplied arg. Tool args are
+	// entirely client-controlled, so `created_by` was a self-asserted identity — and
+	// permission's resolveAccess treats a creator as an admin. The chokepoint in callTool
+	// already resolved and stashed the real actor (authz.WithAuthorized); read it back.
+	actor, ok := authz.AuthorizedMember(ctx)
+	if !ok {
+		return nil, &rpcError{Code: errUnauthorized, Message: "cannot resolve the acting member"}
+	}
 	created, err := s.deps.pages.Create(ctx, model.Page{
 		SpaceID:   stringArg(args, "space_id", ""),
 		Title:     stringArg(args, "title", ""),
 		Content:   pm,
-		CreatedBy: stringArg(args, "created_by", "agent"),
+		CreatedBy: actor,
 	})
 	if err != nil {
 		return nil, err
@@ -620,11 +625,15 @@ func (s *Server) toolUpdatePage(ctx context.Context, args map[string]any) (any, 
 	if v := stringArg(args, "content", ""); v != "" {
 		updates["content"] = MarkdownToProseMirror(v)
 	}
-	if v := stringArg(args, "updated_by", ""); v != "" {
-		updates["updated_by"] = v
-	} else {
-		updates["updated_by"] = "agent"
+	// SEC: the editor identity is the VERIFIED caller, never the `updated_by` arg. This is
+	// not cosmetic — page.Store.Update hands updated_by to the lock guard, and CanEdit
+	// allows the write when it equals locked_by, so naming the lock holder edited THROUGH
+	// their lock. The chokepoint already stashed the real actor.
+	actor, ok := authz.AuthorizedMember(ctx)
+	if !ok {
+		return nil, &rpcError{Code: errUnauthorized, Message: "cannot resolve the acting member"}
 	}
+	updates["updated_by"] = actor
 	p, err := s.deps.pages.Update(ctx, stringArg(args, "page_id", ""), updates)
 	if err != nil {
 		return nil, err
@@ -747,7 +756,13 @@ func (s *Server) toolVerifyPage(ctx context.Context, args map[string]any) (any, 
 	if err := requireStrings(args, "page_id"); err != nil {
 		return nil, err
 	}
-	if err := s.deps.pages.Verify(ctx, stringArg(args, "page_id", ""), stringArg(args, "verified_by", "agent")); err != nil {
+	// SEC: a freshness attestation says "checked by X" — X is the VERIFIED caller, never
+	// the `verified_by` arg, which let any caller attest as anyone.
+	actor, ok := authz.AuthorizedMember(ctx)
+	if !ok {
+		return nil, &rpcError{Code: errUnauthorized, Message: "cannot resolve the acting member"}
+	}
+	if err := s.deps.pages.Verify(ctx, stringArg(args, "page_id", ""), actor); err != nil {
 		return nil, err
 	}
 	return toolContent(map[string]any{

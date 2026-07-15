@@ -94,7 +94,9 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	cd, err := h.store.Create(r.Context(),
 		wsID,
 		in.Domain,
-		authz.ActorOrEmpty(r.Context()),
+		// The caller's member id IN this workspace. ActorOrEmpty was "" for anyone with
+		// != 1 memberships, leaving the domain unattributed.
+		domainActor(r, wsID),
 		in.SpaceID,
 	)
 	if err != nil {
@@ -257,4 +259,12 @@ func paragraphsFromText(text string) string {
 		fmt.Fprintf(&b, "<p>%s</p>\n", html.EscapeString(para))
 	}
 	return b.String()
+}
+
+// domainActor resolves the caller's member id in wsID (already authorized above) from the
+// verified membership set. Replaces authz.ActorOrEmpty, which returned "" for any caller
+// with != 1 memberships.
+func domainActor(r *http.Request, wsID string) string {
+	m, _ := authz.MemberIDForWorkspace(r.Context(), wsID)
+	return m
 }
