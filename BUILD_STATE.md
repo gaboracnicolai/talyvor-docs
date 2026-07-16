@@ -780,7 +780,20 @@ Builds Phase 2 (the edit-session backend — the Option-B policy seam) then Phas
   Option-B. Its `LockGuard.CanEdit` has the IDENTICAL signature to `page.editGuard`.
 - **Migration high-water 0015** → Phase 2 is **0016** (verified, no collision).
 
-### Phase 2 — `internal/editsession` (migration 0016) — store DONE (tenancy proof pushed)
+### Phase 2 — `internal/editsession` (migration 0016) — DONE (store + endpoints + wiring)
+
+**Endpoints** (`Handler`, actor from `permission.ActorFromContext`, ws from `authz.WorkspaceIDs`,
+never a body field): `POST /spaces/{s}/pages/{p}/edit-session` (acquire, Edit), `.../heartbeat`
+(Edit), `.../takeover` (Edit), `DELETE .../edit-session` (release, Edit), `GET .../edit-session`
+(get, View). Live foreign session → 423 Locked + the session (UI shows "<holder> is editing" +
+offers takeover); lost slot on heartbeat → 409; cross-tenant/missing → 404. **Wiring**: main.go
+`pageStore.WithGuard(editsession.Compose(lockStore, editSessionStore))` (was bare `lockStore`);
+handler mounted + `WithAccess(pageEnf)`. collab's guard left as `lockStore` (multi-writer path).
+**HTTP tenancy** proven: cross-tenant acquire/get/takeover/heartbeat/release all 404 through the
+real /v1 chain; owner acquire 200. **Compose integration** proven: non-holder REST save →
+`ErrLocked`, holder saves; manual pagelock + approval gate still block through the composite
+(byte-behavior unchanged).
+
 
 `page_edit_sessions(page_id PK → pages CASCADE, workspace_id NOT NULL, holder, acquired_at,
 last_heartbeat)`. LIVE iff `last_heartbeat > now() - TTL` (DefaultTTL 30s, `WithTTL` for tests).

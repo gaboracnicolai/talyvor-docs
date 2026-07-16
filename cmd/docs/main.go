@@ -44,6 +44,7 @@ import (
 	"github.com/talyvor/docs/internal/database"
 	"github.com/talyvor/docs/internal/db"
 	"github.com/talyvor/docs/internal/dbhealth"
+	"github.com/talyvor/docs/internal/editsession"
 	"github.com/talyvor/docs/internal/export"
 	"github.com/talyvor/docs/internal/freshness"
 	"github.com/talyvor/docs/internal/gatewayauth"
@@ -279,7 +280,15 @@ func main() {
 	// up further down (after its own NewHandler call).
 	lockStore := pagelock.NewStore(pool)
 	lockHandler := pagelock.NewHandler(lockStore)
-	pageStore = pageStore.WithGuard(lockStore)
+	// Single-writer edit session (Option A's policy seam). The REST save guard becomes
+	// approvalOK AND manualLockOK AND editSessionOK via Compose — the edit-session ADDS the
+	// "who may write right now" decision without replacing the approval gate or the manual
+	// pagelock. When no session is active, editsession.CanEdit allows, so the composite equals
+	// pagelock's result (existing behavior preserved). collab (the multi-writer OT path) keeps
+	// its own lockStore guard below — the single-writer policy governs only the REST save path.
+	editSessionStore := editsession.NewStore(pool)
+	editSessionHandler := editsession.NewHandler(editSessionStore)
+	pageStore = pageStore.WithGuard(editsession.Compose(lockStore, editSessionStore))
 
 	// Export (markdown / HTML / PDF / DOCX) — buffered through a
 	// 50MB-capped writer in the handler.
@@ -379,6 +388,7 @@ func main() {
 	shareHandler.WithAccess(pageEnf)
 	blockHandler.WithAccess(pageEnf, blockEnf)
 	lockHandler.WithAccess(pageEnf)
+	editSessionHandler.WithAccess(pageEnf)
 	linkHandler.WithAccess(pageEnf)
 	analyticsHandler.WithAccess(pageEnf)
 	dbHandler.WithAccess(pageEnf)
@@ -503,6 +513,7 @@ func main() {
 		exportHandler.Mount(r)
 		approvalHandler.Mount(r)
 		lockHandler.Mount(r)
+		editSessionHandler.Mount(r)
 		commentHandler.Mount(r)
 		changelogHandler.Mount(r)
 		domainHandler.Mount(r)
