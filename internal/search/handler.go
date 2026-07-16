@@ -149,7 +149,14 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "search failed"})
 		return
 	}
-	_ = semEr // semantic always returns nil error per its contract.
+	// Semantic search degrades gracefully (empty results) for every failure EXCEPT one it
+	// surfaces as an error: a per-workspace token could not be minted (ErrTokenUnavailable).
+	// That is fail-closed by design — we error the search rather than fall back to the shared
+	// global key, which would silently re-collapse per-tenant rate-limit + spend attribution.
+	if semEr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "search failed"})
+		return
+	}
 
 	merged := merge(ft, sem)
 	if len(merged) > limit {

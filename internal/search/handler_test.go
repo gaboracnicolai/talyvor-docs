@@ -90,6 +90,31 @@ func TestHandler_FullTextOnly_NoLens(t *testing.T) {
 	}
 }
 
+// The handler surfaces the search-side fail-closed policy: when the semantic side cannot mint
+// a per-workspace token, the whole search errors (500) rather than falling back to the shared
+// global key. type=all here — full-text would succeed, but fail-closed erases it too, by design.
+func TestHandler_FailsClosedWhenTokenMintFails(t *testing.T) {
+	f := newJWTFakeLens(t)
+	f.mintFail = true
+	defer f.Close()
+	sem, _ := meteredSemantic(t, f.URL)
+	pages := &fakePages{results: []page.SearchResult{
+		{Page: model.Page{ID: "pg-1", Title: "Auth", SpaceID: "sp-1"}, SpaceName: "Eng", Rank: 0.9, Headline: "h"},
+	}}
+	h := newRouter(t, pages, sem)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/workspaces/ws-1/search?q=auth&type=all", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500 (fail-closed) on mint failure, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if _, _, dataAuth, _ := f.snapshot(); len(dataAuth) != 0 {
+		t.Fatalf("a Lens data-path request went out despite the mint failure: %v", dataAuth)
+	}
+}
+
 func TestMerge_MarksDuplicatesAsBoth(t *testing.T) {
 	ft := []page.SearchResult{
 		{Page: model.Page{ID: "pg-1", Title: "A", SpaceID: "sp-1"}, SpaceName: "Eng", Rank: 0.9, Headline: "h"},

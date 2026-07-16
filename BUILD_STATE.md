@@ -599,6 +599,28 @@ never held across the HTTP call). Admin key used ONLY to mint; on mint failure r
 error, NEVER the admin key. RED→GREEN + mutation-proven: disabling the cache-hit path makes
 cache/refresh/isolation/coalesce mint 2×/2×/3/20× — restored → 1×. `-race` clean.
 
+### Property 2 — wire the embed + search data path to the provider — DONE
+
+`SemanticSearch.embed(ctx, workspaceID, text)` now takes the workspace (was `_`), fetches a
+per-workspace bearer from the provider, and sends `Authorization: Bearer <JWT>` — never the
+global key. `IndexPage` stops dropping its workspaceID; `Search` passes its own. Dead `apiKey`
+field removed; `WithLensCreds`→`WithLensURL` (the data-path credential is now the JWT, not a
+key). main.go constructs one shared `lenscreds.Provider` and wires it into `semSearch`.
+
+**Stated fail policy (per the brief; implemented + proven, not silently chosen):**
+- **Async index = best-effort.** Mint failure ⇒ `IndexPage` logs and returns nil, writes
+  nothing, sends NO data-path request. The page re-indexes on its next save (the pageindex
+  throttle re-enqueues on the next Update) — the async "retry" rides the normal save loop; the
+  throttle's never-drop machinery is untouched.
+- **Sync search = fail-closed.** Mint failure ⇒ `Search` returns `ErrTokenUnavailable`; the
+  handler errors the search (500). It does NOT degrade to empty and NEVER falls back to the
+  global key. Tradeoff (stated): a Lens-auth outage errors search entirely rather than serving
+  full-text — the brief's chosen policy ("error the search").
+
+RED→GREEN: embed carried `Bearer GLOBAL-ADMIN-KEY` → now carries a per-workspace JWT decoding
+to the request's workspace. Mutation-proven: flipping the search branch to degrade-instead-of-
+fail-closed breaks both fail-closed tests (handler 200 + full-text; Search nil error).
+
 ### Deferred / forks — see §2/§3 (filled in as the run completes)
 
 ## 1. What this run changed

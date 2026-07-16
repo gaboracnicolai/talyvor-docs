@@ -3,14 +3,17 @@ package search
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pashagolub/pgxmock/v4"
 
+	"github.com/talyvor/docs/internal/lenscreds"
 	"github.com/talyvor/docs/internal/lensintegration"
 )
 
@@ -31,6 +34,19 @@ func newFakeLens(t *testing.T) *fakeLens {
 		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
 	}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The embed path now mints a per-workspace token first. Serve the mint endpoint so
+		// these tests exercise the real provider→embed flow; the data-path assertions below
+		// are unchanged.
+		if r.URL.Path == "/v1/auth/token" {
+			var body struct {
+				WorkspaceID string `json:"workspace_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"token":"jwt-%s","expires_at":%q}`,
+				body.WorkspaceID, time.Now().Add(time.Hour).Format(time.RFC3339))))
+			return
+		}
 		f.lastFeature = r.Header.Get("X-Talyvor-Feature")
 		b, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(b, &f.lastBody)
@@ -47,7 +63,8 @@ func newSemantic(t *testing.T, lensURL string) (*SemanticSearch, pgxmock.PgxPool
 	}
 	t.Cleanup(pool.Close)
 	client := lensintegration.New(lensURL, "k1")
-	s := newSemanticSearch(client, pool).WithLensCreds(lensURL, "k1")
+	prov := lenscreds.New(lensURL, "k1", lenscreds.Options{})
+	s := newSemanticSearch(client, pool).WithLensURL(lensURL).WithTokenProvider(prov)
 	return s, pool
 }
 

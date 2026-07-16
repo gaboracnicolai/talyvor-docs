@@ -48,6 +48,7 @@ import (
 	"github.com/talyvor/docs/internal/freshness"
 	"github.com/talyvor/docs/internal/gatewayauth"
 	"github.com/talyvor/docs/internal/importer"
+	"github.com/talyvor/docs/internal/lenscreds"
 	"github.com/talyvor/docs/internal/lensintegration"
 	"github.com/talyvor/docs/internal/mcp"
 	"github.com/talyvor/docs/internal/membership"
@@ -166,8 +167,14 @@ func main() {
 	// page save. Both linker and indexer are best-effort and run
 	// without blocking the save itself (indexer detaches into a
 	// goroutine inside the store).
+	// Per-workspace Lens credentials. cfg.LensAPIKey is the ADMIN/MINTING key ONLY from here
+	// on: the provider exchanges it (POST /v1/auth/token) for a per-workspace JWT and caches
+	// one per workspace, so every Lens DATA-path call is attributed + rate-limited to its real
+	// tenant. Before this, Docs sent the admin key on the data path and every tenant collapsed
+	// into one shared rate-limit bucket + the "default" spend bucket (see internal/lenscreds).
+	lensProvider := lenscreds.New(cfg.LensURL, cfg.LensAPIKey, lenscreds.Options{})
 	lensClient := lensintegration.New(cfg.LensURL, cfg.LensAPIKey)
-	semSearch := search.New(lensClient, pool).WithLensCreds(cfg.LensURL, cfg.LensAPIKey)
+	semSearch := search.New(lensClient, pool).WithLensURL(cfg.LensURL).WithTokenProvider(lensProvider)
 	// Throttle the per-save embed path — the largest uncontrolled Lens consumer. The store's
 	// fire-and-forget goroutine now just ENQUEUES here (returns immediately); the throttle
 	// coalesces rapid saves per page (latest-wins, never-drop), bounds concurrent embeds to a
