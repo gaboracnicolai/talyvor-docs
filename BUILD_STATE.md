@@ -634,7 +634,41 @@ the original global-key bug (`Bearer <global>` on embed) fails this test and bot
 tests (claims decode to `""`). With the merged Lens-side proof (per-ws JWT → isolated
 rate-limit bucket + isolated COGS), the chain is complete.
 
-### Deferred / forks — see §2/§3 (filled in as the run completes)
+### Property 4 — the completions data path (`lensintegration.Client`) — DONE
+
+The brief's proof named embed + search, but VERIFY-FIRST found a THIRD data path on the global
+key: `Client.post` (AI completions — write/summarize/translate/ask/suggest-title, and MCP
+`ask_docs`). The guard is absolute ("the global key must never be the data-path bearer after
+this"), and since Lens meters per key, leaving completions on the global key would keep
+completions metering collapsed. So this path is converted too, using the SAME provider.
+`Client.WithTokenProvider` wired; `post` fetches `TokenFor(workspaceID)` and sends it as the
+bearer. Fail policy = **fail-closed** (like search): mint failure ⇒ the completion errors, the
+engine surfaces its friendly "AI unavailable", never the global key. RED→GREEN + mutation-proven
+(revert to `Bearer <global>` → the per-workspace-JWT test fails). The 8 client tests + the ai
+engine/handler tests updated to wire a provider + serve the mint endpoint (they encoded the old
+global-key behavior). main.go now wires the provider into BOTH the client and semSearch.
+
+### Fork (stated) — converted all three data paths, not just the two named
+
+The explicit build named embed + search; the completions path was the fork. Converting it was
+the guard-faithful, complete choice (the alternative — leaving one data path on the global key —
+violates the absolute guard and leaves completions metering broken). It uses the same provider
+and workspaceID already in scope at every call site, so it was mechanical. The only cost was
+test churn (assertions that encoded the old `Bearer <global>` behavior), which is correcting a
+now-wrong expectation, not a reason to leave a gap.
+
+### Deferred (with reasons)
+
+- **Token TTL/skew are not yet config knobs** — the provider uses sane defaults (1h TTL, refresh
+  5m before expiry). A watched follow-up can add `DOCS_LENS_TOKEN_TTL_HOURS` etc. if operations
+  wants them; not required for correctness.
+- **`IndexAllPages` (unwired bulk backfill)** now threads workspaceID to `IndexPage` so it would
+  attribute correctly IF wired — but it still has no caller (same status as Run 6). No route, no
+  throttle, out of scope.
+- **Step 3 (Code / Track adoption)** — the sibling repos still call Lens with their own shared
+  keys. This run is the Docs half only; Code + Track need the same provider pattern. Cross-repo,
+  out of scope. This closes the Docs side of [[docs-llm-cost-flow-unmetered]] /
+  [[lens-perworkspace-metering]].
 
 ## 1. What this run changed
 

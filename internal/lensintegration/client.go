@@ -28,6 +28,14 @@ type Client struct {
 	lensURL    string
 	apiKey     string
 	httpClient *http.Client
+	tokens     tokenProvider
+}
+
+// tokenProvider yields a per-workspace Lens bearer. internal/lenscreds.Provider satisfies it.
+// The completions data path uses this instead of the shared global key so Lens meters + rate-
+// limits per workspace — the global key resolves to an empty workspace (see internal/lenscreds).
+type tokenProvider interface {
+	TokenFor(ctx context.Context, workspaceID string) (string, error)
 }
 
 func New(lensURL, apiKey string) *Client {
@@ -36,6 +44,14 @@ func New(lensURL, apiKey string) *Client {
 		apiKey:     apiKey,
 		httpClient: &http.Client{Timeout: defaultTimeout},
 	}
+}
+
+// WithTokenProvider wires the per-workspace JWT provider. Once set, completions carry a
+// per-workspace bearer instead of the shared global key. main.go always wires this; apiKey
+// remains the IsConfigured sentinel and is the same admin key the provider mints with.
+func (c *Client) WithTokenProvider(tp tokenProvider) *Client {
+	c.tokens = tp
+	return c
 }
 
 // IsConfigured returns true when both URL and API key are set. Every
@@ -101,12 +117,23 @@ func (c *Client) post(ctx context.Context, path, workspaceID, feature string, bo
 	if err != nil {
 		return nil, err
 	}
+	// Per-workspace bearer — Lens meters + rate-limits off THIS token's claim. The shared
+	// global key (c.apiKey) is the MINTING credential only; it is never sent here. On a mint
+	// failure we error the completion (fail-closed) rather than fall back to the global key,
+	// which would silently re-collapse per-tenant rate-limit + spend attribution.
+	if c.tokens == nil {
+		return nil, errors.New("lens: no token provider wired")
+	}
+	tok, err := c.tokens.TokenFor(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("lens: token for %q: %w", workspaceID, err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.lensURL+path, bytes.NewReader(enc))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("X-Talyvor-Feature", feature)
 	req.Header.Set("X-Talyvor-Workspace", workspaceID)
 

@@ -3,12 +3,15 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/talyvor/docs/internal/lenscreds"
 	"github.com/talyvor/docs/internal/lensintegration"
 )
 
@@ -30,6 +33,13 @@ func newFakeLens(t *testing.T) *fakeLens {
 		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"OK"}]}`))
 	}
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Completions mint a per-workspace token first; serve the mint endpoint. The ai tests
+		// don't assert on the token, so an opaque one suffices.
+		if r.URL.Path == "/v1/auth/token" {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"token":"tok","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))))
+			return
+		}
 		f.lastFeature = r.Header.Get("X-Talyvor-Feature")
 		b, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(b, &f.lastBody)
@@ -38,8 +48,14 @@ func newFakeLens(t *testing.T) *fakeLens {
 	return f
 }
 
+// meteredLensClient wires the per-workspace provider (shared by the ai handler tests too) so
+// completions carry a per-workspace bearer. The fake serves the mint endpoint.
+func meteredLensClient(lensURL string) *lensintegration.Client {
+	return lensintegration.New(lensURL, "k1").WithTokenProvider(lenscreds.New(lensURL, "k1", lenscreds.Options{}))
+}
+
 func newEngine(srv *fakeLens) *Engine {
-	return New(lensintegration.New(srv.URL, "k1"))
+	return New(meteredLensClient(srv.URL))
 }
 
 func TestWriteWithAI_ReturnsGeneratedText(t *testing.T) {

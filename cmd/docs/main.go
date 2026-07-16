@@ -173,7 +173,7 @@ func main() {
 	// tenant. Before this, Docs sent the admin key on the data path and every tenant collapsed
 	// into one shared rate-limit bucket + the "default" spend bucket (see internal/lenscreds).
 	lensProvider := lenscreds.New(cfg.LensURL, cfg.LensAPIKey, lenscreds.Options{})
-	lensClient := lensintegration.New(cfg.LensURL, cfg.LensAPIKey)
+	lensClient := lensintegration.New(cfg.LensURL, cfg.LensAPIKey).WithTokenProvider(lensProvider)
 	semSearch := search.New(lensClient, pool).WithLensURL(cfg.LensURL).WithTokenProvider(lensProvider)
 	// Throttle the per-save embed path — the largest uncontrolled Lens consumer. The store's
 	// fire-and-forget goroutine now just ENQUEUES here (returns immediately); the throttle
