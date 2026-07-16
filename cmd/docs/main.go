@@ -35,6 +35,7 @@ import (
 	"github.com/talyvor/docs/internal/approval"
 	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/block"
+	"github.com/talyvor/docs/internal/bodylimit"
 	"github.com/talyvor/docs/internal/changelog"
 	"github.com/talyvor/docs/internal/collab"
 	"github.com/talyvor/docs/internal/comment"
@@ -398,11 +399,25 @@ func main() {
 		mcpExempt := func(string) bool { return false }
 		r.Use(gatewayauth.Middleware(cfg.GatewayAuthSecret, mcpExempt))
 		r.Use(authz.Middleware(authz.NewPGResolver(pool), mcpExempt))
+		// JSON-RPC bodies are small; no exemption — nothing under /mcp uploads a file.
+		r.Use(bodylimit.Middleware(cfg.MaxBodyBytes, nil))
 		r.Post("/mcp", mcpServer.HandleRPC)
 		r.Get("/mcp/sse", mcpServer.HandleSSE)
 	})
 
 	r.Route("/v1", func(r chi.Router) {
+		// Bound every /v1 request body. A cap this far above a legitimate payload is a memory
+		// guard, not a business rule — before it, PATCH /pages/{id} decoded into a
+		// map[string]any and would read a multi-GB body into RAM, write it to Postgres, walk
+		// it, and fan it to the semantic indexer, with no container memory limit behind it.
+		//
+		// The importer's ZIP routes are EXEMPT here and re-capped at their own, larger limit
+		// where they mount below. chi middleware composes rather than overrides, so without
+		// this exemption the 4MB cap would run first and reject every real Confluence/Notion
+		// export regardless of the import cap — see internal/bodylimit's wiring tests.
+		r.Use(bodylimit.Middleware(cfg.MaxBodyBytes, func(p string) bool {
+			return strings.HasPrefix(p, "/v1/import/")
+		}))
 		// SEC-4 Layer 1: transit-proof + membership on EVERY /v1 route except the public
 		// share viewer (/v1/public/*, which authenticates by its own share token).
 		// gatewayauth 401s a request lacking a valid x-gateway-auth BEFORE any identity
@@ -430,7 +445,14 @@ func main() {
 		permHandler.Mount(r)
 		shareHandler.Mount(r)
 		shareHandler.MountPublic(r)
-		importerHandler.Mount(r)
+		// Importer takes Confluence/Notion ZIP exports — far larger than any JSON body, so it
+		// gets its own cap (internal/importer already calls 200MB the largest reasonable
+		// space export). This re-wraps the body for these two routes only; the /v1 cap above
+		// would reject a legitimate import.
+		r.Group(func(r chi.Router) {
+			r.Use(bodylimit.Middleware(cfg.MaxImportBodyBytes, nil))
+			importerHandler.Mount(r)
+		})
 		dbHandler.Mount(r)
 		tmplHandler.Mount(r)
 		exportHandler.Mount(r)

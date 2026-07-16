@@ -61,6 +61,18 @@ type Config struct {
 	SearchRatePerMin float64
 	SearchRateBurst  int
 
+	// Request-body caps (bytes). A memory bound, not a business rule: no route capped its
+	// body before this, and PATCH /pages/{id} decodes into a map[string]any — a multi-GB
+	// `content` was read into RAM, written to PG, walked by extractContentText and fanned to
+	// the semantic indexer, with no container memory limit behind it.
+	//
+	// SIZING: MaxBodyBytes (4MB default) is far above any legitimate ProseMirror document —
+	// a 4MB page is ~4M characters — while bounding the pathological case. The importer is
+	// exempted to its own, much larger cap: it takes Confluence/Notion ZIP exports, and
+	// internal/importer already declares 200MB as the largest reasonable space export.
+	MaxBodyBytes       int64
+	MaxImportBodyBytes int64
+
 	// GatewayAuthSecret is SEC-4 Layer 1's root of trust: the shared secret the edge
 	// gateway sends in x-gateway-auth to prove a request transited it (so the injected
 	// x-user-email is trustworthy). It is the SAME secret the gateway signs for Track —
@@ -90,6 +102,8 @@ func Load() (*Config, error) {
 		AIRateBurst:           getEnvInt("DOCS_AI_RATE_BURST", 10),
 		SearchRatePerMin:      getEnvFloat("DOCS_SEARCH_RATE_PER_MIN", 240),
 		SearchRateBurst:       getEnvInt("DOCS_SEARCH_RATE_BURST", 40),
+		MaxBodyBytes:          int64(getEnvInt("DOCS_MAX_BODY_BYTES", 4<<20)),
+		MaxImportBodyBytes:    int64(getEnvInt("DOCS_MAX_IMPORT_BODY_BYTES", 200<<20)),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("%w: DOCS_DATABASE_URL", ErrMissingEnv)
