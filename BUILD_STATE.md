@@ -191,6 +191,151 @@ limit keys come from the verified context, mirroring #23's discipline.
   confirming in `talyvor-lens` — it decides whether this limiter is defence-in-depth or the
   sole control (§0 Q3).
 
+## 0b. Run 4 (frontend URL router) — phase narrative
+
+**Base `7583d2a`** · branch `docs-frontend-router` · started 2026-07-16. **SUPERVISED**
+(human at the keyboard). Frontend only — the Go backend must stay byte-identical.
+
+### VERIFY-FIRST recon (the real state on 7583d2a)
+
+**There is no router. Navigation is a `useState` discriminated union.** `App.tsx` holds a
+`Route` union (`home | space | page | analytics | ...`) in component state and swaps views
+by calling `setRoute`. The only real URL handling is `/s/:token` (the public share viewer),
+matched by a regex against `window.location.pathname`. Consequences, all live today: you
+cannot deep-link to a page or space, the browser Back/Forward buttons do nothing, and a
+refresh always lands on Home. `App.tsx:18-21` says so itself — *"Phase 2 doesn't ship a
+URL-bound router … mirrors what a TanStack Router migration will look like in Phase 3."*
+
+**The stack was PREPARED for a router; the router was just never built:**
+
+- `nginx.conf` already has SPA fallback — `try_files $uri $uri/ /index.html`, and its comment
+  names `/spaces/:id, /s/:token`. So deep-link *refresh* will work in production without any
+  infra change, and Vite's dev server does the same automatically.
+- `PageView`'s `pushRecentPage` already stamps `url: /spaces/${space.id}/pages/${page.id}` —
+  **the URL scheme is already implied by the code.**
+- `useSpace(id)` (a single-space fetch) already exists in `hooks/useSpaces.ts`, and
+  `workspaceID()` is a global localStorage helper — so a URL carrying only IDs can resolve
+  the full objects from queries. The route components don't need to thread `Space` objects
+  through the URL.
+
+**Stack (recon, not assumed):** React 18 + Vite 6 + TypeScript (strict, `noUnusedLocals`/
+`noUnusedParameters` on), Zustand + TanStack Query. **No routing library. No test framework
+at all** (no vitest/jest/testing-library/playwright). 9.8k LOC.
+
+**Error + auth contract (decides the guard):** `api/client.ts`'s `apiRequest` throws
+`APIError` with a numeric `.status` (404/403) on non-2xx, falls back to IndexedDB on network
+failure (or throws `APIError(status 0, code OFFLINE)`), and authenticates with
+`Authorization: Bearer <docs_api_key>` from localStorage. **The router will not touch any of
+this** — it renders query results and never sets, derives, or assumes auth. That is the
+tenancy-story guarantee the run requires.
+
+### Forks
+
+- **Router library: `react-router-dom` v7 (7.18.1), not TanStack Router.** The code comment
+  anticipated TanStack Router, but the instruction is to use the *standard* React-SPA router
+  and take the conservative-reversible choice. react-router-dom is the de-facto standard,
+  interoperates cleanly with the existing TanStack Query (they are independent concerns), and
+  is the lower-risk migration. TanStack Router's selling points (typed params + loaders) don't
+  outweigh the churn/risk here. Reversible: the route table is small and isolated.
+- **Adapter wrappers over a full rewrite.** The leaf components (Sidebar, Home, SpaceView,
+  StalePages, …) currently take `onOpenX` callbacks. Rather than rewrite each to use router
+  hooks, thin route-level wrappers own `useParams()`/`useNavigate()` and pass navigate-backed
+  callbacks down — the existing components keep their interfaces. Minimal churn, maximal
+  reversibility; documented so a later pass can push hooks into the leaves if desired.
+
+### The testing boundary (the honesty line this run turns on)
+
+**Tested-logic (genuinely correct headless — vitest, added this run):**
+- Pure path builders (`paths.*`): navigation correctness = building the right URL.
+- The security guard `resourceState(query)`: maps a resource fetch to a view state, and
+  **collapses 403 and 404 to the same `notfound`** so the router creates no existence oracle.
+  Red-first.
+- Via `createMemoryRouter` + jsdom (react-router's own testing tool): route→component
+  mapping, and that a 403-erroring and a 404-erroring resource render the *identical*
+  not-found UI. In-memory history (`router.navigate(-1)`) is real logic and is tested.
+
+**Click-to-verify (NOT honestly testable headless — reported, with manual steps):**
+- Real browser Back/Forward buttons + address-bar sync (jsdom history is not the real thing).
+- Refresh-on-a-deep-URL landing on the right view (needs the dev server's SPA fallback + a
+  real reload).
+- End-to-end: a genuine cross-tenant page URL showing not-found against the live Go backend.
+
+A test that SKIPS to look green would be the green-by-absence failure this session already
+cured once; it will not be written here.
+
+### What Run 4 built
+
+`react-router-dom` v7 replaces the `useState` route machine. App.tsx is now
+`createBrowserRouter(routes)`; `src/router/` holds the table, a chrome `Layout` with an
+`<Outlet/>`, pure path builders, and the resource guard. Pages and spaces have real,
+shareable, refreshable URLs; the public `/s/:token` viewer is a top-level route with no
+chrome. Leaf components are unchanged — route wrappers translate URL↔their existing
+callbacks (the reversible adapter fork).
+
+**Route guard approach (the security-adjacent part).** The frontend holds no authorization
+knowledge and invents none: a resource route fetches its target through the existing query
+hooks and `resourceState(query)` maps the result to a view. The one rule layered on top:
+**403 and 404 collapse to one indistinguishable `notfound`**, with generic copy ("doesn't
+exist, or isn't available to you") — so a caller rotating ids in the URL cannot tell a real
+resource they can't see from one that isn't there. This mirrors the server, which already
+404s cross-tenant and never leaks existence. The Bearer token is never read, set, or assumed
+by the router. `offline` (status 0) and `error` (5xx) are distinct because neither is an
+existence signal; anything unclassifiable fails safe to `notfound`, never to `ready`.
+
+### The testing boundary — tested-logic vs click-to-verify
+
+**Genuinely tested headless (vitest, 30 tests / 6 files, 0 skipped, gated in CI):**
+
+- `paths.*` builders — navigation correctness is building the right URL (`paths.test.ts`).
+- `resourceState` — the guard decision, incl. **403 === 404** (`guard.test.ts`).
+- The **real** route table via `matchRoutes` — every URL maps to its intended route, params
+  extract, `/s/:token` sits outside the chrome, unknown in-app URLs hit the in-chrome
+  catch-all (`routes.test.tsx`).
+- Render-level no-oracle — a 403-erroring page route renders **byte-identical DOM** to a 404
+  and never the page; NotFound copy contains none of forbidden/denied/permission/403
+  (`guard-render.test.tsx`).
+- In-memory history over the real table — forward, Back, Forward, and landing directly on a
+  deep URL (`history.test.tsx`).
+- Real-Layout mount smoke — the actual chrome renders under the router with no backend,
+  without throwing (`layout-smoke.test.tsx`).
+
+**Click-to-verify — NOT honestly assertable headless (jsdom's history/URL bar aren't the
+real thing). Manual steps for a reviewer with the app running:**
+
+1. **Deep-link + refresh.** `cd frontend && npm run build && npm run preview`; open
+   `http://localhost:<port>/spaces/<id>/pages/<id>` directly (or open any page, then hit
+   browser Reload). *Expect:* the app lands on that page, not Home. (Server side is already
+   confirmed — `preview` returns the SPA `index.html` with HTTP 200 for a deep URL, and
+   nginx.conf has the same `try_files` fallback for prod.)
+2. **Back/Forward buttons + address bar.** Navigate Home → a space → a page via the sidebar.
+   *Expect:* the address bar updates at each step; the browser Back button returns to the
+   space then Home; Forward re-advances. (The history *stack* is tested in memory; the
+   physical buttons + URL bar are the browser-chrome part.)
+3. **Guard against the live backend.** Open a page URL whose id belongs to another
+   workspace. *Expect:* the generic "Not found" — identical to a made-up id — never a page
+   and never an "access denied".
+
+### ⚠️ The wall I stopped at (reported, not worked around)
+
+Steps 1–2 above are verifiable against `npm run preview` with **no backend** (routing is
+client-side; data shows loading/empty). **Step 3 — the guard end-to-end against real
+cross-tenant data — is blocked by a pre-existing wall this run does not own:** the SPA
+authenticates with `Authorization: Bearer <docs_api_key>` from localStorage, but the Go
+backend expects the edge gateway to inject `X-Gateway-Auth` + `X-User-Email`; `vite dev`
+proxies straight to `:4000`, so requests 401 and no real data loads without the gateway in
+front. That gateway is a separate repo/infra concern, out of a frontend-only run. So the
+guard's *logic* and *render* are proven headless (403≡404, byte-identical DOM), but a live
+cross-tenant click-through needs either the gateway wired locally or a seeded dev auth path —
+a decision for the reviewer, flagged rather than hacked around.
+
+### Deferred / not done (scope)
+
+- The leaf components still use callback props (the adapter fork); pushing router hooks into
+  them is a later, optional cleanup.
+- No `<Link>`-ification of every in-app navigation — the sidebar/home already navigate via
+  the wrappers; converting remaining `onClick` handlers to `<a href>` for middle-click/copy
+  is incremental polish, not required for addressability.
+
 ## 1. What this run changed
 
 A security-first foundation run, in strict order.

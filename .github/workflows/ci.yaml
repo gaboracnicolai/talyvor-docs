@@ -98,6 +98,12 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: cd frontend && npm ci
       - run: cd frontend && npm run typecheck
+      # Frontend unit/route tests (vitest). Added with the URL router — before it there was
+      # no frontend test framework at all. Runs the router's path builders, the no-oracle
+      # resource guard, and the route table so a broken link or a leaked-existence guard fails
+      # the build rather than shipping. A tool that runs but isn't gated is the same
+      # green-by-absence trap the backend anti-skip step closes.
+      - run: cd frontend && npm test
       - run: cd frontend && npm run build
 
   build-image:
