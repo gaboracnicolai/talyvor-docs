@@ -408,6 +408,59 @@ Because the shell is now network-first, future deploys **self-propagate even wit
   building the SW from a shared TS module. Lower-risk, reversible, zero drift (the test
   exercises the shipped bytes).
 
+### What Run 5 built + how it was verified
+
+**The fix (`frontend/public/sw.js` + `frontend/src/sw/register.ts`):**
+- **App shell (`/`, `/index.html`) → network-first** (was cache-first). Fresh index.html when
+  online → current bundle; cached shell is the OFFLINE fallback only. `/assets/*` stay
+  cache-first (immutable). This is the root-cause fix: the shell no longer pins a stale app
+  version, so a deploy is immediately visible to returning users.
+- **Cache `v1`→`v2`** so the fixed SW's `activate` purges the poisoned `talyvor-static-v1`
+  once (heals existing stale installs). Because the shell revalidates every online load,
+  future deploys self-propagate without another bump.
+- **`skipWaiting` + `clientsClaim` kept** — the correct prompt handover, never the bug.
+- **App-side loop-safe update→reload** (`registerServiceWorker`): reload the open tab once
+  when a NEW worker takes over an ALREADY-controlled page; never on first install, never
+  twice. `main.tsx` calls it instead of the fire-and-forget block.
+- **Offline preserved** — network-first falls back to the cached shell so the SPA mounts
+  offline; the IndexedDB write-queue / OfflineIndicator path is untouched.
+
+**Unit-tested (vitest, in CI's frontend job — 15 new tests, 0 skipped, red-first):**
+- `src/sw/sw.test.ts` loads the **real** `public/sw.js` into a mocked ServiceWorker scope
+  (no drift — the shipped bytes) and pins the behaviour by the exact discriminator (does the
+  handler consult the network when the shell is cached?): shell **network-first** (fetches
+  fresh over a stale cached `/`), offline **falls back to cache**, `/assets/*` **cache-first**,
+  deep routes **pass through**, real-time **skipped**, `activate` **purges old versions**. 4 of
+  these failed on the cache-first shell and pass on the fix.
+- `src/sw/register.test.ts` pins the reload decision (only on a real update, never first
+  install, never twice → no loop) and the registration wiring.
+
+**Browser-demonstrated (Playwright Chromium, prod `vite preview`, objective signal = the
+bundle hash `index.html` references):**
+- Loaded v1 → the fixed SW installed and **controlled** the page; cache name was
+  `talyvor-api-v2` (version bump live). Bundle: `index-DJVsh331.js`.
+- **Deployed v2** (a visible change → new bundle hash `index-nVnWAC8H.js`), reloaded. The SW
+  served the **fresh v2 shell** — `index.html` referenced the **new** hash and the v2 change
+  was visible — **not** the stale v1 shell. This is the exact inverse of the original bug,
+  end-to-end in a real browser.
+- **Routing intact, no hijack:** deep-link to `/spaces/space-x/pages/page-y` mounted the page
+  route (breadcrumb "Space / Page"), `location.pathname` was the deep URL, **not** `/domains`;
+  a sidebar click navigated client-side to `/templates` (a `window` marker survived → real
+  pushState, no reload). SW controlling throughout; bundle stable (no reload loop).
+
+**Left as unit-tested-not-browser-demonstrated (honest boundary):** the loop-safe auto-reload
+FIRING once in a real browser requires a `sw.js`-CHANGED deploy (byte-different SW → new
+install → `controllerchange`). The browser demo above was an app-only deploy (sw.js
+byte-identical), so no new SW installed and the auto-reload path didn't fire — correctly, and
+the page stayed stable. The reload path's loop-safety is covered by `register.test.ts`
+(reload-once, never-first-install); demonstrating it in a live browser is the one piece that
+would need a second SW-changed deploy, and SW-install timing under Playwright was the flaky
+surface in the #25 run — so it is reported here rather than flaked or faked.
+
+**Fork (BUILD_STATE §0c):** keep `sw.js` hand-written in `public/` and test the REAL file via
+a scope harness, over building the SW from a shared TS module. Lower-risk, reversible, zero
+drift — the test exercises the deployed bytes.
+
 ## 1. What this run changed
 
 A security-first foundation run, in strict order.
