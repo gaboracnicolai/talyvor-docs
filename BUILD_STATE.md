@@ -263,6 +263,79 @@ tenancy-story guarantee the run requires.
 A test that SKIPS to look green would be the green-by-absence failure this session already
 cured once; it will not be written here.
 
+### What Run 4 built
+
+`react-router-dom` v7 replaces the `useState` route machine. App.tsx is now
+`createBrowserRouter(routes)`; `src/router/` holds the table, a chrome `Layout` with an
+`<Outlet/>`, pure path builders, and the resource guard. Pages and spaces have real,
+shareable, refreshable URLs; the public `/s/:token` viewer is a top-level route with no
+chrome. Leaf components are unchanged — route wrappers translate URL↔their existing
+callbacks (the reversible adapter fork).
+
+**Route guard approach (the security-adjacent part).** The frontend holds no authorization
+knowledge and invents none: a resource route fetches its target through the existing query
+hooks and `resourceState(query)` maps the result to a view. The one rule layered on top:
+**403 and 404 collapse to one indistinguishable `notfound`**, with generic copy ("doesn't
+exist, or isn't available to you") — so a caller rotating ids in the URL cannot tell a real
+resource they can't see from one that isn't there. This mirrors the server, which already
+404s cross-tenant and never leaks existence. The Bearer token is never read, set, or assumed
+by the router. `offline` (status 0) and `error` (5xx) are distinct because neither is an
+existence signal; anything unclassifiable fails safe to `notfound`, never to `ready`.
+
+### The testing boundary — tested-logic vs click-to-verify
+
+**Genuinely tested headless (vitest, 30 tests / 6 files, 0 skipped, gated in CI):**
+
+- `paths.*` builders — navigation correctness is building the right URL (`paths.test.ts`).
+- `resourceState` — the guard decision, incl. **403 === 404** (`guard.test.ts`).
+- The **real** route table via `matchRoutes` — every URL maps to its intended route, params
+  extract, `/s/:token` sits outside the chrome, unknown in-app URLs hit the in-chrome
+  catch-all (`routes.test.tsx`).
+- Render-level no-oracle — a 403-erroring page route renders **byte-identical DOM** to a 404
+  and never the page; NotFound copy contains none of forbidden/denied/permission/403
+  (`guard-render.test.tsx`).
+- In-memory history over the real table — forward, Back, Forward, and landing directly on a
+  deep URL (`history.test.tsx`).
+- Real-Layout mount smoke — the actual chrome renders under the router with no backend,
+  without throwing (`layout-smoke.test.tsx`).
+
+**Click-to-verify — NOT honestly assertable headless (jsdom's history/URL bar aren't the
+real thing). Manual steps for a reviewer with the app running:**
+
+1. **Deep-link + refresh.** `cd frontend && npm run build && npm run preview`; open
+   `http://localhost:<port>/spaces/<id>/pages/<id>` directly (or open any page, then hit
+   browser Reload). *Expect:* the app lands on that page, not Home. (Server side is already
+   confirmed — `preview` returns the SPA `index.html` with HTTP 200 for a deep URL, and
+   nginx.conf has the same `try_files` fallback for prod.)
+2. **Back/Forward buttons + address bar.** Navigate Home → a space → a page via the sidebar.
+   *Expect:* the address bar updates at each step; the browser Back button returns to the
+   space then Home; Forward re-advances. (The history *stack* is tested in memory; the
+   physical buttons + URL bar are the browser-chrome part.)
+3. **Guard against the live backend.** Open a page URL whose id belongs to another
+   workspace. *Expect:* the generic "Not found" — identical to a made-up id — never a page
+   and never an "access denied".
+
+### ⚠️ The wall I stopped at (reported, not worked around)
+
+Steps 1–2 above are verifiable against `npm run preview` with **no backend** (routing is
+client-side; data shows loading/empty). **Step 3 — the guard end-to-end against real
+cross-tenant data — is blocked by a pre-existing wall this run does not own:** the SPA
+authenticates with `Authorization: Bearer <docs_api_key>` from localStorage, but the Go
+backend expects the edge gateway to inject `X-Gateway-Auth` + `X-User-Email`; `vite dev`
+proxies straight to `:4000`, so requests 401 and no real data loads without the gateway in
+front. That gateway is a separate repo/infra concern, out of a frontend-only run. So the
+guard's *logic* and *render* are proven headless (403≡404, byte-identical DOM), but a live
+cross-tenant click-through needs either the gateway wired locally or a seeded dev auth path —
+a decision for the reviewer, flagged rather than hacked around.
+
+### Deferred / not done (scope)
+
+- The leaf components still use callback props (the adapter fork); pushing router hooks into
+  them is a later, optional cleanup.
+- No `<Link>`-ification of every in-app navigation — the sidebar/home already navigate via
+  the wrappers; converting remaining `onClick` handlers to `<a href>` for middle-click/copy
+  is incremental polish, not required for addressability.
+
 ## 1. What this run changed
 
 A security-first foundation run, in strict order.
