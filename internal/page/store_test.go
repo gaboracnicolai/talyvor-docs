@@ -70,9 +70,9 @@ func TestCreate_AutoSlugAndDepthAndVersion(t *testing.T) {
 			"{}", "", "", "", float64(0), 2, false, "creator", "creator",
 			[]string{}, float64(0), 0).
 		WillReturnRows(pageRow("pg-1", "My New Page", "my-new-page", 2, &parent))
-	// Version 1 insert.
-	pool.ExpectExec(`INSERT INTO page_versions`).
-		WithArgs("pg-1", 1, "My New Page", "{}", "creator").
+	// Version 1 insert — now carries the page's workspace_id.
+	pool.ExpectExec(`INSERT INTO page_versions \(page_id, workspace_id, version`).
+		WithArgs("pg-1", "ws-1", 1, "My New Page", "{}", "creator").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	out, err := store.Create(context.Background(), model.Page{
@@ -197,14 +197,11 @@ func TestUpdate_AppendsNewVersionOnContentChange(t *testing.T) {
 	pool.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM page_versions`).
 		WithArgs("pg-1").
 		WillReturnRows(pgxmock.NewRows([]string{"max"}).AddRow(int(3)))
-	// Insert version 4.
-	pool.ExpectExec(`INSERT INTO page_versions`).
-		WithArgs("pg-1", 4, "Old", `{"type":"doc"}`, "editor").
+	// Insert version 4 — now carries workspace_id (from the updated page). History is
+	// append-only: NO prune DELETE follows (removed; see TestVersions_AppendOnly_*_RealPG).
+	pool.ExpectExec(`INSERT INTO page_versions \(page_id, workspace_id, version`).
+		WithArgs("pg-1", "ws-1", 4, "Old", "{}", "editor").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	// Prune old versions beyond 100.
-	pool.ExpectExec(`DELETE FROM page_versions`).
-		WithArgs("pg-1").
-		WillReturnResult(pgxmock.NewResult("DELETE", 0))
 
 	if _, err := store.Update(context.Background(), "pg-1", map[string]any{
 		"content":    `{"type":"doc"}`,

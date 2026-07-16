@@ -58,6 +58,8 @@ func (h *Handler) Mount(r chi.Router) {
 		r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/{pageID}/verify", h.Verify)
 
 		r.With(h.pageEnf.Require(permission.AccessView)).Get("/{pageID}/versions", h.GetVersions)
+		r.With(h.pageEnf.Require(permission.AccessView)).Get("/{pageID}/versions/{version}", h.GetVersion)
+		r.With(h.pageEnf.Require(permission.AccessView)).Get("/{pageID}/versions/{version}/diff/{other}", h.DiffVersions)
 		r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/{pageID}/versions/{version}/restore", h.RestoreVersion)
 
 		// Comment routes live in internal/comment as of the threaded-
@@ -246,6 +248,47 @@ func (h *Handler) GetVersions(w http.ResponseWriter, r *http.Request) {
 		out = []model.PageVersion{}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// GetVersion returns a single historical snapshot. Workspace-scoped: a page outside the
+// caller's verified workspaces resolves to 404 (no cross-tenant version read).
+func (h *Handler) GetVersion(w http.ResponseWriter, r *http.Request) {
+	n, err := strconv.Atoi(chi.URLParam(r, "version"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_VERSION", "version must be int")
+		return
+	}
+	out, err := h.store.GetVersionInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), n, authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "VERSION_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// DiffVersions returns two snapshots ({from, to}) for a version comparison. Workspace-scoped:
+// a page outside the caller's verified workspaces resolves to 404 (no cross-tenant diff).
+func (h *Handler) DiffVersions(w http.ResponseWriter, r *http.Request) {
+	from, err1 := strconv.Atoi(chi.URLParam(r, "version"))
+	to, err2 := strconv.Atoi(chi.URLParam(r, "other"))
+	if err1 != nil || err2 != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_VERSION", "versions must be ints")
+		return
+	}
+	fromV, toV, err := h.store.CompareVersionsInWorkspaces(r.Context(), chi.URLParam(r, "pageID"), from, to, authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "DIFF_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"from": fromV, "to": toV})
 }
 
 func (h *Handler) RestoreVersion(w http.ResponseWriter, r *http.Request) {

@@ -106,6 +106,8 @@ func TestSEC4_CrossTenant_ByIDRoutes(t *testing.T) {
 		{"PATCH page", http.MethodPatch, base},
 		{"DELETE page", http.MethodDelete, base},
 		{"GET versions", http.MethodGet, base + "/versions"},
+		{"GET version-one", http.MethodGet, base + "/versions/1"},
+		{"GET version-diff", http.MethodGet, base + "/versions/1/diff/2"},
 	} {
 		rr := do(asUser(tc.method, tc.path, "alice@corp.com", true, nil))
 		if rr.Code != http.StatusNotFound {
