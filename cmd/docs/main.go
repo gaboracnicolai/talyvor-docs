@@ -35,6 +35,7 @@ import (
 	"github.com/talyvor/docs/internal/approval"
 	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/block"
+	"github.com/talyvor/docs/internal/bodylimit"
 	"github.com/talyvor/docs/internal/changelog"
 	"github.com/talyvor/docs/internal/collab"
 	"github.com/talyvor/docs/internal/comment"
@@ -42,6 +43,7 @@ import (
 	"github.com/talyvor/docs/internal/customdomain"
 	"github.com/talyvor/docs/internal/database"
 	"github.com/talyvor/docs/internal/db"
+	"github.com/talyvor/docs/internal/dbhealth"
 	"github.com/talyvor/docs/internal/export"
 	"github.com/talyvor/docs/internal/freshness"
 	"github.com/talyvor/docs/internal/gatewayauth"
@@ -56,6 +58,7 @@ import (
 	"github.com/talyvor/docs/internal/pagelink"
 	"github.com/talyvor/docs/internal/pagelock"
 	"github.com/talyvor/docs/internal/permission"
+	"github.com/talyvor/docs/internal/ratelimit"
 	"github.com/talyvor/docs/internal/search"
 	"github.com/talyvor/docs/internal/sharing"
 	"github.com/talyvor/docs/internal/space"
@@ -189,11 +192,28 @@ func main() {
 	// DOCS_LENS_URL/API key flips IsAvailable() off and the handler
 	// returns 503 with a friendly message instead of erroring.
 	aiEngine := ai.New(lensClient)
-	aiHandler := ai.NewHandler(aiEngine, pageStore)
+	// Per-workspace LLM rate limiting — the ONLY per-tenant LLM control in this repo (Docs
+	// calls Lens on one service key with no balance/quota check anywhere; see BUILD_STATE
+	// §0 Q3). Bounds RATE, not cost. Separate limiters because the two surfaces have very
+	// different call shapes: AI completions are human-clicked and expensive; semantic search
+	// is 300ms-debounced by the client and cheap per call.
+	aiLimiter := ratelimit.New(cfg.AIRatePerMin, cfg.AIRateBurst)
+	searchLimiter := ratelimit.New(cfg.SearchRatePerMin, cfg.SearchRateBurst)
+	slog.Info("llm rate limits",
+		slog.Float64("ai_per_min", cfg.AIRatePerMin), slog.Int("ai_burst", cfg.AIRateBurst),
+		slog.Float64("search_per_min", cfg.SearchRatePerMin), slog.Int("search_burst", cfg.SearchRateBurst))
+	if !aiLimiter.Enabled() || !searchLimiter.Enabled() {
+		// Fail-closed limiters deny everything; that is safer than silently unlimited, but an
+		// operator should learn it from a boot log rather than a wall of 429s.
+		slog.Warn("an LLM rate limiter is configured non-positive and will DENY all calls on that surface",
+			slog.Bool("ai_enabled", aiLimiter.Enabled()), slog.Bool("search_enabled", searchLimiter.Enabled()))
+	}
+
+	aiHandler := ai.NewHandler(aiEngine, pageStore).WithRateLimit(aiLimiter)
 
 	// Unified search handler. Semantic-side falls back to empty when
 	// Lens is unconfigured; full-text always works.
-	searchHandler := search.NewHandler(pageStore, semSearch)
+	searchHandler := search.NewHandler(pageStore, semSearch).WithRateLimit(searchLimiter)
 
 	// Freshness engine + 9am-UTC stale-doc digest. Engine reads
 	// pages + linked-issue closure to surface "this spec needs a
@@ -263,7 +283,8 @@ func main() {
 	// public /mcp endpoints and call the 10 documented tools. The
 	// server keeps zero state of its own — it composes the existing
 	// stores via narrow interfaces.
-	mcpServer := mcp.New(pageStore, spaceStore, analyticsStore, aiEngine, freshEngine, "0.1.0")
+	mcpServer := mcp.New(pageStore, spaceStore, analyticsStore, aiEngine, freshEngine, "0.1.0").
+		WithRateLimit(aiLimiter) // ask_docs reaches Lens; an agent loop calls it far faster than a human clicks
 
 	// Permissions + public sharing.
 	permStore := permission.NewStore(pool)
@@ -363,11 +384,22 @@ func main() {
 	r.Use(middleware.Timeout(30 * time.Second))
 	r.Use(metricsMiddleware)
 
+	// LIVENESS: deliberately DB-free. Restarting a process cannot fix a database outage, so
+	// making this probe DB-aware would crash-loop every replica during a blip — turning a
+	// recoverable incident into a self-inflicted one. "Is this process alive" is all it
+	// answers, and that is the correct question for a liveness probe.
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
+	// READINESS: probes the database. This is the signal an orchestrator should use to pull a
+	// replica out of the load balancer — before this there was none, so a replica that could
+	// not serve a single request stayed in rotation indefinitely while /healthz cheerfully
+	// answered {"ok":true}.
+	dbChecker := dbhealth.New(pool, 5*time.Second)
+	r.Get("/readyz", dbChecker.ReadyHandler())
+
 	r.Handle("/metrics", metrics.Handler())
 
 	// MCP (SEC-4 model b, mirroring Track): behind the SAME gatewayauth + authz chain as /v1.
@@ -379,11 +411,34 @@ func main() {
 		mcpExempt := func(string) bool { return false }
 		r.Use(gatewayauth.Middleware(cfg.GatewayAuthSecret, mcpExempt))
 		r.Use(authz.Middleware(authz.NewPGResolver(pool), mcpExempt))
+		// JSON-RPC bodies are small; no exemption — nothing under /mcp uploads a file.
+		r.Use(bodylimit.Middleware(cfg.MaxBodyBytes, nil))
+		r.Use(dbChecker.Middleware()) // clean 503 while PG is unreachable, not a 500
+
 		r.Post("/mcp", mcpServer.HandleRPC)
 		r.Get("/mcp/sse", mcpServer.HandleSSE)
 	})
 
 	r.Route("/v1", func(r chi.Router) {
+		// Bound every /v1 request body. A cap this far above a legitimate payload is a memory
+		// guard, not a business rule — before it, PATCH /pages/{id} decoded into a
+		// map[string]any and would read a multi-GB body into RAM, write it to Postgres, walk
+		// it, and fan it to the semantic indexer, with no container memory limit behind it.
+		//
+		// The importer's ZIP routes are EXEMPT here and re-capped at their own, larger limit
+		// where they mount below. chi middleware composes rather than overrides, so without
+		// this exemption the 4MB cap would run first and reject every real Confluence/Notion
+		// export regardless of the import cap — see internal/bodylimit's wiring tests.
+		r.Use(bodylimit.Middleware(cfg.MaxBodyBytes, func(p string) bool {
+			return strings.HasPrefix(p, "/v1/import/")
+		}))
+		// Degrade cleanly while Postgres is unreachable. Measured pre-fix behaviour was a 500
+		// from authz's membership lookup — fast, but the wrong answer: a 500 reads as "this
+		// server is broken" (non-retryable) when the truth is "temporarily unavailable, retry".
+		// Placed BEFORE authz so the outage answer is one honest 503 rather than whichever
+		// query happens to fail first (page.Get, for one, answers 404 on ANY error — telling
+		// clients and caches the page was deleted).
+		r.Use(dbChecker.Middleware())
 		// SEC-4 Layer 1: transit-proof + membership on EVERY /v1 route except the public
 		// share viewer (/v1/public/*, which authenticates by its own share token).
 		// gatewayauth 401s a request lacking a valid x-gateway-auth BEFORE any identity
@@ -411,7 +466,14 @@ func main() {
 		permHandler.Mount(r)
 		shareHandler.Mount(r)
 		shareHandler.MountPublic(r)
-		importerHandler.Mount(r)
+		// Importer takes Confluence/Notion ZIP exports — far larger than any JSON body, so it
+		// gets its own cap (internal/importer already calls 200MB the largest reasonable
+		// space export). This re-wraps the body for these two routes only; the /v1 cap above
+		// would reject a legitimate import.
+		r.Group(func(r chi.Router) {
+			r.Use(bodylimit.Middleware(cfg.MaxImportBodyBytes, nil))
+			importerHandler.Mount(r)
+		})
 		dbHandler.Mount(r)
 		tmplHandler.Mount(r)
 		exportHandler.Mount(r)

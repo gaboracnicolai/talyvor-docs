@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 )
 
 var ErrMissingEnv = errors.New("missing required env var")
@@ -37,6 +38,41 @@ type Config struct {
 	// instance; Phase 5 will iterate workspaces from the DB.
 	DefaultWorkspaceID string
 
+	// AI/Search rate limits — the ONLY per-tenant LLM control in this repository.
+	//
+	// Docs calls Lens with one service key for the whole instance and no balance/quota check
+	// exists anywhere (see BUILD_STATE §0 Q3), so without these a single workspace can drive
+	// unbounded Lens spend — and, if Lens meters per API key rather than per workspace label,
+	// take AI down for every other tenant. These bound RATE, not cost.
+	//
+	// SIZING (measured, not guessed):
+	//   AI completions are human-driven and expensive — a writer clicking "improve this"
+	//   cannot meaningfully exceed 30/min. Default 30/min, burst 10.
+	//
+	//   Search is interactive and CHEAP per call, but the frontend debounces at 300ms and
+	//   semantic search fires on the default type=all — so one person typing continuously
+	//   drives ~200 embeddings/min. A completion-sized limit would break Cmd+K outright.
+	//   Default 240/min, burst 40: generous for a few concurrent typists, still a ceiling.
+	//
+	// A non-positive value fails CLOSED (denies everything) rather than silently disabling
+	// the limiter — see internal/ratelimit.New.
+	AIRatePerMin     float64
+	AIRateBurst      int
+	SearchRatePerMin float64
+	SearchRateBurst  int
+
+	// Request-body caps (bytes). A memory bound, not a business rule: no route capped its
+	// body before this, and PATCH /pages/{id} decodes into a map[string]any — a multi-GB
+	// `content` was read into RAM, written to PG, walked by extractContentText and fanned to
+	// the semantic indexer, with no container memory limit behind it.
+	//
+	// SIZING: MaxBodyBytes (4MB default) is far above any legitimate ProseMirror document —
+	// a 4MB page is ~4M characters — while bounding the pathological case. The importer is
+	// exempted to its own, much larger cap: it takes Confluence/Notion ZIP exports, and
+	// internal/importer already declares 200MB as the largest reasonable space export.
+	MaxBodyBytes       int64
+	MaxImportBodyBytes int64
+
 	// GatewayAuthSecret is SEC-4 Layer 1's root of trust: the shared secret the edge
 	// gateway sends in x-gateway-auth to prove a request transited it (so the injected
 	// x-user-email is trustworthy). It is the SAME secret the gateway signs for Track —
@@ -62,6 +98,12 @@ func Load() (*Config, error) {
 		LensAPIKey:            os.Getenv("DOCS_LENS_API_KEY"),
 		DefaultWorkspaceID:    getEnv("DOCS_DEFAULT_WORKSPACE", "default"),
 		GatewayAuthSecret:     os.Getenv("GATEWAY_AUTH_SECRET"),
+		AIRatePerMin:          getEnvFloat("DOCS_AI_RATE_PER_MIN", 30),
+		AIRateBurst:           getEnvInt("DOCS_AI_RATE_BURST", 10),
+		SearchRatePerMin:      getEnvFloat("DOCS_SEARCH_RATE_PER_MIN", 240),
+		SearchRateBurst:       getEnvInt("DOCS_SEARCH_RATE_BURST", 40),
+		MaxBodyBytes:          int64(getEnvInt("DOCS_MAX_BODY_BYTES", 4<<20)),
+		MaxImportBodyBytes:    int64(getEnvInt("DOCS_MAX_IMPORT_BODY_BYTES", 200<<20)),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("%w: DOCS_DATABASE_URL", ErrMissingEnv)
@@ -79,4 +121,32 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// getEnvFloat reads a float env var, falling back when unset or unparseable. A malformed
+// value takes the DEFAULT rather than 0 — 0 would fail the limiter closed and 429 every AI
+// request, turning a typo into an outage.
+func getEnvFloat(key string, fallback float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return fallback
+	}
+	return f
+}
+
+// getEnvInt is getEnvFloat for ints. Same malformed-value reasoning.
+func getEnvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
 }

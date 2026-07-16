@@ -274,41 +274,59 @@ func (s *Store) Delete(ctx context.Context, commentID, requesterID string) error
 var ErrNotFound = errors.New("comment: not found in an accessible workspace")
 
 // assertInWorkspaces returns ErrNotFound unless commentID's page lives in one of wsIDs.
-func (s *Store) assertInWorkspaces(ctx context.Context, commentID string, wsIDs []string) error {
+// assertInPage asserts that commentID belongs to pageID AND that pageID lives in one of the
+// caller's verified workspaces. BOTH halves matter, and only the second one used to exist.
+//
+// The old check (`WHERE c.id = $1 AND p.workspace_id = ANY($2)`) asked only "is this
+// comment's page somewhere in the caller's tenant" — never "is it the page the route just
+// authorized". Every comment route is /spaces/{spaceID}/pages/{pageID}/comments/{id}/...,
+// gated by pageEnf.Require on {pageID}, so {pageID} chose the PERMISSION CHECK and {id}
+// chose the VICTIM, with nothing tying them together. A member with View on any public page
+// could resolve, reply into, or delete a comment on a PRIVATE page they had no grant for
+// and could not read. Cross-tenant was still blocked by the ANY($2) filter; cross-page
+// within a tenant was wide open. Structurally the same bug as ce8bfe3's share-revoke.
+//
+// The `c.page_id = $2` predicate is the fix: the id being acted on must belong to the
+// resource that was authorized.
+func (s *Store) assertInPage(ctx context.Context, commentID, pageID string, wsIDs []string) error {
 	var exists bool
 	if err := s.pool.QueryRow(ctx,
 		`SELECT EXISTS(
              SELECT 1 FROM page_comments c JOIN pages p ON c.page_id = p.id
-             WHERE c.id = $1 AND p.workspace_id = ANY($2))`,
-		commentID, wsIDs,
+             WHERE c.id = $1 AND c.page_id = $2 AND p.workspace_id = ANY($3))`,
+		commentID, pageID, wsIDs,
 	).Scan(&exists); err != nil {
 		return fmt.Errorf("comment: scope check: %w", err)
 	}
 	if !exists {
+		// Not-found rather than forbidden: a comment on a page the caller cannot see must
+		// not be confirmed to exist by the status code.
 		return ErrNotFound
 	}
 	return nil
 }
 
 // ReplyInWorkspaces replies only if the parent comment's page is in one of the caller's workspaces.
-func (s *Store) ReplyInWorkspaces(ctx context.Context, parentID, authorID, authorName, content string, wsIDs []string) (*Comment, error) {
-	if err := s.assertInWorkspaces(ctx, parentID, wsIDs); err != nil {
+// ReplyInWorkspaces requires pageID — the page the ROUTE authorized — so a reply cannot be
+// injected into a thread on a different page. See assertInPage.
+func (s *Store) ReplyInWorkspaces(ctx context.Context, parentID, pageID, authorID, authorName, content string, wsIDs []string) (*Comment, error) {
+	if err := s.assertInPage(ctx, parentID, pageID, wsIDs); err != nil {
 		return nil, err
 	}
 	return s.Reply(ctx, parentID, authorID, authorName, content)
 }
 
 // ResolveInWorkspaces resolves only if the comment's page is in one of the caller's workspaces.
-func (s *Store) ResolveInWorkspaces(ctx context.Context, commentID, resolvedBy string, wsIDs []string) error {
-	if err := s.assertInWorkspaces(ctx, commentID, wsIDs); err != nil {
+func (s *Store) ResolveInWorkspaces(ctx context.Context, commentID, pageID, resolvedBy string, wsIDs []string) error {
+	if err := s.assertInPage(ctx, commentID, pageID, wsIDs); err != nil {
 		return err
 	}
 	return s.Resolve(ctx, commentID, resolvedBy)
 }
 
 // UnresolveInWorkspaces unresolves only if the comment's page is in one of the caller's workspaces.
-func (s *Store) UnresolveInWorkspaces(ctx context.Context, commentID string, wsIDs []string) error {
-	if err := s.assertInWorkspaces(ctx, commentID, wsIDs); err != nil {
+func (s *Store) UnresolveInWorkspaces(ctx context.Context, commentID, pageID string, wsIDs []string) error {
+	if err := s.assertInPage(ctx, commentID, pageID, wsIDs); err != nil {
 		return err
 	}
 	return s.Unresolve(ctx, commentID)
@@ -316,8 +334,8 @@ func (s *Store) UnresolveInWorkspaces(ctx context.Context, commentID string, wsI
 
 // DeleteInWorkspaces deletes only if the comment's page is in one of the caller's workspaces
 // (in addition to the author-only check inside Delete).
-func (s *Store) DeleteInWorkspaces(ctx context.Context, commentID, requesterID string, wsIDs []string) error {
-	if err := s.assertInWorkspaces(ctx, commentID, wsIDs); err != nil {
+func (s *Store) DeleteInWorkspaces(ctx context.Context, commentID, pageID, requesterID string, wsIDs []string) error {
+	if err := s.assertInPage(ctx, commentID, pageID, wsIDs); err != nil {
 		return err
 	}
 	return s.Delete(ctx, commentID, requesterID)

@@ -1,12 +1,195 @@
 # BUILD_STATE — talyvor-docs
 
-**Base:** `9bc98b2` (Run 1) → `f238b90` (Run 2) · **Branch:** `docs-authority-class` · **Updated:** 2026-07-16
+**Base:** `9bc98b2` (Run 1) → `f238b90` (Run 2) → `52ece7b` (Run 3) · **Branch:** `docs-hardening-d` · **Updated:** 2026-07-16
 
 This file is the honest current state of the repo, written to be trusted when planning
 the next run. Where something is thin, it says so. The README is a product pitch and is
 **not** a reliable description of what works — this file is.
 
 ---
+
+## 0. Run 3 (backend hardening) — phase narrative
+
+**Base `52ece7b`** · branch `docs-hardening-d` · started 2026-07-16. Unattended run.
+Scope: backend robustness + cost control. Go only — the frontend is deliberately untouched.
+
+### VERIFY-FIRST recon (done before building; the roadmap's numbers were NOT assumed)
+
+**Q1 — which endpoints reach an LLM? The roadmap said ~5. The real count is higher.**
+
+| Surface | Reaches Lens via | Workspace verified? | Rate limited? |
+|---|---|---|---|
+| `POST /v1/workspaces/{wsID}/ai/write` | `ai.Engine.WriteWithAI` | ✅ `AuthorizeWorkspace` | ❌ |
+| `POST /v1/workspaces/{wsID}/ai/transform` | `Summarize`/`FixGrammar`/`MakeShorter`/`MakeLonger` | ✅ | ❌ |
+| `POST /v1/workspaces/{wsID}/ai/translate` | `Translate` | ✅ | ❌ |
+| `POST /v1/workspaces/{wsID}/ai/ask` | `AskDocs` | ✅ | ❌ |
+| `POST /v1/workspaces/{wsID}/ai/suggest-title` | `SuggestTitle` | ✅ | ❌ |
+| `GET /v1/workspaces/{wsID}/search` | `search.SemanticSearch.embed` (**embeddings**) | ✅ | ❌ |
+| `POST /mcp` → tool `ask_docs` | `ai.Engine.AskDocs` | ✅ (MCP chokepoint) | ❌ |
+| **every page UPDATE** (no route of its own) | `page.Store.Update` → `indexer.IndexPage` → `embed` | n/a (row's own workspace) | ❌ |
+
+So **8 LLM-reaching surfaces, not 5.** The two the roadmap missed matter:
+
+- **Semantic search spends on every query** — `embed(ctx, "query", q)` is a Lens round-trip per search.
+- **⭐ Every page save spends** (`page/store.go:471-479`). It is fire-and-forget:
+  `go func(){ _ = s.indexer.IndexPage(...) }()` — detached, error discarded. The frontend
+  autosaves on a **2-second debounce** and collab's AutoSaver flushes every **5 seconds**, so
+  one person typing generates an embedding call every few seconds. This is the largest
+  uncontrolled Lens consumer in the product, and **an HTTP-level limiter cannot see it** — by
+  the time the goroutine runs, the request is over. See "deferred" below.
+
+**Q2 — existing rate-limit middleware to extend? No. Greenfield.** No limiter anywhere in
+`internal/` or `cmd/`; no limiter dependency in `go.mod` (chi ships `middleware.Throttle`,
+which is a *concurrency* limiter, not a rate limiter, and is not imported). The only thing
+resembling a quota is `customdomain`'s 5-rows-per-workspace cap.
+
+**Q3 — ⭐ HOW LLM COST ACTUALLY FLOWS. This changes the framing, so state it plainly.**
+
+Docs does **not** meter, and is **not** metered per tenant by anything it controls:
+
+- `lensintegration.post` authenticates with `Authorization: Bearer <DOCS_LENS_API_KEY>` —
+  **one service key for the entire Docs instance**, not a per-workspace credential.
+- The workspace travels as `X-Talyvor-Workspace: <wsID>` — a **label**, not a credential.
+  (Post-#23 that label is at least trustworthy: every call site passes a verified workspace.)
+- `ai.Engine.run` gates on `IsAvailable()` — *"is Lens configured"* — and nothing else. There
+  is **no balance check, no quota, no cost cap** anywhere before the call.
+- `pages.ai_cost_usd` is a **report, not a gate**: it is a column populated by
+  `trackintegration`'s syncer pulling spend back from Track. Nothing reads it to decide.
+- Any Lens failure — including a hypothetical 402/429 from Lens — is flattened to a generic
+  `AI_FAILED` 502 (`writeAIErr`). Docs cannot currently tell "Lens refused on budget" from
+  "Lens is broken".
+
+**Therefore:** from Docs's side, per-tenant LLM spend is **unbounded**. Whether it is bounded
+*at all* depends on Lens enforcing the `X-Talyvor-Workspace` header — a cross-repo property
+this repo cannot verify, and one worth confirming in `talyvor-lens`. Note the sharper risk:
+**if Lens meters per API key rather than per workspace header, one tenant can exhaust the
+whole Docs instance's Lens budget and take AI down for every other tenant** — a
+noisy-neighbour outage, not just a billing surprise.
+
+**Framing consequence:** the rate limit added here is **the only per-tenant LLM control that
+exists in this repository**. It is a burst/abuse ceiling, not a billing system — it bounds
+*rate*, not *cost*. If Lens does meter per workspace, this is defence-in-depth on top; if it
+does not, this is the sole control and a real budget cap belongs on the roadmap. Either way
+it does not replace economy metering, and BUILD_STATE should not claim it does.
+
+**Q4 — behaviour when Postgres is down.**
+
+- `/healthz` is a hardcoded `{"ok":true}` literal that never touches the pool
+  (`cmd/docs/main.go`), so an orchestrator's probe stays green through a total outage.
+- **There is no `/readyz`.**
+- `internal/db` is 20 lines: `pgxpool.New` + one `Ping`, no health accessor, no retry.
+- Handler behaviour on a pool error is inconsistent and was measured, not assumed — see the
+  DB-outage capability below for the red-first evidence.
+
+### What Run 3 built (all red-first, real Postgres)
+
+**1. Per-workspace rate limiting on the LLM surfaces** — `internal/ratelimit`, a per-key
+token bucket over `golang.org/x/time/rate`. Applied to **7 of the 8** surfaces recon found:
+the 5 REST AI routes, the search route, and the MCP `ask_docs` tool (at the chokepoint, not
+the `/mcp` endpoint — that is one JSON-RPC door for 10 tools, 9 of which never touch an LLM).
+
+*The key is the VERIFIED workspace.* The middleware runs BEFORE the handler's own
+`AuthorizeWorkspace`, so it authorizes `{wsID}` itself and keys on the returned Membership.
+Keying on the raw param would have repeated #23's mistake in a new place and given an
+attacker two wins: **evasion** (name any workspace for a fresh bucket, forever, by rotating
+the string) and **cross-tenant DoS** (hammer `/workspaces/{victim}/ai/write` to drain the
+victim's bucket and lock a tenant out of AI without being able to read a byte of their
+data). Authorizing before spending a token is what makes the second impossible.
+**Mutation-proven**: keying on the raw param fails the suite with *"Alice spent from
+workspace B's bucket by naming it in the URL"*.
+
+| Fork | Taken | Alternative, and why not |
+|---|---|---|
+| Algorithm | **Token bucket** | *Fixed window* — admits 2N across a boundary (N at the end of one window, N at the start of the next), the exact burst this exists to stop. A bucket also fits "write a bit, then idle". |
+| Key | **Per-workspace** | *Per-member-per-workspace* — cost is a tenant concern; per-member multiplies the ceiling by headcount. The trade: one heavy user can spend a colleague's allowance — visible and recoverable, unlike a surprise bill. One-line change if the product wants it. |
+| Store | **In-memory** | *Shared (Redis)* — needed the day HA lands. Single-replica today, and with N replicas the ceiling becomes N×, degrading toward today's *unlimited* rather than wrongly denying: the safer direction to be wrong in. |
+| Limits | **AI 30/min burst 10; search 240/min burst 40** | *One limit for both* — would break Cmd+K. Sized from measured behaviour: the frontend debounces search at 300ms and `type=all` is the default, so one typist drives ~200 embeddings/min. Both env-configurable. |
+| Misconfig | **Fail closed** on a non-positive rate; **default** on a malformed env value | A silent no-op limiter is the fail-open shape this repo has been burned by. But a typo in an env var must not be an outage, hence the default. Boot logs the effective limits and warns if a surface is denying. |
+
+Buckets evict after 10 minutes idle (an unbounded map is its own robustness bug); an evicted
+key returns *full*, which can only ever be more permissive, never less.
+
+**2. Request body caps** — `internal/bodylimit`, two layers. A `Content-Length` check → 413
+before the handler allocates (every ordinary client declares one, and it is the only path
+that can give a clean status), plus `http.MaxBytesReader` for clients that omit or
+understate it — the read simply stops, the handler's decode-error path answers 400, and the
+*security* property (memory is bounded) holds. Making that case 413 too would mean touching
+the error handling of every decode site; the honest trade is a slightly wrong status on a
+path only a hostile or exotic client takes. 4MB default (a 4MB page is ~4M characters),
+200MB for imports.
+
+*A wiring bug a test caught and reading would not have:* chi middleware **composes**, it does
+not override. `r.Use(4MB)` on `/v1` plus `r.Use(200MB)` on an importer sub-group runs the 4MB
+cap **first** and rejects every legitimate Confluence/Notion export — the bigger cap never
+gets a say. Hence the exempt predicate (mirroring `gatewayauth`'s convention), pinned by a
+test asserting "over the normal cap but under the import cap must be ACCEPTED".
+
+**3. DB-outage degradation** — `internal/dbhealth`. Behaviour was **measured**, not assumed
+(a throwaway probe drove real requests at a pool pointed to a closed port):
+
+> `GET /v1/workspaces/{ws}/pages/stale` → **500 in ~0ms**. `GET /v1/spaces/{s}/pages/{p}` → **500 in ~0ms**.
+
+So Docs did **not** panic and did **not** hang — `authz.Middleware`'s `workspace_members`
+lookup fails first and answers 500. Better than the roadmap feared. What was wrong was the
+*shape*: a 500 reads as "this server has a bug" (non-retryable) when the truth was
+"temporarily unavailable, retry" — and the status depended on whichever query failed first
+(`page.Get` answers **404 on any error**, telling clients and caches the page was *deleted*).
+Now: `/readyz` probes the DB (200/503), and a cached-probe middleware gives one honest,
+retryable 503 on `/v1` and `/mcp`, mounted **before** authz. Note the fast failure is
+specific to a *refused* connection; a blackholed network would block until pgx's connect
+timeout on every request — which is where a hang would come from, and why the short-circuit
+matters rather than letting each handler discover the outage itself.
+
+*Fork — `/healthz` stays DB-free.* Liveness answers "should this process be restarted", and
+restarting cannot fix a database outage: wiring the DB into `/healthz` would crash-loop every
+replica during a blip, turning a recoverable incident into a self-inflicted outage. The
+alternative — one DB-aware `/healthz`, which is what compose already polls — is simpler and
+is the dangerous one. Readiness is the endpoint that should go false, and now does.
+
+**4. The `{pageID}` vs `{id}` scoping bug (deferred twice) — closed.** Different class from
+#23: nothing is forged. The caller authenticates honestly and the route authorizes honestly,
+then the store acts on a *different* resource. `assertInWorkspaces(commentID, wsIDs)` asked
+only "is this comment's page somewhere in the caller's tenant", so `{pageID}` chose the
+permission check and `{id}` chose the victim. RED proved Mallory **resolved a comment on a
+private page she cannot read** (200) and **replied into its thread** (201) by authorizing
+against an unrelated public page. Delete survived only via its separate author check —
+defence in depth, not scoping. Fixed with `assertInPage` (`AND c.page_id = $2`): the id being
+acted on must belong to the resource that was authorized.
+
+**Also fixed, surfaced by a test:** `ai.Engine.IsAvailable` is now nil-receiver safe. `mcp`
+holds the engine behind an **interface**, so a nil `*ai.Engine` assigned into it yields a
+**non-nil interface** — `if s.deps.ai != nil` read as a nil-guard and was not one, and
+`ask_docs` dereferenced a nil receiver. Production never passed nil so it was latent, but a
+panicking handler is exactly what this run exists to prevent.
+
+### Security posture — verified not regressed
+
+`internal/gatewayauth`, `internal/authz`, `internal/permission` and `.semgrep/` (including
+#23's `ActorOrEmpty` ban) are **byte-untouched** vs `52ece7b`. `frontend/` and
+`internal/collab` are untouched per the fence. The only `sec_*` change is two new test files
+plus `page/sec4_scoping_test.go`, updated because the comment store's signature got stricter
+— with a new assert that the right workspace and the WRONG page is now a not-found. Rate
+limit keys come from the verified context, mirroring #23's discipline.
+
+### Deferred (with reasons)
+
+- **⭐ The 8th LLM surface: the async page-save indexer.** `page/store.go` fires
+  `go func(){ _ = s.indexer.IndexPage(...) }()` on every Update — detached, error discarded.
+  With the frontend's 2s autosave debounce and collab's 5s flush, one person typing spends an
+  embedding call every few seconds. **It is the largest uncontrolled Lens consumer in the
+  product** and an HTTP limiter structurally cannot reach it: the request is over before the
+  goroutine runs. Three options, none free, all needing a product call rather than a blind
+  pick: (a) limit at the Lens *client* seam, which silently drops embeddings and degrades
+  search quality invisibly; (b) debounce/coalesce per page, which needs a scheduler; (c) rate
+  limit the page-save route, which throttles *editing* to control an *embedding* cost. Left
+  for a run that can decide it.
+- **`internal/importer`'s `maxUploadBytes` still caps nothing** — it is passed to
+  `ParseMultipartForm`, whose argument is `maxMemory`, not a limit. The route is now bounded
+  from the outside by `bodylimit`, so the exposure is closed; the misleading constant is the
+  importer's own to fix.
+- **Whether Lens meters the `X-Talyvor-Workspace` header** is a cross-repo question worth
+  confirming in `talyvor-lens` — it decides whether this limiter is defence-in-depth or the
+  sole control (§0 Q3).
 
 ## 1. What this run changed
 
@@ -147,11 +330,15 @@ fresh volume → `migrations applied count=14 versions=0001..0014` → `schema_m
 | Client-supplied authority | **CLOSED (Run 2).** Root + all 8 instances + a residual sweep; `ActorOrEmpty`/`WorkspaceOrEmpty` now banned by semgrep. One documented residual: `collab` (not an authority hole) |
 | Migration runner (bar A) | **Built.** Subcommand + `schema_migrations` + 5 fail-closed guards + boot apply |
 | Boot / quick start | **Works.** `docker compose up -d` → healthy |
+| LLM cost control | **Rate-limited per verified workspace** on 7 of 8 surfaces (Run 3). Bounds RATE, not cost — Docs still has no budget cap, and the async page-save indexer is uncovered. See §0 |
+| Request body caps | **Capped** — 4MB `/v1`+`/mcp`, 200MB imports (Run 3). Was: unbounded everywhere |
+| DB-outage behaviour | **Clean 503 + `/readyz`** (Run 3). Was: a 500 from authz's lookup, no readiness signal at all |
+| Resource scoping ({pageID} vs {id}) | **Closed** (Run 3) — the last known scoping gap |
 | Semgrep guardrail | **Runs, blocks.** Covers page/space/search (URL-param shape) **and the body-supplied shape** — 4 new rules, mutation-proven, catching 7/7 of the packages Run 2 fixed |
 
-**Test posture.** 27 packages green, `-race`, `go vet` clean. **26 real-PG security /
+**Test posture.** 30 packages green, `-race`, `go vet` clean. **29 real-PG security /
 integration tests** (Run 1 inherited 9, all of them skipping) + 9 migrate tests. Packages
-with real-PG coverage: `analytics`, `approval`, `changelog`, `collab`, `comment`, `database`, `mcp`, `membership`, `migrate`, `page`, `pagelink`, `pagelock`, `permission`, `space`, `trackintegration`.
+with real-PG coverage: `analytics`, `approval`, `changelog`, `collab`, `comment`, `database`, `dbhealth`, `mcp`, `membership`, `migrate`, `page`, `pagelink`, `pagelock`, `permission`, `ratelimit`, `space`, `trackintegration`.
 
 Still true: **most store tests are pgxmock-only, and pgxmock never executes SQL** —
 `internal/comment/store.go` documents two real bugs (error 42702) that ten passing mock
@@ -243,16 +430,12 @@ done blind here.
 
 ### Still open — deliberate deferrals
 
-1. **Comment routes gate on `{pageID}` but act on `{id}`** — `UnresolveInWorkspaces` /
-   `DeleteInWorkspaces` assert only that the comment's page is *somewhere* in the caller's
-   workspace set, not that it is under the `{pageID}` the route authorized. Structurally
-   the same shape as the `ce8bfe3` share-revoke bug, one blast radius smaller: cross-tenant
-   is blocked, cross-page within a tenant is not. Deferred by decision — smaller blast
-   radius, and it is a resource-scoping bug rather than a client-authority one, so it did
-   not belong in the authority run. **This is the top candidate for the next run.**
-2. **`collab.ServeWS`'s empty actor for multi-workspace members** — see the section above.
-   Not an authority hole; folded into the queued collab work because it needs a
-   `PageScoper` interface change.
+1. **The async page-save indexer — the 8th LLM surface, uncontrolled.** See §0
+   "Deferred". Largest uncontrolled Lens consumer; needs a product decision, not a blind
+   pick. **Top candidate for the next run.**
+2. **`collab.ServeWS`'s empty actor for multi-workspace members** — not an authority hole
+   (no body fallback, the `?member_id=` param is ignored); folded into the queued collab
+   work because it needs a `PageScoper` interface change.
 3. **Class-B `nosemgrep` suppressions are externally justified.** `analytics/store.go`,
    `block/store.go`, `pagelock/store.go` have no workspace concept; their cross-tenant
    safety lives entirely in `cmd/docs/main.go`'s `WithAccess` wiring, and
@@ -265,10 +448,12 @@ done blind here.
    fails closed at every call site added this run, by construction.)
 
 Closed since this file was last written: the `member_id`/`author_id` body fallback and its
-systemic root (Run 2 — see above); the `POST /v1/spaces` guardrail gap (rule A in
-`.semgrep/body-supplied-authority.yml` catches that exact shape — verified against
-`9bc98b2`); and the `POST /v1/spaces/{s}/pages/{p}/view` route collision (resolved: the
-duplicate registration is gone and the live handler is the safe one).
+systemic root (Run 2); the `POST /v1/spaces` guardrail gap (rule A in
+`.semgrep/body-supplied-authority.yml`, verified against `9bc98b2`); the
+`POST /v1/spaces/{s}/pages/{p}/view` route collision; and — **Run 3** — the
+`{pageID}`-vs-`{id}` comment scoping bug, unbounded LLM spend on 7 of 8 surfaces, unbounded
+request bodies, the missing readiness signal, and a latent nil-receiver panic in
+`ai.Engine.IsAvailable` reachable through `mcp`'s interface-held engine.
 
 ### Carried from recon, still true
 
@@ -280,10 +465,13 @@ duplicate registration is gone and the live handler is the safe one).
 - **Cannot run more than one replica.** OT state is in-process; `trackSyncer`,
   `freshEngine` and `saver` are uncoordinated `go` statements — no leader election. The
   migration runner *is* now replica-safe (advisory lock).
-- **No rate limiting, no request body size caps** (`MaxBytesReader` appears nowhere), no
-  WebSocket `SetReadLimit`. The AI endpoints proxy to Lens with no throttle or cost cap.
-- **`/healthz` never touches the DB** and there is no `/readyz`. `page/handler.go`'s `Get`
-  returns **404 on any error including a DB outage**.
+- **WebSocket `SetReadLimit` is still absent** — collab frames are unbounded. (REST/MCP body
+  caps and LLM rate limits landed in Run 3; the AI endpoints are throttled but there is still
+  no *cost* cap — a rate ceiling is not a budget.)
+- `/healthz` never touches the DB **by design** (liveness; see §0) and `/readyz` now probes
+  it. `page/handler.go`'s `Get` **still returns 404 on any error** — the DB-outage case is now
+  short-circuited to 503 upstream by `dbhealth`, but the misclassification remains for
+  transient per-query errors and should be fixed at the handler.
 - **`DOCS_LOG_LEVEL` is read into a struct field and never used** (`main.go` hardcodes the
   slog default before config loads). **`DOCS_SHARE_SECRET` and `DOCS_BASE_URL` in
   `.env.example` are dead config** — nothing reads them; share tokens are unsigned random
