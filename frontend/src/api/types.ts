@@ -51,6 +51,7 @@ export interface Page {
 export interface PageVersion {
   id: string;
   page_id: string;
+  workspace_id: string;
   version: number;
   title: string;
   content: string;

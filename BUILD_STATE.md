@@ -819,6 +819,29 @@ session, Acquire/Takeover reach it); the gate restores `ErrNotFound`. Behavioral
 non-holder `MayWrite`/`CanEdit` rejected; takeover-only-on-expiry; live-not-stealable; heartbeat/
 release holder-only. `-race` clean.
 
+### Phase 3 — FRONTEND — a coherent, TESTED, additive slice (integration deferred)
+
+**Done (all typecheck + vitest + build green; 14 new tests, additive — zero risk to the editor):**
+- `src/api/editsession.ts` — client (acquire/heartbeat/takeover/release/get), mirrors `pagelock.ts`.
+- `src/hooks/useEditSession.ts` — hook (session query + mutations + auto-heartbeat while held),
+  with the PURE `sessionFlags(session, memberID)` rule (heldByMe/heldByOther; only a LIVE session
+  constrains) — unit-tested headless.
+- `src/components/EditingBanner.tsx` — "<holder> is editing" + Takeover CTA (mirrors `LockBanner`;
+  renders only when held-by-other) — render-tested.
+- `src/components/VersionHistory.tsx` — list + restore + a two-version diff view, with a PURE LCS
+  `lineDiff` — unit-tested. `pagesApi` gained `version()` + `diffVersions()` (Phase-1 endpoints;
+  `versions()`/`restore()` already existed). `PageVersion` type gained `workspace_id`.
+
+**Deferred — the `PageView` integration** (mirror the EXISTING working lock wiring: add
+`useEditSession`, render `<EditingBanner>` beside `<LockBanner>`, add `heldByOther` to the
+`readOnly` derivation at PageView.tsx ~312, mount `<VersionHistory>`, and acquire-on-mount /
+release-on-unmount). **Why deferred, not rushed:** it touches the core editor, which has NO test
+harness, and the auto-acquire lifecycle + read-only transitions need live browser QA — which is
+blocked in this environment by the pre-existing auth-gateway gap (the SPA can't reach the backend
+without the edge gateway; vite dev 401s). Wiring it blind would risk leaving the editor broken,
+which the guard forbids. The components are built + tested + ready to wire; the integration is a
+well-scoped follow-up that needs a browser against a gateway-fronted backend.
+
 ### THE OPTION-B SEAM (unchanged framing, now concrete)
 
 Option B swaps ONLY `editsession.MayWrite` (single holder → many concurrent writers + presence +
