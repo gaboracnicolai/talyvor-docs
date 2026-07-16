@@ -1,15 +1,29 @@
 // Talyvor Docs service worker.
 //
 // Two caches:
-//   talyvor-static-v1  → cache-first for /assets/* (hashed, immutable)
-//   talyvor-api-v1     → network-first for cacheable GET API responses
+//   talyvor-static-v2  → the shell is NETWORK-FIRST; /assets/* is cache-first (immutable)
+//   talyvor-api-v2     → network-first for cacheable GET API responses
 //
 // Writes (POST/PATCH/PUT/DELETE) are never cached here — the IndexedDB
 // write_queue in the React layer handles offline replay. The service
 // worker only proxies reads.
+//
+// SHELL STRATEGY — WHY NETWORK-FIRST (this is the fix for the stale-SW routing hazard):
+// index.html is NOT content-hashed (always served at "/"), and it is the file that pulls in
+// the hashed JS/CSS bundles. Caching it CACHE-FIRST pins the entire app version: after a new
+// deploy a returning user was served the old index.html forever (cache-first never
+// revalidates), which loaded the old bundle from cache too — a stale app mismatched with the
+// fresh server, which manifested as erratic client-side routing until the SW was manually
+// unregistered. Serving the shell NETWORK-FIRST keeps returning online users on the current
+// version; the cached shell is the OFFLINE fallback only. Hashed /assets/* stay cache-first
+// because they are immutable, so they are safe (and fast) to pin.
 
-const STATIC_CACHE = "talyvor-static-v1";
-const API_CACHE = "talyvor-api-v1";
+// Bumping the version (v1 -> v2) makes the new SW's activate purge the old, poisoned
+// talyvor-static-v1 cache once, healing an existing stale install. Because the shell is now
+// network-first, future deploys self-propagate WITHOUT another bump.
+const CACHE_VERSION = "v2";
+const STATIC_CACHE = `talyvor-static-${CACHE_VERSION}`;
+const API_CACHE = `talyvor-api-${CACHE_VERSION}`;
 
 // Patterns that should bypass the cache entirely. Real-time
 // surfaces (collab WS, MCP, search) shouldn't return stale
@@ -24,7 +38,8 @@ const SKIP_PATTERNS = [
 self.addEventListener("install", (event) => {
   // No pre-cache list — the static cache fills lazily as users hit
   // each asset. This keeps the install step fast and avoids
-  // hard-coding hashed filenames.
+  // hard-coding hashed filenames. skipWaiting so a fixed SW activates
+  // promptly instead of waiting for every tab to close.
   self.skipWaiting();
 });
 
@@ -32,8 +47,8 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
       const keys = await caches.keys();
-      // Drop any older cache versions so a deploy doesn't accumulate
-      // stale entries indefinitely.
+      // Drop any cache whose name isn't a current-version cache — this is what purges the
+      // old talyvor-*-v1 caches (including the poisoned stale-shell one) on the fix deploy.
       await Promise.all(
         keys
           .filter((k) => k !== STATIC_CACHE && k !== API_CACHE)
@@ -62,10 +77,15 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // Hashed static assets get cache-first treatment. Vite emits them
-  // with content hashes, so once cached they're immutable.
-  if (url.pathname.startsWith("/assets/") || url.pathname === "/index.html" || url.pathname === "/") {
+  // Hashed static assets are immutable → cache-first (correct and fast).
+  if (url.pathname.startsWith("/assets/")) {
     event.respondWith(cacheFirst(req));
+    return;
+  }
+
+  // The app SHELL → network-first. See the header comment: cache-first here is the bug.
+  if (url.pathname === "/" || url.pathname === "/index.html") {
+    event.respondWith(shellNetworkFirst(req));
     return;
   }
 
@@ -75,8 +95,14 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(networkFirst(req));
     return;
   }
+
+  // Everything else (deep client routes like /spaces/.., /domains) passes through to the
+  // browser → server SPA fallback. The SW deliberately does NOT cache-serve these — that is
+  // what turned into the routing hijack.
 });
 
+// cacheFirst is for IMMUTABLE hashed assets only. A cache hit is authoritative (the content
+// hash guarantees it can't be stale); only a miss goes to the network.
 async function cacheFirst(req) {
   const cache = await caches.open(STATIC_CACHE);
   const hit = await cache.match(req);
@@ -86,12 +112,25 @@ async function cacheFirst(req) {
     if (res.ok) cache.put(req, res.clone()).catch(() => {});
     return res;
   } catch {
-    // Last-ditch: serve the cached index.html for navigation
-    // requests so the SPA at least mounts when fully offline.
-    if (req.mode === "navigate") {
-      const fallback = await cache.match("/");
-      if (fallback) return fallback;
-    }
+    return new Response("", { status: 504, statusText: "Offline" });
+  }
+}
+
+// shellNetworkFirst serves the app shell fresh when online, and falls back to the cached
+// shell when offline so the SPA still mounts. This is the strategy that makes a deploy
+// visible to returning users instead of pinning a stale version.
+async function shellNetworkFirst(req) {
+  const cache = await caches.open(STATIC_CACHE);
+  try {
+    const res = await fetch(req);
+    // Refresh the cached shell so the OFFLINE fallback tracks the latest deploy too.
+    if (res.ok) cache.put(req, res.clone()).catch(() => {});
+    return res;
+  } catch {
+    const hit =
+      (await cache.match(req)) ||
+      (req.mode === "navigate" ? await cache.match("/") : null);
+    if (hit) return hit;
     return new Response("", { status: 504, statusText: "Offline" });
   }
 }

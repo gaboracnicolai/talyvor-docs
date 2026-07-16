@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { App } from "./App";
 import { syncManager } from "./lib/sync";
+import { registerServiceWorker } from "./sw/register";
 import "./index.css";
 
 // Single app-wide query client. staleTime 30s matches the cadence at
@@ -14,17 +15,18 @@ const queryClient = new QueryClient({
   },
 });
 
-// Service worker registration. Only runs in production builds —
-// Vite's dev server doesn't serve /sw.js the way a real deploy does,
-// and a stale dev SW would intercept HMR requests.
-if (import.meta.env.PROD && "serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js").catch(() => {
-      // Registration failures are non-fatal — the app works
-      // online-only. We don't surface them to the user.
-    });
+// Service worker registration + loop-safe update→reload (src/sw/register.ts). Production
+// only, same as before — but now, when a new worker takes over an already-controlled page
+// after a deploy, the tab reloads once onto the new bundle (guarded against the first-install
+// and infinite-loop footguns). The SW itself serves the app shell network-first, so this is
+// the prompt-handover layer on top of the root fix.
+window.addEventListener("load", () => {
+  registerServiceWorker({
+    isProd: import.meta.env.PROD,
+    serviceWorker: "serviceWorker" in navigator ? navigator.serviceWorker : undefined,
+    reload: () => window.location.reload(),
   });
-}
+});
 
 // SyncManager flushes the offline write queue. Starts immediately
 // so a returning user with queued writes from a previous session
