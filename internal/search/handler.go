@@ -14,6 +14,7 @@ import (
 
 	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/page"
+	"github.com/talyvor/docs/internal/ratelimit"
 )
 
 // fullTextSearcher is the page-store dependency the handler needs.
@@ -26,6 +27,19 @@ type fullTextSearcher interface {
 type Handler struct {
 	pages    fullTextSearcher
 	semantic *SemanticSearch
+	// limit throttles the SEMANTIC side's Lens spend per verified workspace. nil =
+	// unthrottled (tests mount bare); main.go always wires it.
+	limit *ratelimit.Limiter
+}
+
+// WithRateLimit attaches the per-workspace limiter. This route embeds the query via Lens on
+// every semantic search (embed(ctx, "query", q)), so it spends per call. It is sized far
+// more generously than the AI routes: the frontend debounces at 300ms and type=all is the
+// default, so a single person typing drives ~200 embeddings/min — an AI-sized ceiling would
+// break Cmd+K. See internal/config for the sizing.
+func (h *Handler) WithRateLimit(l *ratelimit.Limiter) *Handler {
+	h.limit = l
+	return h
 }
 
 func NewHandler(pages fullTextSearcher, semantic *SemanticSearch) *Handler {
@@ -33,6 +47,10 @@ func NewHandler(pages fullTextSearcher, semantic *SemanticSearch) *Handler {
 }
 
 func (h *Handler) Mount(r chi.Router) {
+	if h.limit != nil {
+		r.With(h.limit.WorkspaceLimit("wsID")).Get("/workspaces/{wsID}/search", h.Search)
+		return
+	}
 	r.Get("/workspaces/{wsID}/search", h.Search)
 }
 

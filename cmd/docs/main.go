@@ -56,6 +56,7 @@ import (
 	"github.com/talyvor/docs/internal/pagelink"
 	"github.com/talyvor/docs/internal/pagelock"
 	"github.com/talyvor/docs/internal/permission"
+	"github.com/talyvor/docs/internal/ratelimit"
 	"github.com/talyvor/docs/internal/search"
 	"github.com/talyvor/docs/internal/sharing"
 	"github.com/talyvor/docs/internal/space"
@@ -189,11 +190,28 @@ func main() {
 	// DOCS_LENS_URL/API key flips IsAvailable() off and the handler
 	// returns 503 with a friendly message instead of erroring.
 	aiEngine := ai.New(lensClient)
-	aiHandler := ai.NewHandler(aiEngine, pageStore)
+	// Per-workspace LLM rate limiting — the ONLY per-tenant LLM control in this repo (Docs
+	// calls Lens on one service key with no balance/quota check anywhere; see BUILD_STATE
+	// §0 Q3). Bounds RATE, not cost. Separate limiters because the two surfaces have very
+	// different call shapes: AI completions are human-clicked and expensive; semantic search
+	// is 300ms-debounced by the client and cheap per call.
+	aiLimiter := ratelimit.New(cfg.AIRatePerMin, cfg.AIRateBurst)
+	searchLimiter := ratelimit.New(cfg.SearchRatePerMin, cfg.SearchRateBurst)
+	slog.Info("llm rate limits",
+		slog.Float64("ai_per_min", cfg.AIRatePerMin), slog.Int("ai_burst", cfg.AIRateBurst),
+		slog.Float64("search_per_min", cfg.SearchRatePerMin), slog.Int("search_burst", cfg.SearchRateBurst))
+	if !aiLimiter.Enabled() || !searchLimiter.Enabled() {
+		// Fail-closed limiters deny everything; that is safer than silently unlimited, but an
+		// operator should learn it from a boot log rather than a wall of 429s.
+		slog.Warn("an LLM rate limiter is configured non-positive and will DENY all calls on that surface",
+			slog.Bool("ai_enabled", aiLimiter.Enabled()), slog.Bool("search_enabled", searchLimiter.Enabled()))
+	}
+
+	aiHandler := ai.NewHandler(aiEngine, pageStore).WithRateLimit(aiLimiter)
 
 	// Unified search handler. Semantic-side falls back to empty when
 	// Lens is unconfigured; full-text always works.
-	searchHandler := search.NewHandler(pageStore, semSearch)
+	searchHandler := search.NewHandler(pageStore, semSearch).WithRateLimit(searchLimiter)
 
 	// Freshness engine + 9am-UTC stale-doc digest. Engine reads
 	// pages + linked-issue closure to surface "this spec needs a
@@ -263,7 +281,8 @@ func main() {
 	// public /mcp endpoints and call the 10 documented tools. The
 	// server keeps zero state of its own — it composes the existing
 	// stores via narrow interfaces.
-	mcpServer := mcp.New(pageStore, spaceStore, analyticsStore, aiEngine, freshEngine, "0.1.0")
+	mcpServer := mcp.New(pageStore, spaceStore, analyticsStore, aiEngine, freshEngine, "0.1.0").
+		WithRateLimit(aiLimiter) // ask_docs reaches Lens; an agent loop calls it far faster than a human clicks
 
 	// Permissions + public sharing.
 	permStore := permission.NewStore(pool)

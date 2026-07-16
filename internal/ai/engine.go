@@ -38,8 +38,20 @@ func New(lensClient *lensintegration.Client) *Engine {
 // IsAvailable reports whether the engine can fulfil AI requests.
 // Lens being misconfigured (empty URL/key) is the only thing that
 // makes us unavailable in steady state.
+// IsAvailable reports whether AI features can run. NIL-RECEIVER SAFE, deliberately.
+//
+// The mcp.Server holds its engine behind an `aiDeps` INTERFACE. Assigning a nil
+// *ai.Engine into an interface field yields a NON-nil interface (it carries a type with a
+// nil value), so mcp's `if s.deps.ai != nil` guard reads as a nil-check and is not one:
+// the call proceeds on a nil receiver and dereferences e.lensClient. Making the receiver
+// check itself part of the availability contract fixes it for every caller at once, rather
+// than asking each of them to remember a Go footgun.
+//
+// Production never passed a nil engine (main.go always constructs one), so this was latent
+// — but a panicking handler is exactly what the hardening run exists to prevent, and
+// middleware.Recoverer turning it into a 500 is not a defence worth relying on.
 func (e *Engine) IsAvailable() bool {
-	return e.lensClient != nil && e.lensClient.IsConfigured()
+	return e != nil && e.lensClient != nil && e.lensClient.IsConfigured()
 }
 
 // run is the shared call site. Every feature method delegates here so

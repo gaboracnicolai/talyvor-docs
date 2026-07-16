@@ -16,6 +16,7 @@ import (
 	"github.com/talyvor/docs/internal/freshness"
 	"github.com/talyvor/docs/internal/model"
 	"github.com/talyvor/docs/internal/page"
+	"github.com/talyvor/docs/internal/ratelimit"
 	"github.com/talyvor/docs/internal/space"
 )
 
@@ -63,7 +64,16 @@ type deps struct {
 }
 
 type Server struct {
-	deps deps
+	deps  deps
+	limit *ratelimit.Limiter // nil = unthrottled (tests); main.go always wires it
+}
+
+// WithRateLimit attaches the per-workspace LLM limiter. It applies ONLY to llmTools, keyed
+// on the workspace callTool has already VERIFIED — never the client-supplied workspace_id
+// arg, which would let an agent name a fresh bucket and evade the ceiling.
+func (s *Server) WithRateLimit(l *ratelimit.Limiter) *Server {
+	s.limit = l
+	return s
 }
 
 // New constructs the server with the real package stores. Tests use
@@ -111,7 +121,16 @@ const (
 	errInvalidParams  = -32602
 	errInternal       = -32603
 	errUnauthorized   = -32001 // SEC-4: not a member of / not authorized for the acted-on workspace
+	errRateLimited    = -32002 // this workspace has exceeded its LLM rate ceiling
 )
+
+// llmTools are the tools that reach Lens and therefore spend. Only these are rate-limited:
+// /mcp is ONE JSON-RPC door for 10 tools, and throttling get_page because someone used
+// ask_docs would be wrong. Keep this set honest — a new tool that calls the AI engine
+// belongs here, or it is an unmetered hole.
+var llmTools = map[string]bool{
+	"ask_docs": true,
+}
 
 func writeRPC(w http.ResponseWriter, resp rpcResponse) {
 	resp.JSONRPC = "2.0"
@@ -357,6 +376,13 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 		return nil, &rpcError{Code: errUnauthorized, Message: "not a member of this workspace"}
 	}
 	ctx = authz.WithAuthorized(ctx, m.WorkspaceID, m.MemberID)
+
+	// LLM spend ceiling, per VERIFIED workspace (m.WorkspaceID — never the workspace_id
+	// arg). Only the tools that actually reach Lens; an agent loop can call ask_docs far
+	// faster than a human clicks, on Docs's single unmetered service key.
+	if llmTools[name] && s.limit != nil && !s.limit.Allow(m.WorkspaceID) {
+		return nil, &rpcError{Code: errRateLimited, Message: "rate limit exceeded for this workspace, please retry shortly"}
+	}
 
 	switch name {
 	case "search_docs":
