@@ -43,6 +43,13 @@ const similarityThreshold = 0.75
 // goroutine still wastes a slot.
 const indexTimeout = 10 * time.Second
 
+// ErrTokenUnavailable means a per-workspace Lens token could not be minted. The two data
+// paths diverge on it, by design: the async index path treats it as best-effort (logs and
+// re-indexes on the page's next save), the sync search path treats it as fail-closed (errors
+// the search). NEITHER falls back to the shared global key — that would silently re-collapse
+// per-tenant rate-limit + spend attribution, the exact bug this seam fixes.
+var ErrTokenUnavailable = errors.New("search: per-workspace lens token unavailable")
+
 type SemanticResult struct {
 	PageID     string  `json:"page_id"`
 	Similarity float64 `json:"similarity"`
@@ -60,7 +67,14 @@ type SemanticSearch struct {
 	pool       pgxDB
 	httpClient *http.Client
 	lensURL    string
-	apiKey     string
+	tokens     tokenProvider
+}
+
+// tokenProvider yields a per-workspace Lens bearer. internal/lenscreds.Provider satisfies
+// it. The data-path embed uses this instead of the shared global key so Lens meters + rate-
+// limits per workspace (the global key resolves to an empty workspace — see internal/lenscreds).
+type tokenProvider interface {
+	TokenFor(ctx context.Context, workspaceID string) (string, error)
 }
 
 func New(lensClient *lensintegration.Client, pool *pgxpool.Pool) *SemanticSearch {
@@ -78,21 +92,25 @@ func newSemanticSearch(lensClient *lensintegration.Client, pool pgxDB) *Semantic
 		lensClient: lensClient,
 		pool:       pool,
 		httpClient: &http.Client{Timeout: indexTimeout},
-		// The Lens client doesn't currently expose its URL/key, but
-		// we re-read them here for the embeddings endpoint which the
-		// client doesn't directly support. SemanticSearch uses the
-		// same env vars; main.go passes the resolved values via
-		// WithLensCreds.
+		// The Lens client doesn't expose its URL, so main.go re-passes it via WithLensURL for
+		// the embeddings endpoint the client doesn't directly support. The data-path bearer
+		// comes from the per-workspace provider wired by WithTokenProvider.
 	}
 }
 
-// WithLensCreds wires the URL + API key for the embeddings endpoint.
-// Phase 6 chooses to call /v1/proxy/openai/v1/embeddings directly
-// rather than extending Client; the Client surface is otherwise
-// chat-completion-shaped, and embeddings are a one-off.
-func (s *SemanticSearch) WithLensCreds(lensURL, apiKey string) *SemanticSearch {
+// WithLensURL wires the base URL for the embeddings endpoint. Phase 6 chooses to call
+// /v1/proxy/openai/v1/embeddings directly rather than extending Client; the Client surface is
+// otherwise chat-completion-shaped, and embeddings are a one-off. The data-path CREDENTIAL is
+// no longer taken here — it is a per-workspace JWT from WithTokenProvider.
+func (s *SemanticSearch) WithLensURL(lensURL string) *SemanticSearch {
 	s.lensURL = strings.TrimRight(lensURL, "/")
-	s.apiKey = apiKey
+	return s
+}
+
+// WithTokenProvider wires the per-workspace JWT provider. Once set, the embeddings data path
+// sends a per-workspace bearer instead of the shared global key. main.go always wires this.
+func (s *SemanticSearch) WithTokenProvider(tp tokenProvider) *SemanticSearch {
+	s.tokens = tp
 	return s
 }
 
@@ -107,15 +125,19 @@ func (s *SemanticSearch) IsEnabled() bool {
 // into page_embeddings. Best-effort: errors are logged but never
 // returned, so the save path that calls this from a goroutine never
 // has to handle a search-side failure.
-func (s *SemanticSearch) IndexPage(ctx context.Context, pageID, _ /*workspaceID*/, text string) error {
+func (s *SemanticSearch) IndexPage(ctx context.Context, pageID, workspaceID, text string) error {
 	if !s.IsEnabled() {
 		return nil
 	}
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	vec, err := s.embed(ctx, pageID, text)
+	vec, err := s.embed(ctx, workspaceID, text)
 	if err != nil {
+		// Best-effort, INCLUDING a mint failure (ErrTokenUnavailable): log and return nil. We
+		// never fall back to the global key. The page re-indexes on its next save — the
+		// pageindex throttle re-enqueues on the next Update — so the async path "retries" via
+		// the normal save loop rather than a bespoke retry here (the throttle owns never-drop).
 		slog.Warn("search: embed failed", slog.String("page_id", pageID), slog.String("err", err.Error()))
 		return nil
 	}
@@ -152,8 +174,16 @@ func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, 
 	if limit > 50 {
 		limit = 50
 	}
-	vec, err := s.embed(ctx, "query", query)
+	vec, err := s.embed(ctx, workspaceID, query)
 	if err != nil {
+		if errors.Is(err, ErrTokenUnavailable) {
+			// Fail-closed: a per-workspace token could not be minted. Surface the error so the
+			// handler errors the search rather than degrading — and never fall back to the
+			// global key, which would re-collapse per-tenant attribution.
+			return nil, err
+		}
+		// Any other embed failure keeps the existing graceful-degradation contract (Lens down
+		// ⇒ empty semantic results, full-text still serves).
 		slog.Warn("search: query embed", slog.String("err", err.Error()))
 		return []SemanticResult{}, nil
 	}
@@ -223,13 +253,22 @@ func (s *SemanticSearch) IndexAllPages(ctx context.Context, workspaceID string) 
 
 // ─── Lens embeddings call ────────────────────────────────
 
-// embed asks Lens for a vector embedding of the given text. The
-// pageID is passed through purely for the workspace header so Lens
-// can attribute cost; the embedding itself is a function of the
-// text alone.
-func (s *SemanticSearch) embed(ctx context.Context, _, text string) ([]float64, error) {
-	if s.lensURL == "" || s.apiKey == "" {
-		return nil, errors.New("search: lens creds missing")
+// embed asks Lens for a vector embedding of the given text, attributed to workspaceID. The
+// bearer is a PER-WORKSPACE JWT minted for workspaceID — Lens meters + rate-limits off the
+// token's claim, so this is how per-tenant attribution actually lands (the X-Talyvor-Workspace
+// header is a label Lens ignores for metering). The embedding itself is a function of the text
+// alone. On a mint failure this returns ErrTokenUnavailable WITHOUT sending a request — the
+// shared global key is never used as the data-path bearer.
+func (s *SemanticSearch) embed(ctx context.Context, workspaceID, text string) ([]float64, error) {
+	if s.lensURL == "" {
+		return nil, errors.New("search: lens url missing")
+	}
+	if s.tokens == nil {
+		return nil, errors.New("search: no token provider wired")
+	}
+	tok, err := s.tokens.TokenFor(ctx, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrTokenUnavailable, err)
 	}
 	body := map[string]any{
 		"model": embeddingModel,
@@ -241,8 +280,9 @@ func (s *SemanticSearch) embed(ctx context.Context, _, text string) ([]float64, 
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+s.apiKey)
+	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("X-Talyvor-Feature", "docs-search")
+	req.Header.Set("X-Talyvor-Workspace", workspaceID) // observability label; the JWT is authoritative
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

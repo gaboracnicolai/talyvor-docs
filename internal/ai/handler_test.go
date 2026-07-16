@@ -3,10 +3,12 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -47,7 +49,7 @@ func newRouter(e *Engine, pages PageSearcher) http.Handler {
 func TestWriteEndpoint_ReturnsGeneratedText(t *testing.T) {
 	srv := newAIFake(t, `{"content":[{"type":"text","text":"Generated body."}]}`)
 	defer srv.Close()
-	h := newRouter(New(lensintegration.New(srv.URL, "k1")), &fakePages{})
+	h := newRouter(New(meteredLensClient(srv.URL)), &fakePages{})
 
 	body, _ := json.Marshal(map[string]string{"prompt": "explain caching", "context": "ctx"})
 	req := httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws-1/ai/write", strings.NewReader(string(body)))
@@ -68,7 +70,7 @@ func TestWriteEndpoint_ReturnsGeneratedText(t *testing.T) {
 func TestTransformEndpoint_RoutesByAction(t *testing.T) {
 	srv := newAIFake(t, `{"content":[{"type":"text","text":"shorter"}]}`)
 	defer srv.Close()
-	h := newRouter(New(lensintegration.New(srv.URL, "k1")), &fakePages{})
+	h := newRouter(New(meteredLensClient(srv.URL)), &fakePages{})
 
 	for _, action := range []string{"summarize", "grammar", "shorter", "longer"} {
 		body, _ := json.Marshal(map[string]string{"action": action, "text": "input"})
@@ -85,7 +87,7 @@ func TestTransformEndpoint_RoutesByAction(t *testing.T) {
 func TestTransformEndpoint_RejectsUnknownAction(t *testing.T) {
 	srv := newAIFake(t, `{"content":[]}`)
 	defer srv.Close()
-	h := newRouter(New(lensintegration.New(srv.URL, "k1")), &fakePages{})
+	h := newRouter(New(meteredLensClient(srv.URL)), &fakePages{})
 
 	body, _ := json.Marshal(map[string]string{"action": "delete-everything", "text": "x"})
 	req := httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws-1/ai/transform", strings.NewReader(string(body)))
@@ -106,7 +108,7 @@ func TestAskEndpoint_GathersPageContext(t *testing.T) {
 			{ID: "p-1", Title: "Deploy guide", ContentText: "Run make deploy.", Slug: "deploy", SpaceID: "s-1"},
 		},
 	}
-	h := newRouter(New(lensintegration.New(srv.URL, "k1")), pages)
+	h := newRouter(New(meteredLensClient(srv.URL)), pages)
 
 	body, _ := json.Marshal(map[string]string{"question": "How do I deploy?"})
 	req := httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws-1/ai/ask", strings.NewReader(string(body)))
@@ -163,7 +165,7 @@ func TestWriteEndpoint_503WhenLensUnconfigured(t *testing.T) {
 func TestSuggestTitleEndpoint(t *testing.T) {
 	srv := newAIFake(t, `{"content":[{"type":"text","text":"Deploy Pipeline Overview"}]}`)
 	defer srv.Close()
-	h := newRouter(New(lensintegration.New(srv.URL, "k1")), &fakePages{})
+	h := newRouter(New(meteredLensClient(srv.URL)), &fakePages{})
 
 	body, _ := json.Marshal(map[string]string{"content": "long content"})
 	req := httptest.NewRequest(http.MethodPost, "/v1/workspaces/ws-1/ai/suggest-title", strings.NewReader(string(body)))
@@ -187,7 +189,13 @@ func TestSuggestTitleEndpoint(t *testing.T) {
 // Lens.
 func newAIFake(t *testing.T, response string) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Completions mint a per-workspace token first; serve the mint endpoint.
+		if r.URL.Path == "/v1/auth/token" {
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"token":"tok","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))))
+			return
+		}
 		_, _ = w.Write([]byte(response))
 	}))
 }
