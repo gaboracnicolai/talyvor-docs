@@ -43,6 +43,7 @@ import (
 	"github.com/talyvor/docs/internal/customdomain"
 	"github.com/talyvor/docs/internal/database"
 	"github.com/talyvor/docs/internal/db"
+	"github.com/talyvor/docs/internal/dbhealth"
 	"github.com/talyvor/docs/internal/export"
 	"github.com/talyvor/docs/internal/freshness"
 	"github.com/talyvor/docs/internal/gatewayauth"
@@ -383,11 +384,22 @@ func main() {
 	r.Use(middleware.Timeout(30 * time.Second))
 	r.Use(metricsMiddleware)
 
+	// LIVENESS: deliberately DB-free. Restarting a process cannot fix a database outage, so
+	// making this probe DB-aware would crash-loop every replica during a blip — turning a
+	// recoverable incident into a self-inflicted one. "Is this process alive" is all it
+	// answers, and that is the correct question for a liveness probe.
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
+	// READINESS: probes the database. This is the signal an orchestrator should use to pull a
+	// replica out of the load balancer — before this there was none, so a replica that could
+	// not serve a single request stayed in rotation indefinitely while /healthz cheerfully
+	// answered {"ok":true}.
+	dbChecker := dbhealth.New(pool, 5*time.Second)
+	r.Get("/readyz", dbChecker.ReadyHandler())
+
 	r.Handle("/metrics", metrics.Handler())
 
 	// MCP (SEC-4 model b, mirroring Track): behind the SAME gatewayauth + authz chain as /v1.
@@ -401,6 +413,8 @@ func main() {
 		r.Use(authz.Middleware(authz.NewPGResolver(pool), mcpExempt))
 		// JSON-RPC bodies are small; no exemption — nothing under /mcp uploads a file.
 		r.Use(bodylimit.Middleware(cfg.MaxBodyBytes, nil))
+		r.Use(dbChecker.Middleware()) // clean 503 while PG is unreachable, not a 500
+
 		r.Post("/mcp", mcpServer.HandleRPC)
 		r.Get("/mcp/sse", mcpServer.HandleSSE)
 	})
@@ -418,6 +432,13 @@ func main() {
 		r.Use(bodylimit.Middleware(cfg.MaxBodyBytes, func(p string) bool {
 			return strings.HasPrefix(p, "/v1/import/")
 		}))
+		// Degrade cleanly while Postgres is unreachable. Measured pre-fix behaviour was a 500
+		// from authz's membership lookup — fast, but the wrong answer: a 500 reads as "this
+		// server is broken" (non-retryable) when the truth is "temporarily unavailable, retry".
+		// Placed BEFORE authz so the outage answer is one honest 503 rather than whichever
+		// query happens to fail first (page.Get, for one, answers 404 on ANY error — telling
+		// clients and caches the page was deleted).
+		r.Use(dbChecker.Middleware())
 		// SEC-4 Layer 1: transit-proof + membership on EVERY /v1 route except the public
 		// share viewer (/v1/public/*, which authenticates by its own share token).
 		// gatewayauth 401s a request lacking a valid x-gateway-auth BEFORE any identity
