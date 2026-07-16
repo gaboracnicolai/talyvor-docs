@@ -37,6 +37,16 @@ export const pagesApi = {
       `/v1/spaces/${spaceID}/pages/${pageID}/versions`,
     );
   },
+  version(spaceID: string, pageID: string, version: number) {
+    return apiRequest<PageVersion>(
+      `/v1/spaces/${spaceID}/pages/${pageID}/versions/${version}`,
+    );
+  },
+  diffVersions(spaceID: string, pageID: string, from: number, to: number) {
+    return apiRequest<{ from: PageVersion; to: PageVersion }>(
+      `/v1/spaces/${spaceID}/pages/${pageID}/versions/${from}/diff/${to}`,
+    );
+  },
   restore(spaceID: string, pageID: string, version: number) {
     return apiRequest<Page>(
       `/v1/spaces/${spaceID}/pages/${pageID}/versions/${version}/restore`,
