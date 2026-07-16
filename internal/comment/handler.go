@@ -125,6 +125,7 @@ func (h *Handler) Reply(w http.ResponseWriter, r *http.Request) {
 	}
 	c, err := h.store.ReplyInWorkspaces(r.Context(),
 		chi.URLParam(r, "id"),
+		chi.URLParam(r, "pageID"), // the page the route authorized — ties {id} to it
 		actorFor(r), in.AuthorName, in.Content, authz.WorkspaceIDs(r.Context()))
 	if scoped404(w, err) {
 		return
@@ -148,7 +149,8 @@ func (h *Handler) Resolve(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "resolver required")
 		return
 	}
-	err := h.store.ResolveInWorkspaces(r.Context(), chi.URLParam(r, "id"), resolver, authz.WorkspaceIDs(r.Context()))
+	err := h.store.ResolveInWorkspaces(r.Context(), chi.URLParam(r, "id"),
+		chi.URLParam(r, "pageID"), resolver, authz.WorkspaceIDs(r.Context()))
 	if scoped404(w, err) {
 		return
 	}
@@ -160,7 +162,8 @@ func (h *Handler) Resolve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Unresolve(w http.ResponseWriter, r *http.Request) {
-	err := h.store.UnresolveInWorkspaces(r.Context(), chi.URLParam(r, "id"), authz.WorkspaceIDs(r.Context()))
+	err := h.store.UnresolveInWorkspaces(r.Context(), chi.URLParam(r, "id"),
+		chi.URLParam(r, "pageID"), authz.WorkspaceIDs(r.Context()))
 	if scoped404(w, err) {
 		return
 	}
@@ -177,7 +180,8 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "verified identity required")
 		return
 	}
-	err := h.store.DeleteInWorkspaces(r.Context(), chi.URLParam(r, "id"), requester, authz.WorkspaceIDs(r.Context()))
+	err := h.store.DeleteInWorkspaces(r.Context(), chi.URLParam(r, "id"),
+		chi.URLParam(r, "pageID"), requester, authz.WorkspaceIDs(r.Context()))
 	if scoped404(w, err) {
 		return
 	}

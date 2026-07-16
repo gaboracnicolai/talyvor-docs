@@ -47,14 +47,22 @@ func TestSEC4_Scoping_SpaceAndComment(t *testing.T) {
 	}
 
 	// COMMENT: A-scoped ops on B's comment → ErrNotFound; B-scoped resolve → ok.
+	// The *InWorkspaces variants now also take the page the caller was authorized against
+	// (pB here), so the id being acted on must belong to it — see comment.assertInPage. The
+	// cross-TENANT contract this test pins is unchanged; the signature just got stricter.
 	commentStore := comment.NewStore(d.Pool)
-	if err := commentStore.DeleteInWorkspaces(ctx, cmtID, bob, aliceScope); !errors.Is(err, comment.ErrNotFound) {
+	if err := commentStore.DeleteInWorkspaces(ctx, cmtID, pB, bob, aliceScope); !errors.Is(err, comment.ErrNotFound) {
 		t.Errorf("comment cross-tenant delete = %v, want comment.ErrNotFound", err)
 	}
-	if err := commentStore.ResolveInWorkspaces(ctx, cmtID, bob, aliceScope); !errors.Is(err, comment.ErrNotFound) {
+	if err := commentStore.ResolveInWorkspaces(ctx, cmtID, pB, bob, aliceScope); !errors.Is(err, comment.ErrNotFound) {
 		t.Errorf("comment cross-tenant resolve = %v, want comment.ErrNotFound", err)
 	}
-	if err := commentStore.ResolveInWorkspaces(ctx, cmtID, bob, bobScope); err != nil {
+	if err := commentStore.ResolveInWorkspaces(ctx, cmtID, pB, bob, bobScope); err != nil {
 		t.Errorf("comment same-tenant resolve = %v, want ok", err)
+	}
+	// And the new predicate holds at the store level too: the right workspace but the WRONG
+	// page is a not-found, not a pass.
+	if err := commentStore.ResolveInWorkspaces(ctx, cmtID, "some-other-page", bob, bobScope); !errors.Is(err, comment.ErrNotFound) {
+		t.Errorf("comment resolve with a foreign pageID = %v, want comment.ErrNotFound", err)
 	}
 }
