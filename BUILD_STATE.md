@@ -8,6 +8,79 @@ the next run. Where something is thin, it says so. The README is a product pitch
 
 ---
 
+## 0. Run 3 (backend hardening) — phase narrative
+
+**Base `52ece7b`** · branch `docs-hardening-d` · started 2026-07-16. Unattended run.
+Scope: backend robustness + cost control. Go only — the frontend is deliberately untouched.
+
+### VERIFY-FIRST recon (done before building; the roadmap's numbers were NOT assumed)
+
+**Q1 — which endpoints reach an LLM? The roadmap said ~5. The real count is higher.**
+
+| Surface | Reaches Lens via | Workspace verified? | Rate limited? |
+|---|---|---|---|
+| `POST /v1/workspaces/{wsID}/ai/write` | `ai.Engine.WriteWithAI` | ✅ `AuthorizeWorkspace` | ❌ |
+| `POST /v1/workspaces/{wsID}/ai/transform` | `Summarize`/`FixGrammar`/`MakeShorter`/`MakeLonger` | ✅ | ❌ |
+| `POST /v1/workspaces/{wsID}/ai/translate` | `Translate` | ✅ | ❌ |
+| `POST /v1/workspaces/{wsID}/ai/ask` | `AskDocs` | ✅ | ❌ |
+| `POST /v1/workspaces/{wsID}/ai/suggest-title` | `SuggestTitle` | ✅ | ❌ |
+| `GET /v1/workspaces/{wsID}/search` | `search.SemanticSearch.embed` (**embeddings**) | ✅ | ❌ |
+| `POST /mcp` → tool `ask_docs` | `ai.Engine.AskDocs` | ✅ (MCP chokepoint) | ❌ |
+| **every page UPDATE** (no route of its own) | `page.Store.Update` → `indexer.IndexPage` → `embed` | n/a (row's own workspace) | ❌ |
+
+So **8 LLM-reaching surfaces, not 5.** The two the roadmap missed matter:
+
+- **Semantic search spends on every query** — `embed(ctx, "query", q)` is a Lens round-trip per search.
+- **⭐ Every page save spends** (`page/store.go:471-479`). It is fire-and-forget:
+  `go func(){ _ = s.indexer.IndexPage(...) }()` — detached, error discarded. The frontend
+  autosaves on a **2-second debounce** and collab's AutoSaver flushes every **5 seconds**, so
+  one person typing generates an embedding call every few seconds. This is the largest
+  uncontrolled Lens consumer in the product, and **an HTTP-level limiter cannot see it** — by
+  the time the goroutine runs, the request is over. See "deferred" below.
+
+**Q2 — existing rate-limit middleware to extend? No. Greenfield.** No limiter anywhere in
+`internal/` or `cmd/`; no limiter dependency in `go.mod` (chi ships `middleware.Throttle`,
+which is a *concurrency* limiter, not a rate limiter, and is not imported). The only thing
+resembling a quota is `customdomain`'s 5-rows-per-workspace cap.
+
+**Q3 — ⭐ HOW LLM COST ACTUALLY FLOWS. This changes the framing, so state it plainly.**
+
+Docs does **not** meter, and is **not** metered per tenant by anything it controls:
+
+- `lensintegration.post` authenticates with `Authorization: Bearer <DOCS_LENS_API_KEY>` —
+  **one service key for the entire Docs instance**, not a per-workspace credential.
+- The workspace travels as `X-Talyvor-Workspace: <wsID>` — a **label**, not a credential.
+  (Post-#23 that label is at least trustworthy: every call site passes a verified workspace.)
+- `ai.Engine.run` gates on `IsAvailable()` — *"is Lens configured"* — and nothing else. There
+  is **no balance check, no quota, no cost cap** anywhere before the call.
+- `pages.ai_cost_usd` is a **report, not a gate**: it is a column populated by
+  `trackintegration`'s syncer pulling spend back from Track. Nothing reads it to decide.
+- Any Lens failure — including a hypothetical 402/429 from Lens — is flattened to a generic
+  `AI_FAILED` 502 (`writeAIErr`). Docs cannot currently tell "Lens refused on budget" from
+  "Lens is broken".
+
+**Therefore:** from Docs's side, per-tenant LLM spend is **unbounded**. Whether it is bounded
+*at all* depends on Lens enforcing the `X-Talyvor-Workspace` header — a cross-repo property
+this repo cannot verify, and one worth confirming in `talyvor-lens`. Note the sharper risk:
+**if Lens meters per API key rather than per workspace header, one tenant can exhaust the
+whole Docs instance's Lens budget and take AI down for every other tenant** — a
+noisy-neighbour outage, not just a billing surprise.
+
+**Framing consequence:** the rate limit added here is **the only per-tenant LLM control that
+exists in this repository**. It is a burst/abuse ceiling, not a billing system — it bounds
+*rate*, not *cost*. If Lens does meter per workspace, this is defence-in-depth on top; if it
+does not, this is the sole control and a real budget cap belongs on the roadmap. Either way
+it does not replace economy metering, and BUILD_STATE should not claim it does.
+
+**Q4 — behaviour when Postgres is down.**
+
+- `/healthz` is a hardcoded `{"ok":true}` literal that never touches the pool
+  (`cmd/docs/main.go`), so an orchestrator's probe stays green through a total outage.
+- **There is no `/readyz`.**
+- `internal/db` is 20 lines: `pgxpool.New` + one `Ping`, no health accessor, no retry.
+- Handler behaviour on a pool error is inconsistent and was measured, not assumed — see the
+  DB-outage capability below for the red-first evidence.
+
 ## 1. What this run changed
 
 A security-first foundation run, in strict order.
