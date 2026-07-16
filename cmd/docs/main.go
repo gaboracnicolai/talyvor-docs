@@ -55,6 +55,7 @@ import (
 	"github.com/talyvor/docs/internal/migrate"
 	"github.com/talyvor/docs/internal/model"
 	"github.com/talyvor/docs/internal/page"
+	"github.com/talyvor/docs/internal/pageindex"
 	"github.com/talyvor/docs/internal/pagelink"
 	"github.com/talyvor/docs/internal/pagelock"
 	"github.com/talyvor/docs/internal/permission"
@@ -167,9 +168,25 @@ func main() {
 	// goroutine inside the store).
 	lensClient := lensintegration.New(cfg.LensURL, cfg.LensAPIKey)
 	semSearch := search.New(lensClient, pool).WithLensCreds(cfg.LensURL, cfg.LensAPIKey)
+	// Throttle the per-save embed path — the largest uncontrolled Lens consumer. The store's
+	// fire-and-forget goroutine now just ENQUEUES here (returns immediately); the throttle
+	// coalesces rapid saves per page (latest-wins, never-drop), bounds concurrent embeds to a
+	// worker pool, and paces the total call rate. The workspaceID arg rides through to
+	// semSearch unchanged. See internal/pageindex.
+	indexThrottle := pageindex.New(semSearch, pageindex.Options{
+		Workers:    cfg.IndexWorkers,
+		RatePerSec: cfg.IndexRatePerMin / 60,
+		Burst:      cfg.IndexRateBurst,
+		Staleness:  time.Duration(cfg.IndexStalenessSec) * time.Second,
+	})
+	indexThrottle.Start(ctx) // workers stop when ctx cancels (graceful shutdown)
+	slog.Info("page-save index throttle",
+		slog.Int("workers", cfg.IndexWorkers),
+		slog.Float64("rate_per_min", cfg.IndexRatePerMin),
+		slog.Int("staleness_sec", cfg.IndexStalenessSec))
 	pageStore := page.NewStore(pool).
 		WithLinker(linkStore).
-		WithIndexer(semSearch)
+		WithIndexer(indexThrottle)
 	blockStore := block.NewStore(pool)
 
 	spaceHandler := space.NewHandler(spaceStore)

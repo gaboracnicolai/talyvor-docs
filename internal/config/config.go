@@ -61,6 +61,24 @@ type Config struct {
 	SearchRatePerMin float64
 	SearchRateBurst  int
 
+	// Page-save embed indexer throttle. Every page save fires an async Lens embedding; before
+	// this it was one goroutine per save with no coalescing/pool/rate — the largest
+	// uncontrolled Lens consumer. internal/pageindex coalesces per page, bounds concurrency to
+	// IndexWorkers, and paces the total embed rate to IndexRatePerMin.
+	//
+	// SIZING: with coalescing, one editor's rapid autosaves collapse to ~1 embed per
+	// IndexStalenessSec, so a single editor drives ~12 embeds/min at the 5s default. 300/min
+	// (5/s) allows ~25 concurrent active editors before pacing kicks in — generous, still a
+	// ceiling. Workers 4 bounds concurrent Lens round-trips. Staleness 5s is the max
+	// save→searchable delay under normal load. A non-positive rate means UNLIMITED (the
+	// throttle still coalesces + bounds concurrency) — this is a throughput throttle, not a
+	// fail-closed security gate, so "unlimited rate" degrades to the pool bound, not to a
+	// wall of errors.
+	IndexWorkers      int
+	IndexRatePerMin   float64
+	IndexRateBurst    int
+	IndexStalenessSec int
+
 	// Request-body caps (bytes). A memory bound, not a business rule: no route capped its
 	// body before this, and PATCH /pages/{id} decodes into a map[string]any — a multi-GB
 	// `content` was read into RAM, written to PG, walked by extractContentText and fanned to
@@ -102,6 +120,10 @@ func Load() (*Config, error) {
 		AIRateBurst:           getEnvInt("DOCS_AI_RATE_BURST", 10),
 		SearchRatePerMin:      getEnvFloat("DOCS_SEARCH_RATE_PER_MIN", 240),
 		SearchRateBurst:       getEnvInt("DOCS_SEARCH_RATE_BURST", 40),
+		IndexWorkers:          getEnvInt("DOCS_INDEX_WORKERS", 4),
+		IndexRatePerMin:       getEnvFloat("DOCS_INDEX_RATE_PER_MIN", 300),
+		IndexRateBurst:        getEnvInt("DOCS_INDEX_RATE_BURST", 10),
+		IndexStalenessSec:     getEnvInt("DOCS_INDEX_STALENESS_SEC", 5),
 		MaxBodyBytes:          int64(getEnvInt("DOCS_MAX_BODY_BYTES", 4<<20)),
 		MaxImportBodyBytes:    int64(getEnvInt("DOCS_MAX_IMPORT_BODY_BYTES", 200<<20)),
 	}
