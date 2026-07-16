@@ -461,6 +461,102 @@ surface in the #25 run — so it is reported here rather than flaked or faked.
 a scope harness, over building the SW from a shared TS module. Lower-risk, reversible, zero
 drift — the test exercises the deployed bytes.
 
+## 0d. Run 6 (page-save indexer throttle) — phase narrative
+
+**Base `1b576c8`** · branch `docs-pagesave-indexer-throttle` · 2026-07-16. Backend-only.
+Throttles the largest uncontrolled Lens consumer: the async page-save embed indexer.
+
+### VERIFY-FIRST — the exact path
+
+- **Goroutine spawn site:** `internal/page/store.go:475-479`, inside `Store.Update` (only
+  `Update` indexes — `Create` does not): `go func(){ _ = s.indexer.IndexPage(ctx, pageID,
+  workspaceID, text) }()`. One goroutine per save, no coalescing, no concurrency bound, no
+  rate limit; the HTTP rate limiter can't see this internal path.
+- **The seam:** `searchIndexer.IndexPage(ctx, pageID, workspaceID, text)` (page/store.go:52).
+- **The Lens call:** `SemanticSearch.IndexPage` → `embed()` (`internal/search/semantic.go`),
+  which POSTs to Lens with `Authorization: Bearer` + `X-Talyvor-Feature: docs-search`.
+- **⭐ Workspace-label finding:** the embed call does **NOT** currently send
+  `X-Talyvor-Workspace` — `IndexPage(ctx, pageID, _ /*workspaceID*/, text)` and `embed(ctx,
+  _, text)` **ignore the workspaceID**. So there was no label here to "not break"; the label
+  SEAM is the `workspaceID` argument threaded to `IndexPage`, which the throttle preserves.
+  Adding the workspace header to `embed()` would be a metering/Lens-coordination change —
+  out of scope for a throttling run; flagged, not done.
+- `IndexAllPages` (a bulk backfill that also calls `IndexPage`) is **unwired** (no caller) —
+  not a live path, out of scope.
+
+### THE BUILD — `internal/pageindex.Throttle`
+
+Implements the `IndexPage(ctx, pageID, workspaceID, text)` signature, so `WithIndexer`
+accepts it; delegates the real embed to `SemanticSearch`, passing `workspaceID` through
+unchanged. `main.go` wraps the indexer; the store's per-save goroutine now just ENQUEUES
+(returns immediately) and the throttle owns concurrency/rate/coalescing. `page/store.go` is
+**byte-untouched** (only the `main.go` wiring swapped the indexer).
+
+Four properties, each tested with `-race`, in `internal/pageindex` (Go tests → they run in
+CI's `test` job — the Go equivalent of "the vitest suite that gates"; no `t.Skip`, no build
+tags, no DB needed → 0 skips):
+
+1. **COALESCING (latest-wins).** RED→GREEN, strict (build-fail, then a naive embed-immediately
+   impl fails "exactly 1"): 10 rapid saves to one page → **1** embed carrying the **final**
+   content. `TestCoalescing`.
+2. **NEVER-DROP-FINAL.** A save arriving during an in-flight embed is re-embedded afterwards.
+   Proven under coalescing (`TestNeverDrop_SaveDuringInflight`) AND under worker-pool
+   backpressure (`TestNeverDrop_UnderPoolBackpressure`: single worker blocked, a newer save
+   for the in-flight page + fresh pages queued behind it → every page's FINAL content still
+   embeds; the in-flight page embeds exactly twice, v1 then v2). A dropped embed = stale
+   search = a silent data-visibility bug, so this is the load-bearing invariant.
+3. **BOUNDED POOL.** N workers → concurrency never exceeds pool size; a 20-page burst against
+   a pool of 3 stays ≤3 concurrent and all 20 embed. **Mutation-proven**: unbounding the pool
+   (goroutine-per-item) fails the assertion.
+4. **RATE CAP.** Token bucket (`golang.org/x/time/rate`) paces the total embed call rate —
+   consumer-side, independent of how Lens meters. 6 embeds at 20/s span ≥ ~200ms.
+   **Mutation-proven**: disabling the limiter → 6 embeds in ~5ms → the pacing assertion fails.
+
+**STALENESS** is the coalescing window and the config knob for max save→searchable delay: a
+page's first save schedules its embed one window out; saves within update the pending content
+without extending the deadline (no starvation), so the final state embeds within ~staleness
+under normal load (`TestStaleness`).
+
+### Config (env-overridable; malformed → default)
+
+| Env | Default | Meaning |
+|---|---|---|
+| `DOCS_INDEX_WORKERS` | 4 | concurrent embed workers |
+| `DOCS_INDEX_RATE_PER_MIN` | 300 | embed call-rate ceiling; **<=0 = unlimited** (still pool-bounded) |
+| `DOCS_INDEX_RATE_BURST` | 10 | token-bucket burst |
+| `DOCS_INDEX_STALENESS_SEC` | 5 | coalescing window / max save→searchable delay under normal load |
+
+**Sizing:** with coalescing, one editor's autosaves collapse to ~1 embed per staleness window
+(~12/min at 5s), so 300/min allows ~25 concurrent active editors before pacing — generous,
+still a ceiling. **Fork:** unlike the AI/search HTTP limiters (which fail CLOSED for security),
+a non-positive index rate means UNLIMITED and degrades to the pool bound — this is a
+throughput throttle, not a security gate, so a misconfig must not wall off all indexing.
+
+### Forks & guards
+
+- **Fork — wrap at the seam, leave `page/store.go` untouched.** The store's per-save goroutine
+  now enqueues into the throttle (O(1), returns instantly). A transient enqueue-goroutine per
+  save remains, but it does no Lens work and exits immediately; the *embed* concurrency (the
+  resource concern) is pool-bounded. Most conservative/reversible (revert = swap the indexer
+  back). Removing the store's `go func` is a trivial follow-up, not required.
+- **Fork — rate cap in the throttle**, which is the per-save "internal goroutine path" the
+  brief names. `IndexAllPages` (unwired bulk) is not covered; capping it would touch
+  `internal/search` and is a documented follow-up.
+- Guards (by diff vs `1b576c8`): only `cmd/docs/main.go`, `internal/config`, and
+  `internal/pageindex` changed. **Byte-untouched:** the money path (no ledger/supply/mint/
+  balance tokens added — throttling, not minting), `internal/search` + `internal/lensintegration`
+  (the embed/Lens seam, `X-Talyvor-Feature` label preserved), `internal/page/store.go`, the
+  SW fix, the URL router, the route guards, `.semgrep`, and `migrations`.
+
+### Deferred (with reasons)
+
+- **The embed call sends no `X-Talyvor-Workspace` header** (workspaceID ignored in
+  `embed()`). Adding it would let Lens meter Docs embeds per workspace — but that's a
+  metering/Lens-coordination change, out of a throttling run. The throttle preserves the
+  workspaceID argument so the seam is ready. Flagged for a watched money/metering run.
+- `IndexAllPages` (unwired bulk backfill) is not throttled; wire + cap it if/when it gets a
+  route.
+
 ## 1. What this run changed
 
 A security-first foundation run, in strict order.
