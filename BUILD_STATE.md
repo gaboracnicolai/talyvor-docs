@@ -729,6 +729,37 @@ appends the merged snapshot as the next version exactly like a single-writer sav
 will add the one policy seam B swaps: the "who may write right now" edit-session (single holder →
 many concurrent writers + presence). No single-writer assumption is baked into the version schema.
 
+### STOPPED after Phase 1 (a complete checkpoint) — Phase 2/3 deferred, with design
+
+Verify-first surfaced that Phase 2's substrate is NOT greenfield: `internal/pagelock` already
+occupies the "who may edit" seam (the store's `editGuard` = `pagelock.CanEdit`, composing an
+approval gate + a MANUAL soft-lock). Building the automatic heartbeat/takeover edit-session on
+top of that — plus its migration, tenancy red-first proofs, guard composition, and frontend — is
+a full phase. Per the brief's "STOP after a COMPLETE phase if too large; don't leave a phase
+half-done," this run ships Phase 1 complete and defers 2/3 with a concrete plan:
+
+**Phase 2 — single-writer edit session (`internal/editsession`), the Option-B policy seam:**
+- Migration 0016: `page_edit_sessions(page_id PK → pages ON DELETE CASCADE, workspace_id NOT NULL,
+  holder NOT NULL, acquired_at, last_heartbeat)`. Session is LIVE iff `last_heartbeat > now()-TTL`.
+- Ops (all scoped by the SERVER-authorized `workspace_id`): `Acquire`, `Heartbeat`, `Release`,
+  `Takeover` (only if current session expired/absent), `Get` (observe), and the policy method
+  `MayWrite(pageID, workspaceID, memberID)` — the ONE place the ephemeral single-writer decision
+  lives.
+- **The reconciliation decision (why it's a phase, not a patch):** the manual `pagelock` and the
+  automatic edit-session are DIFFERENT mechanisms and can COEXIST cleanly — compose the store guard
+  as `approvalOK AND manualLockOK AND editSessionOK`. The edit-session owns ONLY the ephemeral
+  single-writer decision; Option B swaps THAT one policy (single→many + presence + CRDT merge)
+  while approval + manual lock + the append-only version model stay put. `store.go`'s save path is
+  untouched; B appends merged snapshots as versions exactly like a single-writer save. RECOMMEND
+  this compose-don't-replace path (keeps `LockBadge`/`pagelock` + approval intact).
+- Red-first: no cross-tenant acquire/observe (scope every op by `workspace_id`); a NON-holder save
+  is rejected "locked by <user>"; takeover after heartbeat expiry works.
+
+**Phase 3 — frontend:** editing banner ("<user> is editing") + read-only for non-holders (extend
+the existing `LockBadge`/`LockBanner`), and a NEW version-history + diff + restore UI over the
+Phase-1 endpoints (`GET /versions`, `/versions/{v}`, `/versions/{v}/diff/{other}`, `POST
+/versions/{v}/restore`). None exists today.
+
 ## 1. What this run changed
 
 A security-first foundation run, in strict order.
