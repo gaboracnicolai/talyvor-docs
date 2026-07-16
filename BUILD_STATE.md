@@ -336,6 +336,131 @@ a decision for the reviewer, flagged rather than hacked around.
   the wrappers; converting remaining `onClick` handlers to `<a href>` for middle-click/copy
   is incremental polish, not required for addressability.
 
+## 0c. Run 5 (stale-service-worker navigation hazard) — phase narrative
+
+**Base `90ccd84`** · branch `docs-sw-safety` · started 2026-07-16. **SUPERVISED**, frontend-only.
+Fixes the hazard the #25 router browser-test surfaced: a stale SW hijacked client-side router
+navigation (URL jumped to `/domains`, page reset to `about:blank`) until manually unregistered.
+
+### VERIFY-FIRST — the actual SW setup on 90ccd84
+
+- **Hand-written** `frontend/public/sw.js` (no vite-plugin-pwa, no workbox). Vite copies
+  `public/*` to `dist/` verbatim → served at `/sw.js`. Registered fire-and-forget in
+  `main.tsx` (`import.meta.env.PROD` only; no update handling anywhere in the app).
+- Two caches: `talyvor-static-v1` (cache-first for the shell + `/assets/*`), `talyvor-api-v1`
+  (network-first for cacheable `/v1` GETs). Writes never cached (IndexedDB write-queue does
+  offline replay). `install` → `skipWaiting()`; `activate` → delete caches whose names differ
+  from the two constants, then `clients.claim()`.
+- **Offline is a real feature, not incidental** — OfflineIndicator, OfflineSettings, offlinedb
+  (IndexedDB), sync.ts write-queue, client.ts offline fallback. The fix MUST preserve it.
+
+### ROOT CAUSE (named before any fix)
+
+The SW applies **cache-FIRST to the mutable app shell** — `/` and `/index.html`
+(`sw.js` fetch handler: `if (pathname === "/" || "/index.html" || startsWith("/assets/")) →
+cacheFirst`). `cacheFirst` is `hit = cache.match(req); if (hit) return hit;` — it **never
+revalidates**. Three facts turn that into a deploy hazard:
+
+1. `index.html` is **not content-hashed** (always `/`); it is the file that pulls in the
+   hashed JS/CSS bundles. Caching it cache-first pins the whole app version.
+2. The cache name is hardcoded `…-v1` and **never bumps**; `activate` only deletes caches whose
+   names differ from the current constants, so with a static name **nothing is ever purged**.
+3. `public/sw.js` is **byte-static across deploys** (nobody edits it) → the browser installs no
+   new SW → the old SW + old cache keep serving.
+
+**Net effect after a new deploy:** a returning user whose SW already cached `/` is served the
+**stale `index.html` forever** (cache-first, no revalidation), which references the **old
+hashed bundle** (also cache-first cached) — so they run a **stale app version** indefinitely,
+mismatched against the freshly-deployed server (new router routes, new asset hashes, new API
+shapes). That stale-shell-vs-fresh-everything mismatch is what manifested as the erratic
+client-side routing (`/domains` self-navigation, `about:blank`) in the #25 browser test, and
+cleared only when the SW was unregistered.
+
+**Crucially, the activation lifecycle (`skipWaiting` + `clientsClaim`) is NOT the bug** — it is
+the correct prompt-handover behaviour. The bug is the **caching STRATEGY on the mutable shell**
+plus the **unversioned cache**. (This is why a cargo-culted "add skipWaiting" fix would miss it
+— it is already there.)
+
+### FIX → MECHANISM mapping (root-cause driven)
+
+| Mechanism | Fix |
+|---|---|
+| cache-first serves a stale shell forever | **Shell → network-FIRST** (fresh when online; cache fallback only offline). THE primary fix. `/assets/*` STAY cache-first (immutable, hashed — correct). `/v1/*` stays network-first. Offline preserved. |
+| unversioned cache never purged | **Bump `v1`→`v2`** so the fixed SW's `activate` purges the poisoned `talyvor-static-v1` once, healing existing stale installs. |
+| an already-open tab keeps the old bundle after the new SW takes over | **App-side loop-safe update→reload** (`src/sw/register.ts`): reload ONCE when a NEW SW controls a PREVIOUSLY-controlled page — guarded against the classic `skipWaiting` reload loop and against reloading on first-ever install. |
+| (not the bug) skipWaiting/clientsClaim, `/assets` cache-first, `/v1` network-first, offline fallback | **UNCHANGED.** |
+
+Because the shell is now network-first, future deploys **self-propagate even without editing
+`sw.js`** (the shell revalidates on every online load) — the hazard cannot recur.
+
+### Test plan (untested-UI layer — same honesty rules as #25)
+
+- **Unit-tested, in CI** (the #25 run wired `npm test` into CI's frontend job): (a) the REAL
+  `public/sw.js` loaded into a mocked ServiceWorker scope — assert a navigate to `/` is served
+  network-first (fresh over stale-cache), `/assets/*` cache-first, `/v1/search` skipped, and
+  `activate` purges the old cache version; (b) the pure update-decision in `register.ts`
+  (reload only on a real update, never first install, never twice → no loop). Red-first.
+- **Browser-demonstrated (Playwright):** build v1 → load → SW installs; build v2 (visible
+  change) → reload → new version takes over, deep-link + sidebar nav still work, no
+  `/domains` hijack, no reload loop.
+- **Fork:** keep `sw.js` hand-written in `public/` (ships as-is; no new build pipeline or
+  module-SW browser caveats) and test the REAL file via a scope harness — over
+  building the SW from a shared TS module. Lower-risk, reversible, zero drift (the test
+  exercises the shipped bytes).
+
+### What Run 5 built + how it was verified
+
+**The fix (`frontend/public/sw.js` + `frontend/src/sw/register.ts`):**
+- **App shell (`/`, `/index.html`) → network-first** (was cache-first). Fresh index.html when
+  online → current bundle; cached shell is the OFFLINE fallback only. `/assets/*` stay
+  cache-first (immutable). This is the root-cause fix: the shell no longer pins a stale app
+  version, so a deploy is immediately visible to returning users.
+- **Cache `v1`→`v2`** so the fixed SW's `activate` purges the poisoned `talyvor-static-v1`
+  once (heals existing stale installs). Because the shell revalidates every online load,
+  future deploys self-propagate without another bump.
+- **`skipWaiting` + `clientsClaim` kept** — the correct prompt handover, never the bug.
+- **App-side loop-safe update→reload** (`registerServiceWorker`): reload the open tab once
+  when a NEW worker takes over an ALREADY-controlled page; never on first install, never
+  twice. `main.tsx` calls it instead of the fire-and-forget block.
+- **Offline preserved** — network-first falls back to the cached shell so the SPA mounts
+  offline; the IndexedDB write-queue / OfflineIndicator path is untouched.
+
+**Unit-tested (vitest, in CI's frontend job — 15 new tests, 0 skipped, red-first):**
+- `src/sw/sw.test.ts` loads the **real** `public/sw.js` into a mocked ServiceWorker scope
+  (no drift — the shipped bytes) and pins the behaviour by the exact discriminator (does the
+  handler consult the network when the shell is cached?): shell **network-first** (fetches
+  fresh over a stale cached `/`), offline **falls back to cache**, `/assets/*` **cache-first**,
+  deep routes **pass through**, real-time **skipped**, `activate` **purges old versions**. 4 of
+  these failed on the cache-first shell and pass on the fix.
+- `src/sw/register.test.ts` pins the reload decision (only on a real update, never first
+  install, never twice → no loop) and the registration wiring.
+
+**Browser-demonstrated (Playwright Chromium, prod `vite preview`, objective signal = the
+bundle hash `index.html` references):**
+- Loaded v1 → the fixed SW installed and **controlled** the page; cache name was
+  `talyvor-api-v2` (version bump live). Bundle: `index-DJVsh331.js`.
+- **Deployed v2** (a visible change → new bundle hash `index-nVnWAC8H.js`), reloaded. The SW
+  served the **fresh v2 shell** — `index.html` referenced the **new** hash and the v2 change
+  was visible — **not** the stale v1 shell. This is the exact inverse of the original bug,
+  end-to-end in a real browser.
+- **Routing intact, no hijack:** deep-link to `/spaces/space-x/pages/page-y` mounted the page
+  route (breadcrumb "Space / Page"), `location.pathname` was the deep URL, **not** `/domains`;
+  a sidebar click navigated client-side to `/templates` (a `window` marker survived → real
+  pushState, no reload). SW controlling throughout; bundle stable (no reload loop).
+
+**Left as unit-tested-not-browser-demonstrated (honest boundary):** the loop-safe auto-reload
+FIRING once in a real browser requires a `sw.js`-CHANGED deploy (byte-different SW → new
+install → `controllerchange`). The browser demo above was an app-only deploy (sw.js
+byte-identical), so no new SW installed and the auto-reload path didn't fire — correctly, and
+the page stayed stable. The reload path's loop-safety is covered by `register.test.ts`
+(reload-once, never-first-install); demonstrating it in a live browser is the one piece that
+would need a second SW-changed deploy, and SW-install timing under Playwright was the flaky
+surface in the #25 run — so it is reported here rather than flaked or faked.
+
+**Fork (BUILD_STATE §0c):** keep `sw.js` hand-written in `public/` and test the REAL file via
+a scope harness, over building the SW from a shared TS module. Lower-risk, reversible, zero
+drift — the test exercises the deployed bytes.
+
 ## 1. What this run changed
 
 A security-first foundation run, in strict order.
