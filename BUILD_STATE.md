@@ -760,6 +760,60 @@ the existing `LockBadge`/`LockBanner`), and a NEW version-history + diff + resto
 Phase-1 endpoints (`GET /versions`, `/versions/{v}`, `/versions/{v}/diff/{other}`, `POST
 /versions/{v}/restore`). None exists today.
 
+## 0g. Run 9 (single-writer Phase 2 — edit-session backend) — phase narrative
+
+**Base `d3d0aa5`** · branch `docs-single-writer-phase2` · started 2026-07-16. Tenancy-sensitive.
+Builds Phase 2 (the edit-session backend — the Option-B policy seam) then Phase 3 (frontend).
+
+### VERIFY-FIRST (confirmed on main)
+
+- **Phase 1 endpoints** live: `GetVersionsInWorkspaces` / `GetVersionInWorkspaces` /
+  `CompareVersionsInWorkspaces` + `RestoreVersion`, routes `GET /versions`, `/versions/{v}`,
+  `/versions/{v}/diff/{other}`, `POST /versions/{v}/restore`. page_versions is append-only + has
+  `workspace_id`.
+- **The guard IS wired** (I'd have to look twice — it's a separate line, not the builder chain):
+  `main.go:282 pageStore = pageStore.WithGuard(lockStore)` and `main.go:396
+  collabHandler...WithGuard(lockStore)`. `store.Update` consults `s.guard.CanEdit(ctx, id,
+  memberID, isAdmin)`; `!ok → ErrLocked: <reason>`. `pagelock.CanEdit` composes approval
+  (`doc_status='approved'`) + the manual soft-lock (`pages.locked/_by`) + admin bypass.
+- **collab is a real-time multi-writer OT engine** (WebSocket + operational transform) — proto-
+  Option-B. Its `LockGuard.CanEdit` has the IDENTICAL signature to `page.editGuard`.
+- **Migration high-water 0015** → Phase 2 is **0016** (verified, no collision).
+
+### Phase 2 — `internal/editsession` (migration 0016) — store DONE (tenancy proof pushed)
+
+`page_edit_sessions(page_id PK → pages CASCADE, workspace_id NOT NULL, holder, acquired_at,
+last_heartbeat)`. LIVE iff `last_heartbeat > now() - TTL` (DefaultTTL 30s, `WithTTL` for tests).
+Ops, ALL workspace-scoped via `pageWorkspace` (SELECT the page's ws only if `= ANY(wsIDs)`, else
+`ErrNotFound`): `Acquire`, `Heartbeat` (holder-only), `Release` (holder-only), `Takeover` (claims
+only expired/absent — a LIVE session is NEVER stolen, enforced by the UPSERT `WHERE holder=me OR
+last_heartbeat <= now()-TTL`), `Get`. The ONE policy method is `MayWrite(pageID, wsIDs, member)`;
+`decide()` is the pure rule (`no session | expired | mine → allow; live-held-by-other → "<holder>
+is editing"`), shared with the `CanEdit` guard adapter (page-scoped + admin bypass).
+
+**COMPOSE, don't replace**: `editsession.Composite{Guards}` ANDs guards (first denial wins). Wiring
+(next commit) sets the store guard to `Compose(lockStore, sessionStore)` = approvalOK AND
+manualLockOK AND editSessionOK. pagelock/approval/version-model byte-behavior-unchanged: with no
+active session, `editsession.CanEdit` allows → the composite equals pagelock's result.
+
+**collab is intentionally NOT gated by the edit-session** — it is the multi-writer path; single-
+writer governs the REST save path (store.Update). Documented boundary, not a tenancy hole (tenancy
+is enforced regardless).
+
+**Tenancy — RED-first, MUTATION-PROVEN**: cross-tenant Get/Acquire/Takeover/Heartbeat/Release all
+`ErrNotFound`. Defeating `pageWorkspace` (WHERE … `OR true`) leaks all five (Get returns the
+session, Acquire/Takeover reach it); the gate restores `ErrNotFound`. Behavioral: lifecycle;
+non-holder `MayWrite`/`CanEdit` rejected; takeover-only-on-expiry; live-not-stealable; heartbeat/
+release holder-only. `-race` clean.
+
+### THE OPTION-B SEAM (unchanged framing, now concrete)
+
+Option B swaps ONLY `editsession.MayWrite` (single holder → many concurrent writers + presence +
+CRDT/ProseMirror merge). The save-commit seam (`Store.Update`), the append-only version history,
+the approval gate, and the manual pagelock all stay. B appends its merged snapshots as versions
+exactly like a single-writer save. `collab` (the existing OT engine) is where B's transport already
+lives.
+
 ## 1. What this run changed
 
 A security-first foundation run, in strict order.
