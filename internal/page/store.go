@@ -345,8 +345,7 @@ var updatableFields = map[string]struct{}{
 // Update applies the supplied field map and returns the materialised
 // row. When `content` is patched we ALSO bump content_text (extracted
 // from the new ProseMirror JSON) and append a new entry to
-// page_versions. The oldest versions beyond MaxVersionsPerPage get
-// pruned in the same call.
+// page_versions. History is append-only — no version is ever pruned.
 func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (*model.Page, error) {
 	if s.pool == nil {
 		return nil, errors.New("page: store has no pool")
