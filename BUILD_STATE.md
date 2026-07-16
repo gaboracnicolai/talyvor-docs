@@ -557,6 +557,50 @@ throughput throttle, not a security gate, so a misconfig must not wall off all i
 - `IndexAllPages` (unwired bulk backfill) is not throttled; wire + cap it if/when it gets a
   route.
 
+## 0e. Run 7 (per-workspace Lens JWT metering) — phase narrative
+
+**Base `57a1f96`** · branch `docs-perworkspace-jwt-metering` · started 2026-07-16. Watched run.
+Scope: the credential seam only. Stop sending the shared global key on the Lens DATA path;
+send a PER-WORKSPACE JWT whose claim = the request's workspace. The Lens side is already
+merged + proven (`872f676`): a per-workspace JWT gets its own rate-limit bucket AND
+attributes spend to its real workspace; a forged workspace claim is rejected. This is the
+Docs half — it closes the "label ≠ credential" gap Run 6 §0d and Run 3 §0 both flagged.
+
+### VERIFY-FIRST recon (read, names exact, changed nothing)
+
+**Mint contract** (proven Lens-side): `POST {LensURL}/v1/auth/token`, `Authorization: Bearer
+<admin key>`, body `{"workspace_id","ttl_hours"}` → `201 {"token","expires_at"}`. Referenced
+nowhere in Docs before this run. **Docs never parses JWTs** (gatewayauth trusts the edge
+gateway to validate them) and go.mod has no JWT lib — so the token is an OPAQUE bearer string
+on the Docs side; the provider carries it and tracks its expiry, nothing more.
+
+**Every Lens DATA-path call and where the credential injects** (all bore the global key):
+
+| Call | Function (file:line) | URL | Bearer today | Workspace today | wsID in scope? |
+|---|---|---|---|---|---|
+| AI completions (Anthropic) | `lensintegration.Client.post` via `Complete*` (`client.go:104-111`) | `/v1/proxy/anthropic/v1/messages` | `Bearer <global key>` (`:109`) | `X-Talyvor-Workspace` header (`:111`) | **yes** (threaded `ai.Engine.run`→`CompleteWithFeature`) |
+| AI completions (OpenAI) | same `post` via `CompleteOpenAI` (`client.go:92`) | `/v1/proxy/openai/v1/chat/completions` | same | same | **yes** |
+| Embed — index | `SemanticSearch.embed` via `IndexPage` (`semantic.go:239-245`, called `:117`) | `/v1/proxy/openai/v1/embeddings` | `Bearer <global key>` (`:244`) | **none** — `IndexPage(_/*ws*/)` and `embed(_)` both drop it | **yes** at the `IndexPage` seam (throttle threads `e.ws`), currently DROPPED |
+| Embed — search | `SemanticSearch.embed` via `Search` (`semantic.go:239-245`, called `:155`) | same embeddings path | `Bearer <global key>` | **none** | **yes** (`Search`'s `workspaceID` param), not passed to `embed` |
+
+The recon's finding, restated: because Lens meters per **key** (the JWT), the
+`X-Talyvor-Workspace` header the completions path sends is a LABEL Lens ignores — so all three
+paths collapse to the global key's bucket. The fix therefore must convert **all three**, not
+just the two embed paths, or completions metering stays broken (and the guard "global key must
+never be the data-path bearer after this" would be violated on the completions path).
+
+### Property 1 — per-workspace JWT provider (`internal/lenscreds`) — DONE
+
+`Provider.TokenFor(ctx, workspaceID)`: returns a cached per-workspace bearer, minting via the
+contract above with the admin key when absent or within `skew` of expiry. Per-workspace cache
+with per-entry locking — concurrent callers for the same cold workspace coalesce onto ONE
+mint (safe under the bounded worker pool); different workspaces mint concurrently (map lock
+never held across the HTTP call). Admin key used ONLY to mint; on mint failure returns an
+error, NEVER the admin key. RED→GREEN + mutation-proven: disabling the cache-hit path makes
+cache/refresh/isolation/coalesce mint 2×/2×/3/20× — restored → 1×. `-race` clean.
+
+### Deferred / forks — see §2/§3 (filled in as the run completes)
+
 ## 1. What this run changed
 
 A security-first foundation run, in strict order.
