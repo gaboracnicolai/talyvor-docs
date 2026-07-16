@@ -621,6 +621,19 @@ RED→GREEN: embed carried `Bearer GLOBAL-ADMIN-KEY` → now carries a per-works
 to the request's workspace. Mutation-proven: flipping the search branch to degrade-instead-of-
 fail-closed breaks both fail-closed tests (handler 200 + full-text; Search nil error).
 
+### Property 3 — the decisive two-tenant proof — DONE
+
+`TestTwoTenants_DecisiveEndToEndIsolation`: one `SemanticSearch` (one shared provider) drives
+wsA index → wsA search → wsB index → wsB search against a fake Lens that mints per-workspace
+JWTs and decodes the bearer's `workspace_id` claim on every data-path call. Proves: the four
+data-path calls decode to `[wsA, wsA, wsB, wsB]` (each attributed to the workspace that made
+it, no cross-tenant leak); the mint endpoint was called with the admin key, exactly once per
+workspace (the tenant's search reused the token its index minted — cache held end-to-end); and
+the raw global key never appeared on a data-path call. Mutation-proven decisive: reintroducing
+the original global-key bug (`Bearer <global>` on embed) fails this test and both Property-2
+tests (claims decode to `""`). With the merged Lens-side proof (per-ws JWT → isolated
+rate-limit bucket + isolated COGS), the chain is complete.
+
 ### Deferred / forks — see §2/§3 (filled in as the run completes)
 
 ## 1. What this run changed

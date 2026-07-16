@@ -231,3 +231,78 @@ func TestIndexPage_BestEffortOnMintFailure(t *testing.T) {
 		t.Fatalf("expectations: %v", err)
 	}
 }
+
+// PROPERTY 3 — THE DECISIVE PROOF. Two tenants driven end-to-end through one SemanticSearch
+// (one shared provider) against a fake Lens that mints per-workspace JWTs and decodes the
+// bearer's workspace_id claim on every data-path call. Sequence: wsA index, wsA search, wsB
+// index, wsB search. It proves, together with the merged Lens-side proof (per-ws JWT →
+// isolated rate-limit bucket + isolated COGS), the whole chain:
+//   - each data-path call carries a JWT claiming the workspace that made it (wsA↔wsA, wsB↔wsB);
+//   - the mint endpoint was called with the ADMIN key, once per workspace (cached across the
+//     tenant's index + search);
+//   - NO data-path call ever carries the raw global admin key.
+func TestTwoTenants_DecisiveEndToEndIsolation(t *testing.T) {
+	f := newJWTFakeLens(t)
+	defer f.Close()
+	s, pool := meteredSemantic(t, f.URL)
+
+	// pgxmock enforces expectation order — declare them in the real call sequence: wsA index
+	// (upsert), wsA search (pgvector query scoped to wsA), then the same pair for wsB.
+	pool.ExpectExec(`INSERT INTO page_embeddings`).WithArgs("pgA", pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	pool.ExpectQuery(`page_embeddings.*<=>`).WithArgs(pgxmock.AnyArg(), "wsA", 10).
+		WillReturnRows(pgxmock.NewRows([]string{"page_id", "similarity"}).AddRow("pgA", float64(0.9)))
+	pool.ExpectExec(`INSERT INTO page_embeddings`).WithArgs("pgB", pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	pool.ExpectQuery(`page_embeddings.*<=>`).WithArgs(pgxmock.AnyArg(), "wsB", 10).
+		WillReturnRows(pgxmock.NewRows([]string{"page_id", "similarity"}).AddRow("pgB", float64(0.9)))
+
+	ctx := context.Background()
+	if err := s.IndexPage(ctx, "pgA", "wsA", "alpha body"); err != nil {
+		t.Fatalf("wsA index: %v", err)
+	}
+	if _, err := s.Search(ctx, "wsA", "alpha", 10); err != nil {
+		t.Fatalf("wsA search: %v", err)
+	}
+	if err := s.IndexPage(ctx, "pgB", "wsB", "beta body"); err != nil {
+		t.Fatalf("wsB index: %v", err)
+	}
+	if _, err := s.Search(ctx, "wsB", "beta", 10); err != nil {
+		t.Fatalf("wsB search: %v", err)
+	}
+
+	mintWS, mintAuth, dataAuth, dataClaims := f.snapshot()
+
+	// Four data-path calls, each attributed (by decoded JWT claim) to the workspace that made
+	// it — in order: wsA index, wsA search, wsB index, wsB search.
+	want := []string{"wsA", "wsA", "wsB", "wsB"}
+	if len(dataClaims) != len(want) {
+		t.Fatalf("got %d data-path calls %v, want %d %v", len(dataClaims), dataClaims, len(want), want)
+	}
+	for i := range want {
+		if dataClaims[i] != want[i] {
+			t.Fatalf("data-path call %d attributed to %q, want %q — cross-tenant leak; full=%v", i, dataClaims[i], want[i], dataClaims)
+		}
+	}
+	// The raw global admin key NEVER rode a data-path request.
+	for _, a := range dataAuth {
+		if a == "Bearer GLOBAL-ADMIN-KEY" {
+			t.Fatalf("the global admin key appeared on a data-path call: %v", dataAuth)
+		}
+	}
+	// The mint endpoint was called with the ADMIN key, once per workspace (the tenant's search
+	// reused the token its index minted — the cache held end-to-end).
+	for _, a := range mintAuth {
+		if a != "Bearer GLOBAL-ADMIN-KEY" {
+			t.Fatalf("mint was called with %q, want the admin key 'Bearer GLOBAL-ADMIN-KEY'", a)
+		}
+	}
+	mintCount := map[string]int{}
+	for _, w := range mintWS {
+		mintCount[w]++
+	}
+	if mintCount["wsA"] != 1 || mintCount["wsB"] != 1 || len(mintCount) != 2 {
+		t.Fatalf("mint counts = %v, want exactly one mint per workspace (cached across index+search)", mintCount)
+	}
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Fatalf("expectations: %v", err)
+	}
+}
