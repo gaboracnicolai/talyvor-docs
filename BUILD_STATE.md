@@ -670,6 +670,96 @@ now-wrong expectation, not a reason to leave a gap.
   out of scope. This closes the Docs side of [[docs-llm-cost-flow-unmetered]] /
   [[lens-perworkspace-metering]].
 
+## 0f. Run 8 (single-writer + versioning, "Option A") — phase narrative
+
+**Base `57858d1`** · branch `docs-single-writer-versioning` · started 2026-07-16. Tenancy-
+sensitive (NOT money). Build the single-writer + versioning collaboration model so a future
+real-time multi-user runtime ("Option B" — server-side ProseMirror/CRDT) is a clean UPGRADE,
+not a rewrite.
+
+### VERIFY-FIRST — the substrate already exists (code is authority over the brief)
+
+The brief reads as build-from-scratch, but versioning AND locking substrate are already present,
+so this run HARDENS/COMPLETES them rather than duplicating:
+- **Save seam**: `page.Store.Update` (store.go). On a content change it appends a version
+  (`SELECT MAX(version)+1` → `INSERT page_versions`) right after the `UPDATE pages` commits —
+  the committed-save seam. `Create` writes v1. The `pageindex` throttle wraps only the async
+  embed hook, which fires AFTER the synchronous version write; versioning is throttle-independent.
+- **Tenancy**: pages bind to a workspace via `pages.workspace_id`; handlers derive the authorized
+  set from `authz.WorkspaceIDs(ctx)` (verified membership). By-id ops scope through
+  `assertInWorkspaces(id, wsIDs)` → `ErrNotFound` (SEC-4 Layer 2). Version routes are DOUBLY
+  guarded: `permission.Enforcer.Require(...)` (resolves page→workspace→access) + the store gate.
+- **Permission**: list = `AccessView`, restore = `AccessEdit`. "Only an editor may restore" holds.
+- **Existing versioning**: `page_versions` (0002) — but a rolling-window PRUNE truncated history;
+  no `workspace_id` column; no get-one/diff endpoints. **Existing locking**: `internal/pagelock`
+  is a MANUAL soft-lock (`Lock`/`Unlock`/`CanEdit`, 0010) with NO heartbeat/expiry/takeover.
+- **Migration high-water: 0014** → this run adds **0015**.
+
+### Phase 1 — VERSIONING (DONE, red-first, migration 0015)
+
+- **Append-only**: removed the `MaxVersionsPerPage=100` rolling-window prune in `Update`. History
+  is now never truncated — every committed save's snapshot is a permanent restore point. RED→GREEN
+  real-PG proof (`TestVersions_AppendOnly_NeverTruncated_RealPG`: 101 saves → 101 versions, v1
+  survives; was 100 with v1 pruned). Storage tradeoff noted (§3): a NON-destructive retention/
+  archival policy is a future option, but the destructive prune is gone by design.
+- **`workspace_id` on `page_versions`** (migration 0015: add column, backfill from `pages`, `SET
+  NOT NULL`, index `(workspace_id, page_id, version)`). Versions are now self-describing about
+  their tenant. Written on every insert (Create v1 + Update bump; restore rides Update).
+- **Get-one + diff endpoints**: `GET /{pageID}/versions/{version}` and
+  `GET /{pageID}/versions/{version}/diff/{other}` (both `AccessView`), backed by
+  `GetVersionInWorkspaces` / `CompareVersionsInWorkspaces` (gate via `assertInWorkspaces`).
+- **TENANCY (load-bearing) — red-first proven**: cross-tenant get-one/diff rejected. Store-level
+  mutation proof (`TestVersions_GetAndCompare_CrossTenant_RealPG`: neuter `assertInWorkspaces` →
+  cross-tenant reads leak the snapshot; restore → `ErrNotFound`). HTTP-level: the SEC-4 chain test
+  `TestSEC4_CrossTenant_ByIDRoutes` now also drives `/versions/1` and `/versions/1/diff/2` →
+  cross-tenant 404. Owner-success end-to-end via the real /v1 chain
+  (`TestVersions_OwnerCanGetAndDiff_RealPG`). Restore was already non-destructive (appends current
+  state as a new version) — append-only makes it fully so (nothing it wrote can later be pruned).
+- **store.go touch**: minimal — removed the prune DELETE, added `workspace_id` to the two version
+  INSERTs, added `GetVersion`/`GetVersionInWorkspaces`/`CompareVersionsInWorkspaces`. The throttle's
+  never-drop and the save path are otherwise untouched.
+
+### How Option B slots in (the seam — Phase 1 foundation, Phase 2 will add the policy seam)
+
+Phase 1 gives B the substrate it appends to: a single committed-save seam (`Store.Update`) and a
+**linear, append-only, workspace-scoped version history**. Option B (real-time multi-writer) keeps
+BOTH — it does not touch `store.go`'s save path or the version schema. B adds a transport
+(WebSocket) + a merge authority (CRDT/ProseMirror server) and, when a merged document commits,
+appends the merged snapshot as the next version exactly like a single-writer save does. Phase 2
+will add the one policy seam B swaps: the "who may write right now" edit-session (single holder →
+many concurrent writers + presence). No single-writer assumption is baked into the version schema.
+
+### STOPPED after Phase 1 (a complete checkpoint) — Phase 2/3 deferred, with design
+
+Verify-first surfaced that Phase 2's substrate is NOT greenfield: `internal/pagelock` already
+occupies the "who may edit" seam (the store's `editGuard` = `pagelock.CanEdit`, composing an
+approval gate + a MANUAL soft-lock). Building the automatic heartbeat/takeover edit-session on
+top of that — plus its migration, tenancy red-first proofs, guard composition, and frontend — is
+a full phase. Per the brief's "STOP after a COMPLETE phase if too large; don't leave a phase
+half-done," this run ships Phase 1 complete and defers 2/3 with a concrete plan:
+
+**Phase 2 — single-writer edit session (`internal/editsession`), the Option-B policy seam:**
+- Migration 0016: `page_edit_sessions(page_id PK → pages ON DELETE CASCADE, workspace_id NOT NULL,
+  holder NOT NULL, acquired_at, last_heartbeat)`. Session is LIVE iff `last_heartbeat > now()-TTL`.
+- Ops (all scoped by the SERVER-authorized `workspace_id`): `Acquire`, `Heartbeat`, `Release`,
+  `Takeover` (only if current session expired/absent), `Get` (observe), and the policy method
+  `MayWrite(pageID, workspaceID, memberID)` — the ONE place the ephemeral single-writer decision
+  lives.
+- **The reconciliation decision (why it's a phase, not a patch):** the manual `pagelock` and the
+  automatic edit-session are DIFFERENT mechanisms and can COEXIST cleanly — compose the store guard
+  as `approvalOK AND manualLockOK AND editSessionOK`. The edit-session owns ONLY the ephemeral
+  single-writer decision; Option B swaps THAT one policy (single→many + presence + CRDT merge)
+  while approval + manual lock + the append-only version model stay put. `store.go`'s save path is
+  untouched; B appends merged snapshots as versions exactly like a single-writer save. RECOMMEND
+  this compose-don't-replace path (keeps `LockBadge`/`pagelock` + approval intact).
+- Red-first: no cross-tenant acquire/observe (scope every op by `workspace_id`); a NON-holder save
+  is rejected "locked by <user>"; takeover after heartbeat expiry works.
+
+**Phase 3 — frontend:** editing banner ("<user> is editing") + read-only for non-holders (extend
+the existing `LockBadge`/`LockBanner`), and a NEW version-history + diff + restore UI over the
+Phase-1 endpoints (`GET /versions`, `/versions/{v}`, `/versions/{v}/diff/{other}`, `POST
+/versions/{v}/restore`). None exists today.
+
 ## 1. What this run changed
 
 A security-first foundation run, in strict order.

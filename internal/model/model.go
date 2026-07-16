@@ -100,16 +100,20 @@ type Block struct {
 }
 
 // PageVersion captures the state of a page each time its content
-// changes. Capped at 100 per page (oldest pruned) so the history
-// stays meaningful but storage doesn't run away on chatty pages.
+// changes. History is APPEND-ONLY — every committed save's snapshot is
+// a restore point and is never pruned/truncated (the single-writer +
+// versioning model relies on a complete linear history). WorkspaceID is
+// the version's own tenant (denormalized from the page) so a row is
+// self-describing and reads can scope directly on the versions table.
 type PageVersion struct {
-	ID        string    `json:"id"         db:"id"`
-	PageID    string    `json:"page_id"    db:"page_id"`
-	Version   int       `json:"version"    db:"version"`
-	Title     string    `json:"title"      db:"title"`
-	Content   string    `json:"content"    db:"content"`
-	CreatedBy string    `json:"created_by" db:"created_by"`
-	CreatedAt time.Time `json:"created_at" db:"created_at"`
+	ID          string    `json:"id"           db:"id"`
+	PageID      string    `json:"page_id"      db:"page_id"`
+	WorkspaceID string    `json:"workspace_id" db:"workspace_id"`
+	Version     int       `json:"version"      db:"version"`
+	Title       string    `json:"title"        db:"title"`
+	Content     string    `json:"content"      db:"content"`
+	CreatedBy   string    `json:"created_by"   db:"created_by"`
+	CreatedAt   time.Time `json:"created_at"   db:"created_at"`
 }
 
 // Comment is a page-level or inline (BlockID set) discussion thread.

@@ -25,11 +25,6 @@ import (
 // build a deeply-recursive tree that breaks rendering.
 const MaxDepth = 5
 
-// MaxVersionsPerPage is the rolling-window size for the page_versions
-// table. Older revisions get pruned in Update so the history stays
-// useful without growing without bound on chatty pages.
-const MaxVersionsPerPage = 100
-
 type pgxDB interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -281,9 +276,9 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
 	// re-attach the initial revision, but in practice a missing v1
 	// on a brand-new page is invisible to users.
 	_, _ = s.pool.Exec(ctx,
-		`INSERT INTO page_versions (page_id, version, title, content, created_by)
-        VALUES ($1, $2, $3, $4, $5)`,
-		out.ID, 1, out.Title, out.Content, p.CreatedBy,
+		`INSERT INTO page_versions (page_id, workspace_id, version, title, content, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6)`,
+		out.ID, out.WorkspaceID, 1, out.Title, out.Content, p.CreatedBy,
 	)
 	return out, nil
 }
@@ -350,8 +345,7 @@ var updatableFields = map[string]struct{}{
 // Update applies the supplied field map and returns the materialised
 // row. When `content` is patched we ALSO bump content_text (extracted
 // from the new ProseMirror JSON) and append a new entry to
-// page_versions. The oldest versions beyond MaxVersionsPerPage get
-// pruned in the same call.
+// page_versions. History is append-only — no version is ever pruned.
 func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (*model.Page, error) {
 	if s.pool == nil {
 		return nil, errors.New("page: store has no pool")
@@ -435,10 +429,11 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	}
 
 	if contentChanged {
-		// Bump version: SELECT MAX(version) + INSERT new row + PRUNE
-		// to MaxVersionsPerPage. Three statements, no transaction —
-		// a half-applied snapshot just means one fewer historical
-		// row, not a corrupt page.
+		// Bump version: SELECT MAX(version) + INSERT new row. Version history is APPEND-ONLY —
+		// every committed save's snapshot is a restore point and must never be truncated (the
+		// single-writer + versioning model, and Option B later, both rely on a complete linear
+		// history). Two statements, no transaction — a half-applied snapshot just means one
+		// fewer historical row, not a corrupt page.
 		var nextVer int
 		_ = s.pool.QueryRow(ctx,
 			`SELECT COALESCE(MAX(version), 0) FROM page_versions WHERE page_id = $1`,
@@ -448,15 +443,9 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 
 		updatedBy, _ := updates["updated_by"].(string)
 		_, _ = s.pool.Exec(ctx,
-			`INSERT INTO page_versions (page_id, version, title, content, created_by)
-            VALUES ($1, $2, $3, $4, $5)`,
-			id, nextVer, existing.Title, out.Content, updatedBy,
-		)
-		_, _ = s.pool.Exec(ctx,
-			`DELETE FROM page_versions WHERE page_id = $1
-            AND version <= (SELECT COALESCE(MAX(version), 0) FROM page_versions
-                            WHERE page_id = $1) - $2`,
-			id, MaxVersionsPerPage,
+			`INSERT INTO page_versions (page_id, workspace_id, version, title, content, created_by)
+            VALUES ($1, $2, $3, $4, $5, $6)`,
+			id, out.WorkspaceID, nextVer, existing.Title, out.Content, updatedBy,
 		)
 		// Reconcile page_links → Track issue embeds. Best-effort:
 		// a sync failure shouldn't fail the page save. The next
@@ -852,7 +841,7 @@ func (s *Store) GetVersions(ctx context.Context, pageID string) ([]model.PageVer
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, page_id, version, title, content, created_by, created_at
+		`SELECT id, page_id, workspace_id, version, title, content, created_by, created_at
         FROM page_versions WHERE page_id = $1 ORDER BY version DESC`,
 		pageID,
 	)
@@ -863,7 +852,7 @@ func (s *Store) GetVersions(ctx context.Context, pageID string) ([]model.PageVer
 	var out []model.PageVersion
 	for rows.Next() {
 		var v model.PageVersion
-		if err := rows.Scan(&v.ID, &v.PageID, &v.Version, &v.Title, &v.Content, &v.CreatedBy, &v.CreatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.PageID, &v.WorkspaceID, &v.Version, &v.Title, &v.Content, &v.CreatedBy, &v.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -893,6 +882,54 @@ func (s *Store) RestoreVersion(ctx context.Context, pageID string, version int) 
 		"content":    content,
 		"updated_by": "restore",
 	})
+}
+
+// GetVersion returns a single version's snapshot. Unscoped primitive — callers must
+// authorize the page first (GetVersionInWorkspaces does).
+func (s *Store) GetVersion(ctx context.Context, pageID string, version int) (*model.PageVersion, error) {
+	if s.pool == nil {
+		return nil, errors.New("page: store has no pool")
+	}
+	var v model.PageVersion
+	err := s.pool.QueryRow(ctx,
+		`SELECT id, page_id, workspace_id, version, title, content, created_by, created_at
+        FROM page_versions WHERE page_id = $1 AND version = $2`,
+		pageID, version,
+	).Scan(&v.ID, &v.PageID, &v.WorkspaceID, &v.Version, &v.Title, &v.Content, &v.CreatedBy, &v.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("page: get version: %w", err)
+	}
+	return &v, nil
+}
+
+// GetVersionInWorkspaces returns one version only if the page lives in one of the caller's
+// workspaces.
+func (s *Store) GetVersionInWorkspaces(ctx context.Context, pageID string, version int, wsIDs []string) (*model.PageVersion, error) {
+	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
+		return nil, err
+	}
+	return s.GetVersion(ctx, pageID, version)
+}
+
+// CompareVersionsInWorkspaces returns two version snapshots (from, to) for diffing, only if
+// the page lives in one of the caller's workspaces. The tenancy check is done ONCE for the
+// page — both versions belong to the same page, so authorizing the page authorizes both.
+func (s *Store) CompareVersionsInWorkspaces(ctx context.Context, pageID string, from, to int, wsIDs []string) (*model.PageVersion, *model.PageVersion, error) {
+	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
+		return nil, nil, err
+	}
+	fromV, err := s.GetVersion(ctx, pageID, from)
+	if err != nil {
+		return nil, nil, err
+	}
+	toV, err := s.GetVersion(ctx, pageID, to)
+	if err != nil {
+		return nil, nil, err
+	}
+	return fromV, toV, nil
 }
 
 // ─── Track integration helpers ────────────────────────────
