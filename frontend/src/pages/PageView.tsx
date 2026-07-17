@@ -13,7 +13,10 @@ import { DocStatusBadge } from "~/components/DocStatusBadge";
 import { ApprovalPanel } from "~/components/ApprovalPanel";
 import { LockBadge } from "~/components/LockBadge";
 import { LockBanner } from "~/components/LockBanner";
+import { EditingBanner } from "~/components/EditingBanner";
+import { VersionHistory } from "~/components/VersionHistory";
 import { usePageLock } from "~/hooks/usePageLock";
+import { useEditSession } from "~/hooks/useEditSession";
 import { CommentStatsBar } from "~/components/CommentStatsBar";
 import { CommentsPanel } from "~/components/CommentsPanel";
 import { ChangelogView } from "~/components/changelog/ChangelogView";
@@ -123,6 +126,16 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
   const lockHook = usePageLock(space.id, pageID);
   const lockedByOther =
     !!lockHook.state?.locked && !lockHook.lockedByMe;
+
+  // Single-writer edit session (Option A). Automatic sibling of the manual lock: it acquires the
+  // writer slot when an EDITABLE page opens, heartbeats while open, and releases on unmount. A
+  // non-holder falls to read-only (folded into the Editor's readOnly below) and sees the banner.
+  // autoAcquire is gated so approved / prop-read-only pages never grab the slot — composes WITH
+  // the manual lock + approval, never replaces them.
+  const editSession = useEditSession(space.id, pageID, {
+    autoAcquire: !readOnly && !!page && page.doc_status !== "approved",
+  });
+  const heldByOther = editSession.heldByOther;
 
   const onSaveBody = useCallback(
     (content: string, contentText: string) => {
@@ -304,12 +317,20 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
             onUnlock={() => lockHook.unlock.mutate({})}
           />
 
+          <EditingBanner
+            flags={editSession}
+            onTakeover={() => editSession.takeover.mutate()}
+            takingOver={editSession.takeover.isPending}
+          />
+
           {/* editor */}
           <Editor
             pageId={page.id}
             workspaceId={page.workspace_id}
             initialContent={page.content}
-            readOnly={readOnly || page.doc_status === "approved" || lockedByOther}
+            readOnly={
+              readOnly || page.doc_status === "approved" || lockedByOther || heldByOther
+            }
             onSave={onSaveBody}
             onPresence={handlePresence}
           />
@@ -400,6 +421,12 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
 
           <PanelSection title="Comments">
             <CommentsPanel spaceID={space.id} pageID={page.id} />
+          </PanelSection>
+
+          <PanelSection title="Version history">
+            {/* VersionHistory invalidates the ["page", space, page] query on restore itself, so
+                the page refetches without a host callback. */}
+            <VersionHistory spaceID={space.id} pageID={page.id} />
           </PanelSection>
 
           <LinkedIssuesSection pageID={page.id} workspaceID={page.workspace_id} />

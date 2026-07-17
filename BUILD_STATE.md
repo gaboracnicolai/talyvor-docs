@@ -850,6 +850,52 @@ the approval gate, and the manual pagelock all stay. B appends its merged snapsh
 exactly like a single-writer save. `collab` (the existing OT engine) is where B's transport already
 lives.
 
+## 0h. Run 10 (single-writer Phase 3 — PageView edit-session wiring) — phase narrative
+
+**Base `4dcf74c`** · branch `docs-pageview-editsession-wiring` · started 2026-07-16. Frontend-only
+(no backend, no migration, no money). Wires the deferred Phase-3 integration into the live editor.
+
+### THE AUTH QUESTION — actual answer: **(b) NO dev-auth path** (browser verification not possible here)
+
+The SPA sends `Authorization: Bearer <docs_api_key from localStorage>` (`src/api/client.ts:103,110`).
+The backend `/v1` is wrapped in `gatewayauth.Middleware(cfg.GatewayAuthSecret, …)` (`cmd/docs/main.go:483`),
+which REQUIRES the `X-Gateway-Auth` transit proof + gateway-injected `X-User-Email` — and `config.go`
+fail-closes if `GATEWAY_AUTH_SECRET` is unset/short (`:135`). There is NO dev-auth / mock-gateway /
+header-injection mode: `vite.config.ts` only proxies `/v1 → :4000` (no header injection); grep found
+no `DEV_AUTH`/mock/bypass in the SPA or in `gatewayauth`. So the SPA's authenticated edit-session
+calls (acquire/heartbeat — they need the server-authorized workspace derived from the gateway-verified
+identity) **401 without the edge gateway in front.** Per the guard, the edge cluster was NOT stood up.
+→ Browser verification is genuinely impossible in this environment; the jsdom harness is the honest
+ceiling + the deliverable.
+
+### What was wired (PageView.tsx, mirroring the working lock wiring — compose, don't replace)
+
+- `useEditSession(space.id, pageID, { autoAcquire: !readOnly && !!page && doc_status!=='approved' })` —
+  the lifecycle now lives in the hook via a new `autoAcquire` option (acquire on mount / release on
+  unmount; heartbeat while held was already there). Gated so approved / prop-read-only pages never
+  grab the slot.
+- `<EditingBanner>` rendered beside `<LockBanner>`; `heldByOther` folded into the Editor's `readOnly`
+  (`readOnly || approved || lockedByOther || heldByOther`) — a non-holder editor is read-only.
+- `<VersionHistory>` mounted as a right-panel section (self-invalidates the page query on restore).
+- The manual pagelock + approval derivations are UNCHANGED — the edit-session is ANDed in, additive.
+
+### The jsdom automated proof (load-bearing, no browser) — all six behaviors
+
+- **`useEditSession.lifecycle.test.tsx`** (renderHook + mocked API): autoAcquire → acquire on mount +
+  release on unmount; observer (no autoAcquire) never acquires; `takeover.mutate()` hits the endpoint;
+  heartbeat fires on the interval (×2) while held-by-me; NO heartbeat when held-by-other.
+- **`PageView.editsession.test.tsx`** (renders the REAL PageViewPage, stubbed Editor exposes `readOnly`):
+  acquires on mount for an editable page (editor not read-only); **editor READ-ONLY + "<holder> is
+  editing" banner** when held-by-other; **manual pagelock UNAFFECTED** (a foreign manual lock still
+  forces read-only with no edit-session, and no editing-banner); version-history panel mounts.
+- Frontend: typecheck + **68 vitest (0 skips, +9)** + build all green. Backend untouched (guard).
+
+### Browser pass — DEFERRED (outcome (b)), not faked
+
+Full browser verification requires the edge gateway fronting the SPA (so authenticated edit-session
+calls don't 401) — deferred to a dedicated pass when edge is up. The jsdom harness is the verification
+for this run. No browser-verified claim is made.
+
 ## 1. What this run changed
 
 A security-first foundation run, in strict order.
