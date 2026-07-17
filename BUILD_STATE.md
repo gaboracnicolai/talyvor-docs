@@ -896,6 +896,43 @@ Full browser verification requires the edge gateway fronting the SPA (so authent
 calls don't 401) — deferred to a dedicated pass when edge is up. The jsdom harness is the verification
 for this run. No browser-verified claim is made.
 
+## 0i. Run 11 (IDOR/tenancy sweep — by-id write audit) — phase narrative
+
+**Base `72b3013`** · branch `docs-idor-sweep` · started 2026-07-16. WATCHED authz/tenancy. Read-only
+audit of EVERY by-id / parent-keyed write for the `{pageID}`-vs-`{id}` cross-tenant class Docs had
+once (and closed). **Result: CLEAN BILL — no live hole, no reachable defense-in-depth gap.** The
+branch lands only the tsbuildinfo hygiene fix.
+
+### Every writer is gated (the four correct patterns in use)
+
+1. **`*InWorkspaces` + `assertInWorkspaces`/`assertInPage`** (parent-join `workspace_id = ANY($wsIDs)`,
+   ErrNotFound→404): page Update/Delete/RecordView/Verify; comment Reply/Resolve/Unresolve/Delete
+   (`assertInPage` ties `{id}`→`{pageID}`→ws — the exact class fix); page_versions get-one/diff.
+2. **Inline `AND workspace_id = ANY($n)`** (or parent-join subquery): approval Publish/SetStatus,
+   changelog, templatelib, customdomain, permission, database Update; database_rows via
+   `database_id IN (SELECT … WHERE workspace_id = ANY)`; sharing Revoke via `AND page_id = $2`.
+3. **Route enforcer on `{pageID}`/`{blockID}`** (`pageEnf`/`blockEnf.Require` → GetByIDInWorkspaces →
+   cross-tenant 404, BEFORE the primitive runs): comment Create, approval Request, pagelock Lock/Unlock,
+   block Update/Delete/Create, pagelink Create/Delete, sharing Create/List/Revoke. editsession
+   Acquire/Heartbeat/Release/Takeover scope on `authz.WorkspaceIDs` via `pageWorkspace` (mutation-proven).
+4. **Server-side only** (no client route reaches it): page.UpdateAICost (Track cost syncer, enumerates
+   its own workspace's pages).
+
+### ⭐ One guard observation (recorded, NOT a live hole — recommendation for a future pass)
+
+The semgrep rule `docs-by-id-write-requires-workspace-scope` regex anchors on `WHERE id = $1`, so by-id
+writes using `$2`/`$3` (`block.Update WHERE id=$3`, `page.UpdateAICost WHERE id=$2`, approval, pagelock)
+are NOT matched by the rule. All are gated by other means (route enforcer / syncer-only / scope-gate),
+so there is no live hole — but a FUTURE unscoped `WHERE id = $2` write would slip the rule. Tightening
+to `WHERE id = \$\d+` is a guard-hardening (would need nosemgrep suppressions on the now-caught gated
+writes) — deferred to a dedicated pass, outside this sweep's scope.
+
+### Hygiene (the branch's only change)
+
+`frontend/tsconfig.tsbuildinfo` (a `tsc --noEmit` incremental cache) was committed across Runs 8–10.
+`git rm --cached` it + added `*.tsbuildinfo` to `frontend/.gitignore`. No code change, no money, no
+migration, backend/metering byte-untouched.
+
 ## 1. What this run changed
 
 A security-first foundation run, in strict order.
