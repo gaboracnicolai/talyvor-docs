@@ -155,6 +155,7 @@ func (s *Store) RequestApproval(ctx context.Context, pageID, workspaceID, reques
 	}
 
 	// Flip the page into review.
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- EXTERNALLY GATED: RequestApproval's sole route POST /spaces/{spaceID}/pages/{pageID}/approval is wrapped in pageEnf.Require(AccessEdit) (handler.go Mount) → a foreign {pageID} resolves via GetByIDInWorkspaces → 404 before this runs; pageID is the just-authorized page.
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE pages SET doc_status = $1 WHERE id = $2`,
 		string(DocInReview), pageID,
@@ -224,6 +225,7 @@ func (s *Store) Decide(ctx context.Context, requestID, reviewerID, decision, com
 	).Scan(&pageID); err != nil {
 		return fmt.Errorf("approval: lookup page: %w", err)
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- SCOPE-GATED upstream in Decide: the request is confirmed in the caller's workspace (SELECT ... approval_requests WHERE id AND workspace_id = ANY(wsIDs) → ErrNotFound) BEFORE any write; requestID is that in-workspace request.
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE approval_requests SET status = $1, updated_at = NOW() WHERE id = $2`,
 		string(agg), requestID,
@@ -236,6 +238,7 @@ func (s *Store) Decide(ctx context.Context, requestID, reviewerID, decision, com
 	} else {
 		nextDoc = DocRejected
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- SCOPE-GATED upstream in Decide (see above): pageID is read from the in-workspace request's own page_id, so this page belongs to the same authorized workspace.
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE pages SET doc_status = $1 WHERE id = $2`,
 		string(nextDoc), pageID,

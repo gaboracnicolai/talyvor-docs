@@ -86,6 +86,7 @@ func (s *Store) Lock(ctx context.Context, pageID, lockedBy string) (*LockState, 
 		}
 		return nil, fmt.Errorf("pagelock: page is already locked by %s", holder)
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- EXTERNALLY GATED (this package has no workspace concept; read() is unscoped too): the sole caller is handler.go Lock, whose route POST /spaces/{spaceID}/pages/{pageID}/lock is wrapped in pageEnf.Require(AccessEdit) → GetByIDInWorkspaces 404s a foreign pageID before the handler runs. Same gate as Unlock below.
 	row := s.pool.QueryRow(ctx,
 		`UPDATE pages
         SET locked = true, locked_by = $1, locked_at = NOW()
