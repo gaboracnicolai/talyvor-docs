@@ -89,11 +89,49 @@ func (s *Store) ListByPage(ctx context.Context, pageID string) ([]model.Block, e
 	return out, rows.Err()
 }
 
+// ErrNotFound signals a by-id op on a block whose page is not in the caller's verified
+// workspaces. Maps to 404 in the handler — no cross-tenant existence oracle.
+var ErrNotFound = errors.New("block: not found in an accessible workspace")
+
+// assertInWorkspaces is the in-method SEC-4 L2 gate: a block carries no workspace_id, so it
+// reaches its tenant through its page (blocks.page_id → pages.workspace_id). Holds on its own —
+// independent of the route enforcer wiring.
+func (s *Store) assertInWorkspaces(ctx context.Context, blockID string, wsIDs []string) error {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM blocks b JOIN pages p ON b.page_id = p.id
+                       WHERE b.id = $1 AND p.workspace_id = ANY($2))`,
+		blockID, wsIDs,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("block: scope check: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateInWorkspaces updates a block only if its page lives in one of the caller's workspaces.
+func (s *Store) UpdateInWorkspaces(ctx context.Context, id, content string, position float64, wsIDs []string) (*model.Block, error) {
+	if err := s.assertInWorkspaces(ctx, id, wsIDs); err != nil {
+		return nil, err
+	}
+	return s.Update(ctx, id, content, position)
+}
+
+// DeleteInWorkspaces deletes a block only if its page lives in one of the caller's workspaces.
+func (s *Store) DeleteInWorkspaces(ctx context.Context, id string, wsIDs []string) error {
+	if err := s.assertInWorkspaces(ctx, id, wsIDs); err != nil {
+		return err
+	}
+	return s.Delete(ctx, id)
+}
+
 func (s *Store) Update(ctx context.Context, id string, content string, position float64) (*model.Block, error) {
 	if s.pool == nil {
 		return nil, errors.New("block: store has no pool")
 	}
-	// nosemgrep: docs-by-id-write-requires-workspace-scope -- EXTERNALLY GATED (blocks carry page_id, not workspace_id): the sole caller is handler.go Update, whose route PATCH /blocks/{blockID} is wrapped in blockEnf.Require. blockEnf resolves via blockPageLooker (cmd/docs/main.go) → the block's page → GetByIDInWorkspaces, so a workspace-B block resolves to a workspace-B page → ErrNotFound → 404. Same gate as block.Delete below.
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- GATED IN-METHOD: Update is a primitive reached only via UpdateInWorkspaces (above), which asserts the block's page ∈ the caller's verified workspaces first (blocks.page_id → pages.workspace_id = ANY) → ErrNotFound. Holds on its own, independent of the route enforcer.
 	return scan(s.pool.QueryRow(ctx,
 		`UPDATE blocks SET content = $1, position = $2, updated_at = NOW()
         WHERE id = $3 RETURNING `+columns,
@@ -105,7 +143,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	if s.pool == nil {
 		return errors.New("block: store has no pool")
 	}
-	// nosemgrep: docs-by-id-write-requires-workspace-scope -- EXTERNALLY GATED (blocks carry page_id, not workspace_id): the sole caller is handler.go Delete, whose route is wrapped in blockEnf.Require in this package's Mount. blockEnf resolves via blockPageLooker (cmd/docs/main.go): its first hop `SELECT page_id FROM blocks WHERE id=$1` is unscoped, but it feeds that page id straight to pageLooker → GetByIDInWorkspaces, so a workspace-B block resolves to a workspace-B page → ErrNotFound → 404. NOTE: the gate is main.go's WithAccess wiring, NOT this file (Enforcer.Require is pass-through on a nil receiver).
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- GATED IN-METHOD: Delete is a primitive reached only via DeleteInWorkspaces (above), which asserts the block's page ∈ the caller's verified workspaces first → ErrNotFound. Holds on its own, independent of the route enforcer.
 	_, err := s.pool.Exec(ctx, `DELETE FROM blocks WHERE id = $1`, id)
 	return err
 }

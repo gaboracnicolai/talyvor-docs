@@ -44,6 +44,41 @@ func NewStore(pool *pgxpool.Pool) *Store {
 
 func newStore(db pgxDB) *Store { return &Store{pool: db} }
 
+// ErrNotFound signals a lock op on a page not in the caller's verified workspaces → 404, no oracle.
+var ErrNotFound = errors.New("pagelock: page not found in an accessible workspace")
+
+// assertInWorkspaces is the in-method SEC-4 L2 gate: this package has no workspace concept, so it
+// scopes through the page (pages.workspace_id). Holds on its own — independent of the route enforcer.
+func (s *Store) assertInWorkspaces(ctx context.Context, pageID string, wsIDs []string) error {
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM pages WHERE id = $1 AND workspace_id = ANY($2))`,
+		pageID, wsIDs,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("pagelock: scope check: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// LockInWorkspaces locks a page only if it lives in one of the caller's workspaces.
+func (s *Store) LockInWorkspaces(ctx context.Context, pageID, lockedBy string, wsIDs []string) (*LockState, error) {
+	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
+		return nil, err
+	}
+	return s.Lock(ctx, pageID, lockedBy)
+}
+
+// UnlockInWorkspaces unlocks a page only if it lives in one of the caller's workspaces.
+func (s *Store) UnlockInWorkspaces(ctx context.Context, pageID, memberID string, isAdmin bool, wsIDs []string) error {
+	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
+		return err
+	}
+	return s.Unlock(ctx, pageID, memberID, isAdmin)
+}
+
 // pageLockRow is the projection used by every read path — every
 // caller wants the same four columns.
 type pageLockRow struct {
@@ -86,7 +121,7 @@ func (s *Store) Lock(ctx context.Context, pageID, lockedBy string) (*LockState, 
 		}
 		return nil, fmt.Errorf("pagelock: page is already locked by %s", holder)
 	}
-	// nosemgrep: docs-by-id-write-requires-workspace-scope -- EXTERNALLY GATED (this package has no workspace concept; read() is unscoped too): the sole caller is handler.go Lock, whose route POST /spaces/{spaceID}/pages/{pageID}/lock is wrapped in pageEnf.Require(AccessEdit) → GetByIDInWorkspaces 404s a foreign pageID before the handler runs. Same gate as Unlock below.
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- GATED IN-METHOD: Lock is a primitive reached only via LockInWorkspaces (above), which asserts the page ∈ the caller's verified workspaces (pages.workspace_id = ANY) first → ErrNotFound. Holds on its own, independent of the route enforcer.
 	row := s.pool.QueryRow(ctx,
 		`UPDATE pages
         SET locked = true, locked_by = $1, locked_at = NOW()
@@ -117,7 +152,7 @@ func (s *Store) Unlock(ctx context.Context, pageID, memberID string, isAdmin boo
 	if !isAdmin && (r.lockedBy == nil || *r.lockedBy != memberID) {
 		return errors.New("pagelock: only the locker or an admin can unlock")
 	}
-	// nosemgrep: docs-by-id-write-requires-workspace-scope -- EXTERNALLY GATED (this package has no workspace concept; read() above is unscoped too): the sole caller is handler.go Unlock, whose route is wrapped in pageEnf.Require(permission.AccessEdit) in this package's Mount → GetByIDInWorkspaces in cmd/docs/main.go 404s a foreign pageID before the handler runs. The isAdmin branch skips only the locker check above, never the route middleware, so both branches are equally cross-tenant-safe. NOTE: the gate is main.go's WithAccess wiring, NOT this file (Enforcer.Require is pass-through on a nil receiver). isAdmin is supplied by handler.go from permission.IsAdminFromContext (the gateway-verified identity resolved against the permission model) — it was previously read from the request body, which let any Edit-tier member steal a lock.
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- GATED IN-METHOD: Unlock is a primitive reached only via UnlockInWorkspaces (above), which asserts the page ∈ the caller's verified workspaces (pages.workspace_id = ANY) first → ErrNotFound. Holds on its own, independent of the route enforcer. isAdmin comes from permission.IsAdminFromContext (gateway-verified), never the request body.
 	_, err = s.pool.Exec(ctx,
 		`UPDATE pages SET locked = false, locked_by = NULL, locked_at = NULL
         WHERE id = $1`,
