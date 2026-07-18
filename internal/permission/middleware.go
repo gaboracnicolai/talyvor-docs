@@ -151,7 +151,7 @@ func RequireAccess(store *Store, resolver ResourceResolver, minAccess AccessLeve
 }
 
 // Enforcer binds a Store + a ResourceResolver so routes can request a level via Enforcer.Require.
-// A nil *Enforcer yields pass-through middleware — handlers stay mountable unguarded (tests).
+// A nil *Enforcer FAILS CLOSED — every route it wraps denies (404). See Require.
 type Enforcer struct {
 	store    *Store
 	resolver ResourceResolver
@@ -162,10 +162,22 @@ func NewEnforcer(store *Store, resolver ResourceResolver) *Enforcer {
 	return &Enforcer{store: store, resolver: resolver}
 }
 
-// Require returns middleware gating the route at minAccess. Nil receiver → pass-through.
+// Require returns middleware gating the route at minAccess.
+//
+// A nil receiver FAILS CLOSED: it denies every wrapped request with 404 (the no-oracle convention
+// RequireAccess uses for a resource outside the caller's workspace). This mirrors collab's
+// WithPageScope (inScope defaults false). It was previously pass-through, so a dropped WithAccess
+// line silently unguarded every route — turning by-id writes behind these gates into live
+// cross-tenant writes. Fail-closed makes a missing gate a total denial (loud) rather than a silent
+// hole. A route that must be public is mounted WITHOUT .With(enf.Require(...)), never with a nil
+// enforcer.
 func (e *Enforcer) Require(minAccess AccessLevel) func(http.Handler) http.Handler {
 	if e == nil {
-		return func(next http.Handler) http.Handler { return next }
+		return func(http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeNotFound(w)
+			})
+		}
 	}
 	return RequireAccess(e.store, e.resolver, minAccess)
 }

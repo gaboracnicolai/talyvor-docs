@@ -33,18 +33,49 @@ import (
 const l2Secret = "sec4-test-gateway-secret-0123456789"
 
 func l2Chain(d *testutil.DB) http.Handler {
+	// Real enforcers, wired exactly as main.go does. Require is now fail-closed on a nil receiver,
+	// so a handler whose Require-wrapped routes are mounted without WithAccess would deny EVERY
+	// caller (including the legitimate owner). The handlers whose by-id routes carry no Require
+	// (database rows, templatelib, customdomain) still exercise the STORE-layer scope gate directly.
+	permStore := permission.NewStore(d.Pool)
+	spaceStore := space.NewStore(d.Pool)
+	pageStore := page.NewStore(d.Pool)
+	spaceLooker := func(ctx context.Context, id string) (permission.SpaceMeta, error) {
+		sp, err := spaceStore.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.SpaceMeta{}, err
+		}
+		return permission.SpaceMeta{WorkspaceID: sp.WorkspaceID, Private: sp.Private, CreatedBy: sp.CreatedBy}, nil
+	}
+	pageLooker := func(ctx context.Context, id string) (permission.PageMeta, error) {
+		pg, err := pageStore.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.PageMeta{}, err
+		}
+		sp, err := spaceStore.GetByIDInWorkspaces(ctx, pg.SpaceID, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.PageMeta{}, err
+		}
+		return permission.PageMeta{
+			WorkspaceID: pg.WorkspaceID, SpaceID: pg.SpaceID, SpaceCreatedBy: sp.CreatedBy,
+			SpacePrivate: sp.Private, PageCreatedBy: pg.CreatedBy,
+		}, nil
+	}
+	spaceEnf := permission.NewEnforcer(permStore, permission.SpaceResolverFromParam("spaceID", spaceLooker))
+	pageEnf := permission.NewEnforcer(permStore, permission.PageResolverFromParam("pageID", pageLooker, permStore))
+
 	r := chi.NewRouter()
 	r.Route("/v1", func(r chi.Router) {
 		exempt := func(p string) bool { return strings.HasPrefix(p, "/v1/public/") }
 		r.Use(gatewayauth.Middleware(l2Secret, exempt))
 		r.Use(authz.Middleware(authz.NewPGResolver(d.Pool), exempt))
-		approval.NewHandler(approval.NewStore(d.Pool)).Mount(r)
-		permission.NewHandler(permission.NewStore(d.Pool)).Mount(r)
-		database.NewHandler(database.NewStore(d.Pool)).Mount(r)
-		changelog.NewHandler(changelog.NewStore(d.Pool, nil)).Mount(r)
+		approval.NewHandler(approval.NewStore(d.Pool)).WithAccess(pageEnf).Mount(r)
+		permission.NewHandler(permStore).WithAccess(spaceEnf, pageEnf).Mount(r)
+		database.NewHandler(database.NewStore(d.Pool)).WithAccess(pageEnf).Mount(r)
+		changelog.NewHandler(changelog.NewStore(d.Pool, nil)).WithAccess(pageEnf).Mount(r)
 		templatelib.NewHandler(templatelib.NewStore(d.Pool, nil)).Mount(r)
 		customdomain.NewHandler(customdomain.NewStore(d.Pool), nil).Mount(r)
-		export.NewHandler(export.New(page.NewStore(d.Pool), space.NewStore(d.Pool))).Mount(r)
+		export.NewHandler(export.New(pageStore, spaceStore)).WithAccess(pageEnf).Mount(r)
 	})
 	return r
 }

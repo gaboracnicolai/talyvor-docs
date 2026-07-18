@@ -12,6 +12,8 @@ import (
 	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/gatewayauth"
 	"github.com/talyvor/docs/internal/page"
+	"github.com/talyvor/docs/internal/permission"
+	"github.com/talyvor/docs/internal/space"
 	"github.com/talyvor/docs/internal/testutil"
 )
 
@@ -34,7 +36,36 @@ const testGatewaySecret = "sec4-test-gateway-secret-0123456789"
 // asserts failed — the RED baseline; this is the GREEN wiring.)
 func newV1Chain(t *testing.T, d *testutil.DB) http.Handler {
 	t.Helper()
-	pageHandler := page.NewHandler(page.NewStore(d.Pool), d.Pool)
+	permStore := permission.NewStore(d.Pool)
+	spaceStore := space.NewStore(d.Pool)
+	pageStore := page.NewStore(d.Pool)
+	spaceLooker := func(ctx context.Context, id string) (permission.SpaceMeta, error) {
+		sp, err := spaceStore.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.SpaceMeta{}, err
+		}
+		return permission.SpaceMeta{WorkspaceID: sp.WorkspaceID, Private: sp.Private, CreatedBy: sp.CreatedBy}, nil
+	}
+	pageLooker := func(ctx context.Context, id string) (permission.PageMeta, error) {
+		pg, err := pageStore.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.PageMeta{}, err
+		}
+		sp, err := spaceStore.GetByIDInWorkspaces(ctx, pg.SpaceID, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.PageMeta{}, err
+		}
+		return permission.PageMeta{
+			WorkspaceID: pg.WorkspaceID, SpaceID: pg.SpaceID, SpaceCreatedBy: sp.CreatedBy,
+			SpacePrivate: sp.Private, PageCreatedBy: pg.CreatedBy,
+		}, nil
+	}
+	spaceEnf := permission.NewEnforcer(permStore, permission.SpaceResolverFromParam("spaceID", spaceLooker))
+	pageEnf := permission.NewEnforcer(permStore, permission.PageResolverFromParam("pageID", pageLooker, permStore))
+	// Real enforcers wired (Require is now fail-closed on nil): the page-access gates run for real,
+	// same as main.go, so a legit member reaches their own page (200) and the cross-tenant denials
+	// below are the workspace boundary — not the nil-enforcer deny.
+	pageHandler := page.NewHandler(pageStore, d.Pool).WithAccess(pageEnf, spaceEnf)
 	r := chi.NewRouter()
 	r.Route("/v1", func(r chi.Router) {
 		exempt := func(p string) bool { return strings.HasPrefix(p, "/v1/public/") }
