@@ -2,9 +2,11 @@ package pagelock
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/permission"
 )
 
@@ -68,7 +70,11 @@ func (h *Handler) Lock(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "cannot resolve the acting member for this page")
 		return
 	}
-	state, err := h.store.Lock(r.Context(), pageID, memberID)
+	state, err := h.store.LockInWorkspaces(r.Context(), pageID, memberID, authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err != nil {
 		// Lock conflicts map to 423 (Locked) so the frontend can
 		// surface a specific "already locked" affordance vs a
@@ -91,7 +97,12 @@ func (h *Handler) Unlock(w http.ResponseWriter, r *http.Request) {
 	// request body. Fails closed: an unguarded mount yields no level in context, so
 	// isAdmin is false and only the locker can unlock.
 	isAdmin := permission.IsAdminFromContext(r.Context())
-	if err := h.store.Unlock(r.Context(), pageID, memberID, isAdmin); err != nil {
+	err := h.store.UnlockInWorkspaces(r.Context(), pageID, memberID, isAdmin, authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}

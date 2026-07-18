@@ -111,6 +111,30 @@ func scanDecision(s interface{ Scan(...any) error }) (*ReviewDecision, error) {
 
 // ─── RequestApproval ─────────────────────────────────
 
+// RequestApprovalInWorkspaces is the SEC-4 L2 gate for RequestApproval: it opens a review (and
+// flips pages.doc_status → in-review) only if the page lives in one of the caller's verified
+// workspaces (wsIDs = authz.WorkspaceIDs(ctx)). Foreign pageID → ErrNotFound (404, no oracle).
+//
+// This holds ON ITS OWN — the assert reads authz.WorkspaceIDs (the /v1 authz middleware's verified
+// set), not the route enforcer. The bare-id doc_status flip inside RequestApproval was previously
+// gated SOLELY by the route's pageEnf.Require wiring.
+func (s *Store) RequestApprovalInWorkspaces(ctx context.Context, pageID, workspaceID, requestedBy string, reviewers []string, message string, dueDate *time.Time, wsIDs []string) (*ApprovalRequest, error) {
+	if s.pool == nil {
+		return nil, errors.New("approval: no pool")
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM pages WHERE id = $1 AND workspace_id = ANY($2))`,
+		pageID, wsIDs,
+	).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("approval: scope check: %w", err)
+	}
+	if !exists {
+		return nil, ErrNotFound
+	}
+	return s.RequestApproval(ctx, pageID, workspaceID, requestedBy, reviewers, message, dueDate)
+}
+
 func (s *Store) RequestApproval(ctx context.Context, pageID, workspaceID, requestedBy string, reviewers []string, message string, dueDate *time.Time) (*ApprovalRequest, error) {
 	if s.pool == nil {
 		return nil, errors.New("approval: no pool")
@@ -155,7 +179,7 @@ func (s *Store) RequestApproval(ctx context.Context, pageID, workspaceID, reques
 	}
 
 	// Flip the page into review.
-	// nosemgrep: docs-by-id-write-requires-workspace-scope -- EXTERNALLY GATED: RequestApproval's sole route POST /spaces/{spaceID}/pages/{pageID}/approval is wrapped in pageEnf.Require(AccessEdit) (handler.go Mount) → a foreign {pageID} resolves via GetByIDInWorkspaces → 404 before this runs; pageID is the just-authorized page.
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- GATED IN-METHOD: RequestApproval is reached from the handler only via RequestApprovalInWorkspaces (above), which asserts the page ∈ the caller's verified workspaces (pages.workspace_id = ANY) → ErrNotFound before this flip. Holds on its own, independent of the route enforcer. (Direct RequestApproval calls are server-side seeds only.)
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE pages SET doc_status = $1 WHERE id = $2`,
 		string(DocInReview), pageID,

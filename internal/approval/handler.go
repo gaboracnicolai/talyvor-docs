@@ -73,8 +73,13 @@ func (h *Handler) Request(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "cannot resolve the acting member for this page")
 		return
 	}
-	req, err := h.store.RequestApproval(r.Context(),
-		pageID, in.WorkspaceID, requestedBy, in.Reviewers, in.Message, in.DueDate)
+	req, err := h.store.RequestApprovalInWorkspaces(r.Context(),
+		pageID, in.WorkspaceID, requestedBy, in.Reviewers, in.Message, in.DueDate,
+		authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
