@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -84,13 +85,20 @@ func (h *Handler) RecordView(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "cannot resolve the viewing member for this page")
 		return
 	}
-	err := h.store.RecordView(r.Context(), PageView{
+	// RecordViewInWorkspaces scopes the write to the caller's VERIFIED membership set — so the
+	// page bump is gated in-method, not solely by this route's pageEnf wiring. A foreign pageID
+	// resolves to 404 (no cross-tenant existence oracle).
+	err := h.store.RecordViewInWorkspaces(r.Context(), PageView{
 		PageID:      chi.URLParam(r, "pageID"),
 		WorkspaceID: ws,
 		ViewerID:    viewer,
 		ViewerName:  in.ViewerName,
 		Duration:    in.Duration,
-	})
+	}, authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "record failed")
 		return
