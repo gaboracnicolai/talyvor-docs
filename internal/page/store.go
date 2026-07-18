@@ -540,6 +540,7 @@ func (s *Store) Verify(ctx context.Context, pageID, verifierID string) error {
 	if s.pool == nil {
 		return errors.New("page: store has no pool")
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- Verify is a primitive reached only via VerifyInWorkspaces (store.go), which calls assertInWorkspaces(pageID, authz.WorkspaceIDs) first (join on p.workspace_id = ANY($2)) → a foreign pageID 404s before this runs.
 	_, err := s.pool.Exec(ctx,
 		`UPDATE pages SET last_verified_at = NOW(), verified_by = $1,
             updated_at = NOW()
@@ -968,6 +969,7 @@ func (s *Store) UpdateAICost(ctx context.Context, pageID string, costUSD float64
 	if s.pool == nil {
 		return errors.New("page: store has no pool")
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- SERVER-SIDE ONLY: UpdateAICost has no HTTP route; its sole caller is trackintegration.Syncer (syncer.go), which enumerates a workspace's OWN pages via WorkspacePageIDs — the pageID is server-derived, never client-supplied, so there is no cross-tenant id to gate.
 	_, err := s.pool.Exec(ctx,
 		`UPDATE pages SET ai_cost_usd = $1 WHERE id = $2`,
 		costUSD, pageID,

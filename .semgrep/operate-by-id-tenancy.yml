@@ -1,7 +1,9 @@
 # SEC-4 Layer-2 class-guard for the secondary handler groups. Two shapes, both = a verified member
 # of workspace A reaching workspace B's objects:
 #
-#   (a) BARE by-id: a DELETE/UPDATE/SELECT store op `WHERE id = $1` with NO workspace predicate.
+#   (a) BARE by-id: a DELETE/UPDATE/SELECT store op `WHERE id = $N` (ANY positional index — $1,
+#       $2, $3, …) with NO workspace predicate. (The regex was `\$1`-anchored until the #32 sweep's
+#       hardening pass; a `$2`/`$3` by-id write slipped it — block.Update WHERE id=$3 etc.)
 #   (b) DECEPTIVE:  a workspace value taken from chi.URLParam (attacker-controlled path param) and
 #       used to scope a store op — "looks scoped, isn't."
 #
@@ -23,10 +25,12 @@ rules:
     languages: [go]
     severity: ERROR
     message: >
-      SEC-4 L2: this by-id DELETE/UPDATE (WHERE id = $1) has no workspace_id scope, so a verified
-      member of any workspace can act on another workspace's object by id. Scope it to the caller's
-      verified set: `AND workspace_id = ANY($n)` where $n = authz.WorkspaceIDs(ctx). Reference:
-      internal/page/store.go GetByIDInWorkspaces.
+      SEC-4 L2: this by-id DELETE/UPDATE (WHERE id = $N, any positional index) has no workspace_id
+      scope, so a verified member of any workspace can act on another workspace's object by id. Scope
+      it to the caller's verified set: `AND workspace_id = ANY($n)` where $n = authz.WorkspaceIDs(ctx)
+      (or a parent-join subquery containing workspace_id = ANY). If an upstream assertInWorkspaces /
+      route-enforcer gate 404s a foreign id BEFORE this write, suppress with an inline nosemgrep +
+      written reason. Reference: internal/page/store.go GetByIDInWorkspaces.
     patterns:
       - pattern-either:
           - pattern: $POOL.Exec($CTX, $SQL, ...)
@@ -34,7 +38,7 @@ rules:
           - pattern: $POOL.Query($CTX, $SQL, ...)
       - metavariable-regex:
           metavariable: $SQL
-          regex: (?s).*(DELETE FROM|UPDATE)\s+\w+.*WHERE id = \$1
+          regex: (?s).*(DELETE FROM|UPDATE)\s+\w+.*WHERE id = \$\d+
       # Excluded when the SAME statement is already membership-scoped (…workspace_id = ANY / = ANY subquery):
       - pattern-not:
           patterns:

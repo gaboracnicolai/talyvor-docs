@@ -142,6 +142,7 @@ func (s *Store) Resolve(ctx context.Context, commentID, resolvedBy string) error
 	if s.pool == nil {
 		return errors.New("comment: no pool")
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- Resolve is a primitive reached only via ResolveInWorkspaces (store.go), which calls assertInPage first (ties {id} → the authorized {pageID} → p.workspace_id = ANY($wsIDs)). The $2 the rule sees is the comment id inside the thread subquery.
 	_, err := s.pool.Exec(ctx,
 		`UPDATE page_comments
         SET resolved = true, resolved_by = $1, resolved_at = NOW(), updated_at = NOW()

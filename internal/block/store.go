@@ -93,6 +93,7 @@ func (s *Store) Update(ctx context.Context, id string, content string, position 
 	if s.pool == nil {
 		return nil, errors.New("block: store has no pool")
 	}
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- EXTERNALLY GATED (blocks carry page_id, not workspace_id): the sole caller is handler.go Update, whose route PATCH /blocks/{blockID} is wrapped in blockEnf.Require. blockEnf resolves via blockPageLooker (cmd/docs/main.go) → the block's page → GetByIDInWorkspaces, so a workspace-B block resolves to a workspace-B page → ErrNotFound → 404. Same gate as block.Delete below.
 	return scan(s.pool.QueryRow(ctx,
 		`UPDATE blocks SET content = $1, position = $2, updated_at = NOW()
         WHERE id = $3 RETURNING `+columns,

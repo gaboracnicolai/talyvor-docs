@@ -80,10 +80,42 @@ func NewStore(pool *pgxpool.Pool) *Store {
 
 func newStore(db pgxDB) *Store { return &Store{pool: db} }
 
+// ErrNotFound signals a RecordView for a page that is not in the caller's verified workspaces.
+// Maps to 404 in the handler — no cross-tenant existence oracle.
+var ErrNotFound = errors.New("analytics: page not found in an accessible workspace")
+
+// RecordViewInWorkspaces is the SEC-4 L2 gate for RecordView: it records a view only if the
+// page lives in one of the caller's verified workspaces (wsIDs = authz.WorkspaceIDs(ctx)).
+//
+// This is the in-method store gate — it holds ON ITS OWN, not because of the route enforcer.
+// RecordView's page bump (UPDATE pages … WHERE id) was previously gated SOLELY by main.go's
+// analyticsHandler.WithAccess(pageEnf) wiring; dropping that one line would have silently made
+// the bump a live cross-tenant write. Now a foreign pageID resolves to ErrNotFound here, before
+// any INSERT or bump, regardless of the wiring.
+func (s *Store) RecordViewInWorkspaces(ctx context.Context, view PageView, wsIDs []string) error {
+	if s.pool == nil {
+		return errors.New("analytics: no pool")
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM pages WHERE id = $1 AND workspace_id = ANY($2))`,
+		view.PageID, wsIDs,
+	).Scan(&exists); err != nil {
+		return fmt.Errorf("analytics: scope check: %w", err)
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return s.RecordView(ctx, view)
+}
+
 // RecordView appends a row to page_views and bumps the cached
 // counter on pages. Views under minDuration are dropped — accidental
 // clicks shouldn't pollute analytics. Anonymous viewers come through
 // as viewer_id="anonymous" so the schema's default is fine.
+//
+// Primitive: reached only via RecordViewInWorkspaces, which asserts the page is in the
+// caller's verified workspaces first. Not to be wired to a route directly.
 func (s *Store) RecordView(ctx context.Context, view PageView) error {
 	if s.pool == nil {
 		return errors.New("analytics: no pool")
@@ -101,7 +133,7 @@ func (s *Store) RecordView(ctx context.Context, view PageView) error {
 	); err != nil {
 		return fmt.Errorf("analytics: insert view: %w", err)
 	}
-	// nosemgrep: docs-by-id-write-requires-workspace-scope -- EXTERNALLY GATED (this package has no workspace concept): the sole caller is handler.go RecordView, whose route is wrapped in pageEnf.Require(permission.AccessView) in this package's Mount. pageEnf resolves via pageLooker → page.Store.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx)) in cmd/docs/main.go, so a foreign pageID 404s before the handler runs. NOTE: the gate is main.go's WithAccess wiring, NOT this file — dropping analyticsHandler.WithAccess(pageEnf) silently makes this a live cross-tenant write (Enforcer.Require is pass-through on a nil receiver).
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- GATED IN-METHOD: RecordView is a primitive reached only via RecordViewInWorkspaces (above), which asserts the page is in the caller's verified workspaces (SELECT EXISTS … WHERE id = $1 AND workspace_id = ANY($2) → ErrNotFound) BEFORE this bump. The gate now holds on its own, independent of main.go's route-enforcer wiring (belt-and-suspenders: the route also enforces pageEnf.Require).
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE pages SET view_count = view_count + 1, last_viewed_at = NOW() WHERE id = $1`,
 		view.PageID,
