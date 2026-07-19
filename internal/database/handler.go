@@ -13,32 +13,38 @@ import (
 type Handler struct {
 	store   *Store
 	pageEnf *permission.Enforcer // A3: by-page access for the page-scoped create route
+	dbEnf   *permission.Enforcer // A3: by-database access for the /databases/{dbID}/* routes (resolves db→page)
 }
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
 
-// WithAccess wires the A3 access enforcer. Without it the routes mount unguarded (tests).
-func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
+// WithAccess wires the A3 access enforcers: pageEnf gates the page-scoped create route, dbEnf gates
+// every /databases/{dbID}/* route (its resolver reads dbID from the URL and inherits the owning page's
+// access). Without them the routes mount unguarded (tests). A nil enforcer FAILS CLOSED (404).
+func (h *Handler) WithAccess(pageEnf, dbEnf *permission.Enforcer) *Handler {
 	h.pageEnf = pageEnf
+	h.dbEnf = dbEnf
 	return h
 }
 
 func (h *Handler) Mount(r chi.Router) {
-	// A3: page-scoped create is gated by page access (Edit). The /databases/{dbID}/* routes below
-	// carry no {pageID}/{spaceID} in the URL, so the page resolver can't run — they stay on the
-	// SEC-4 L2 workspace-scoped guard until a database→page access resolver lands.
+	// A3: page-scoped create is gated by page access (Edit). The /databases/{dbID}/* routes are gated
+	// by dbEnf, whose resolver reads {dbID} from the URL and inherits the OWNING PAGE's access
+	// (databases.page_id → pages) — an inline database is page content, so writing it is an Edit-tier
+	// action and reading it a View-tier action, exactly like blocks. Before dbEnf they were gated by
+	// workspace MEMBERSHIP only (SEC-4 L2), so a view-only member could mutate schema/rows/views.
 	r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/pages/{pageID}/databases", h.CreateDatabase)
-	r.Get("/databases/{dbID}", h.GetDatabase)
-	r.Patch("/databases/{dbID}/schema", h.UpdateSchema)
+	r.With(h.dbEnf.Require(permission.AccessView)).Get("/databases/{dbID}", h.GetDatabase)
+	r.With(h.dbEnf.Require(permission.AccessEdit)).Patch("/databases/{dbID}/schema", h.UpdateSchema)
 
-	r.Post("/databases/{dbID}/rows", h.CreateRow)
-	r.Get("/databases/{dbID}/rows", h.ListRows)
-	r.Patch("/databases/{dbID}/rows/{rowID}", h.UpdateRow)
-	r.Delete("/databases/{dbID}/rows/{rowID}", h.DeleteRow)
+	r.With(h.dbEnf.Require(permission.AccessEdit)).Post("/databases/{dbID}/rows", h.CreateRow)
+	r.With(h.dbEnf.Require(permission.AccessView)).Get("/databases/{dbID}/rows", h.ListRows)
+	r.With(h.dbEnf.Require(permission.AccessEdit)).Patch("/databases/{dbID}/rows/{rowID}", h.UpdateRow)
+	r.With(h.dbEnf.Require(permission.AccessEdit)).Delete("/databases/{dbID}/rows/{rowID}", h.DeleteRow)
 
-	r.Post("/databases/{dbID}/views", h.CreateView)
-	r.Get("/databases/{dbID}/views", h.ListViews)
-	r.Patch("/databases/{dbID}/views/{viewID}", h.UpdateView)
+	r.With(h.dbEnf.Require(permission.AccessEdit)).Post("/databases/{dbID}/views", h.CreateView)
+	r.With(h.dbEnf.Require(permission.AccessView)).Get("/databases/{dbID}/views", h.ListViews)
+	r.With(h.dbEnf.Require(permission.AccessEdit)).Patch("/databases/{dbID}/views/{viewID}", h.UpdateView)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
