@@ -25,10 +25,14 @@ func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
 }
 
 func (h *Handler) Mount(r chi.Router) {
-	// DECISION (view-can-comment): comment participation — list/create/reply/resolve/delete — requires
-	// only View on the parent page, so view-tier collaborators can discuss without edit. Flip this
-	// single `commentLevel` to AccessEdit to make comments an edit-tier action.
-	commentLevel := permission.AccessView
+	// DECISION (comment-but-not-edit): comment PARTICIPATION — create/reply/resolve/unresolve/delete —
+	// requires the AccessComment tier, while list/stats stay at AccessView (any reader may read the
+	// discussion). This makes the "comment" tier real — previously it was gated at AccessView, so it
+	// behaved identically to view — giving three distinct tiers: view (read-only), comment (read +
+	// discuss, but cannot edit the page), edit (full). Matches the reviewer use case (a reviewer
+	// comments without editing). Consequence: a default-view member can no longer comment; to keep
+	// commenting open, grant `everyone: comment` on the space/page.
+	commentLevel := permission.AccessComment
 	r.With(h.pageEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}/pages/{pageID}/comments", h.List)
 	r.With(h.pageEnf.Require(commentLevel)).Post("/spaces/{spaceID}/pages/{pageID}/comments", h.Create)
 	r.With(h.pageEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}/pages/{pageID}/comments/stats", h.Stats)

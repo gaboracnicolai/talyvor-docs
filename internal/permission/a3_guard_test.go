@@ -102,11 +102,12 @@ func TestA3_IntraWorkspaceAccessControl(t *testing.T) {
 	ctx := context.Background()
 
 	W := d.Workspace(t)
-	owner := d.Member(t, W, "owner@corp.com")     // space creator → admin
-	viewer := d.Member(t, W, "viewer@corp.com")   // view grant on P
-	d.Member(t, W, "outsider@corp.com")           // member of W, NO grant on the private space
-	editor := d.Member(t, W, "editor@corp.com")   // edit grant on P
-	granted := d.Member(t, W, "granted@corp.com") // view grant on the private SPACE (inherits to P)
+	owner := d.Member(t, W, "owner@corp.com")         // space creator → admin
+	viewer := d.Member(t, W, "viewer@corp.com")       // view grant on P
+	d.Member(t, W, "outsider@corp.com")               // member of W, NO grant on the private space
+	editor := d.Member(t, W, "editor@corp.com")       // edit grant on P
+	commenter := d.Member(t, W, "commenter@corp.com") // comment grant on P — the middle tier
+	granted := d.Member(t, W, "granted@corp.com")     // view grant on the private SPACE (inherits to P)
 
 	// A PRIVATE space + a page in it, both created by owner.
 	sPriv, err := space.NewStore(d.Pool).Create(ctx, model.Space{
@@ -138,6 +139,7 @@ func TestA3_IntraWorkspaceAccessControl(t *testing.T) {
 	}
 	grant(permission.ResourcePage, p.ID, viewer, permission.AccessView)
 	grant(permission.ResourcePage, p.ID, editor, permission.AccessEdit)
+	grant(permission.ResourcePage, p.ID, commenter, permission.AccessComment)
 	grant(permission.ResourceSpace, sPriv.ID, granted, permission.AccessView)
 
 	// A block (page content) on P — for the block-edit hole (edit content bypassing the page guard).
@@ -192,9 +194,23 @@ func TestA3_IntraWorkspaceAccessControl(t *testing.T) {
 		t.Errorf("(d2) Outsider EXPORT private page = %d, want 403", c)
 	}
 
-	// (e) DECISION — view-can-comment: Viewer (view grant) CREATEs a comment → must be ALLOWED.
-	if c := code(a3Req(http.MethodPost, pg+"/comments", "viewer@corp.com", `{"content":"a view-tier comment"}`)); c != http.StatusOK && c != http.StatusCreated {
-		t.Errorf("(e) Viewer POST comment = %d, want 200/201 (view-can-comment decision)", c)
+	// (e) DECISION — comment-but-not-edit: the "comment" tier is now REAL (was identical to view).
+	// The middle tier must behave differently from BOTH neighbours:
+	//   view    → may READ comments but NOT create one (comment participation requires AccessComment);
+	//   comment → may create comments but NOT edit the page (AccessComment < AccessEdit);
+	//   edit    → may do both (proven by (f) editor PATCH below).
+	ok := func(c int) bool { return c == http.StatusOK || c == http.StatusCreated }
+	if c := code(a3Req(http.MethodPost, pg+"/comments", "viewer@corp.com", `{"content":"view tries to comment"}`)); !deny(c) {
+		t.Errorf("(e) Viewer POST comment = %d, want 403 (view < comment: view is read-only now)", c)
+	}
+	if c := code(a3Req(http.MethodGet, pg+"/comments", "viewer@corp.com", "")); c != http.StatusOK {
+		t.Errorf("(e) Viewer GET comments = %d, want 200 (view can still READ comments)", c)
+	}
+	if c := code(a3Req(http.MethodPost, pg+"/comments", "commenter@corp.com", `{"content":"a real comment"}`)); !ok(c) {
+		t.Errorf("(e) Commenter POST comment = %d, want 200/201 (comment tier CAN comment)", c)
+	}
+	if c := code(a3Req(http.MethodPatch, pg, "commenter@corp.com", `{"title":"commenter-cannot-edit"}`)); !deny(c) {
+		t.Errorf("(e) Commenter PATCH page = %d, want 403 (comment < edit: cannot edit the page)", c)
 	}
 
 	// COMPOSITION with SEC-4 L2: a member of a DIFFERENT workspace hitting the guarded route gets 404
