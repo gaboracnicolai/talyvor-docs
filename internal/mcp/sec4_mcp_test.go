@@ -15,6 +15,7 @@ import (
 	"github.com/talyvor/docs/internal/gatewayauth"
 	"github.com/talyvor/docs/internal/mcp"
 	"github.com/talyvor/docs/internal/page"
+	"github.com/talyvor/docs/internal/permission"
 	"github.com/talyvor/docs/internal/space"
 	"github.com/talyvor/docs/internal/testutil"
 )
@@ -31,7 +32,8 @@ const testGatewaySecret = "sec4-test-gateway-secret-0123456789"
 // chokepoint → (a)(b)(c) below FAIL. GREEN: /mcp is gated + chokepoint added → same asserts pass.
 func newMCPChain(t *testing.T, d *testutil.DB) http.Handler {
 	t.Helper()
-	srv := mcp.New(page.NewStore(d.Pool), space.NewStore(d.Pool), nil, nil, nil, "test")
+	srv := mcp.New(page.NewStore(d.Pool), space.NewStore(d.Pool), nil, nil, nil, "test").
+		WithAccess(mcpAccess(d))
 	r := chi.NewRouter()
 	// GREEN wiring, mirroring main.go: /mcp behind gatewayauth + authz (model b). (Pre-fix this
 	// mounted on the root router with no middleware — the RED baseline.)
@@ -42,6 +44,36 @@ func newMCPChain(t *testing.T, d *testutil.DB) http.Handler {
 		r.Post("/mcp", srv.HandleRPC)
 	})
 	return r
+}
+
+// mcpAccess builds the real within-workspace tier gate (permission rule engine + scoped meta lookers),
+// wired exactly as main.go does, so the MCP write tools enforce AccessEdit like the REST doors.
+func mcpAccess(d *testutil.DB) mcp.AccessController {
+	permStore := permission.NewStore(d.Pool)
+	spaceStore := space.NewStore(d.Pool)
+	pageStore := page.NewStore(d.Pool)
+	spaceMeta := func(ctx context.Context, id string) (permission.SpaceMeta, error) {
+		sp, err := spaceStore.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.SpaceMeta{}, err
+		}
+		return permission.SpaceMeta{WorkspaceID: sp.WorkspaceID, Private: sp.Private, CreatedBy: sp.CreatedBy}, nil
+	}
+	pageMeta := func(ctx context.Context, id string) (permission.PageMeta, error) {
+		pg, err := pageStore.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.PageMeta{}, err
+		}
+		sp, err := spaceStore.GetByIDInWorkspaces(ctx, pg.SpaceID, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.PageMeta{}, err
+		}
+		return permission.PageMeta{
+			WorkspaceID: pg.WorkspaceID, SpaceID: pg.SpaceID, SpaceCreatedBy: sp.CreatedBy,
+			SpacePrivate: sp.Private, PageCreatedBy: pg.CreatedBy,
+		}, nil
+	}
+	return mcp.NewPermissionAccess(permStore, pageMeta, spaceMeta)
 }
 
 // callTool posts a JSON-RPC tools/call and returns the recorder. withProof=false drops the

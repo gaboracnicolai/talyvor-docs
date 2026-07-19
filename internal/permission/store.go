@@ -319,3 +319,29 @@ func (s *Store) Check(ctx context.Context, memberID string, res resourceContext,
 	}
 	return resolveAccess(res, memberID, perms), nil
 }
+
+// CheckSpace and CheckPage are the NON-HTTP entry points to the same rule engine the RequireAccess
+// middleware uses — for callers that have no *http.Request (the MCP tools). They build the
+// resourceContext from the caller-supplied meta exactly as SpaceResolverFromParam /
+// PageResolverFromParam do, then delegate to Check. No new access model: the enforcement is
+// resolveAccess, unchanged.
+func (s *Store) CheckSpace(ctx context.Context, memberID, spaceID string, md SpaceMeta, wsIDs []string) (AccessLevel, error) {
+	return s.Check(ctx, memberID, resourceContext{
+		Type: ResourceSpace, ID: spaceID, WorkspaceID: md.WorkspaceID, Private: md.Private, CreatedBy: md.CreatedBy,
+	}, wsIDs)
+}
+
+// CheckPage mirrors PageResolverFromParam: the page inherits its space's privacy + creator-admin rule
+// and its space-level grants (preloaded here), so a page with no page-level grant still resolves
+// through the space.
+func (s *Store) CheckPage(ctx context.Context, memberID, pageID string, md PageMeta, wsIDs []string) (AccessLevel, error) {
+	spacePerms, _ := s.ListForResource(ctx, ResourceSpace, md.SpaceID, wsIDs)
+	return s.Check(ctx, memberID, resourceContext{
+		Type: ResourcePage, ID: pageID, WorkspaceID: md.WorkspaceID, SpaceID: md.SpaceID,
+		Private: md.SpacePrivate, CreatedBy: md.SpaceCreatedBy, SpacePerms: spacePerms,
+	}, wsIDs)
+}
+
+// AtLeast reports whether level a meets or exceeds b on the access ladder (none<view<comment<edit<admin).
+// Exposes the same rank() comparison RequireAccess uses, for callers gating on a minimum tier.
+func AtLeast(a, b AccessLevel) bool { return rank(a) >= rank(b) }

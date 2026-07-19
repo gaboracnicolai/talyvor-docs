@@ -111,6 +111,15 @@ func (f *fakeAI) AskDocs(_ context.Context, _, _ string, _ []ai.PageContext) (st
 
 // ─── Test helpers ─────────────────────────────────────────
 
+// fakeAccess is a permissive tier gate for the unit tests, which exercise tool MECHANICS (markdown
+// conversion, content shaping) with fakes and no permission store — not the tier itself (that is
+// proven against real Postgres in sec_tier_test.go). Without a wired controller the write tools would
+// fail closed and these mechanics tests couldn't run.
+type fakeAccess struct{ allow bool }
+
+func (f fakeAccess) CanEditPage(_ context.Context, _, _ string) (bool, error)  { return f.allow, nil }
+func (f fakeAccess) CanEditSpace(_ context.Context, _, _ string) (bool, error) { return f.allow, nil }
+
 func newTestServer(t *testing.T, pages pageDeps, spaces spaceDeps, analyticsDep analyticsDeps, aiDep aiDeps, freshDep freshDeps) *Server {
 	t.Helper()
 	return newServer(deps{
@@ -120,7 +129,7 @@ func newTestServer(t *testing.T, pages pageDeps, spaces spaceDeps, analyticsDep 
 		ai:        aiDep,
 		freshness: freshDep,
 		version:   "test",
-	})
+	}).WithAccess(fakeAccess{allow: true})
 }
 
 func rpc(method string, params any, id int) *http.Request {

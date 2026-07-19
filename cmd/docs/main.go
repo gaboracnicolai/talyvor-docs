@@ -412,6 +412,10 @@ func main() {
 	exportHandler.WithAccess(pageEnf)
 	approvalHandler.WithAccess(pageEnf)
 	permHandler.WithAccess(spaceEnf, pageEnf)
+	// MCP write tools (create/update/verify_page) enforce the same AccessEdit tier as the REST doors:
+	// the membership chokepoint authorizes the workspace, this adds the within-workspace tier via the
+	// shared permission rule engine + the scoped page/space lookers. Unwired ⇒ MCP writes fail closed.
+	mcpServer.WithAccess(mcp.NewPermissionAccess(permStore, pageLooker, spaceLooker))
 
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
