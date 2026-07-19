@@ -8,11 +8,12 @@
 //
 //  1. "Workspace owner" can't be derived; we honour the contract by
 //     treating the resource's creator as admin.
-//  2. Team membership lookups would require an upstream service.
-//     The team subject type is supported in the data model but the
-//     evaluator only matches by exact subject ID — host services
-//     wishing to expand a member-to-teams set must hydrate the team
-//     IDs before calling Check.
+//  2. Team membership can't be resolved (teams live upstream and are
+//     never propagated to Check), so team-based grants are NOT
+//     supported: resolveAccess ignores subject_type="team", and Grant
+//     REJECTS it at write time so an inert grant can't be persisted and
+//     mislead an admin into thinking they shared something. Only
+//     "member" and "everyone" subject types are honored.
 package permission
 
 import (
@@ -47,6 +48,15 @@ const (
 // AccessNone is not a grant — revoking is done via Revoke().
 var validAccessForGrant = map[AccessLevel]bool{
 	AccessView: true, AccessComment: true, AccessEdit: true, AccessAdmin: true,
+}
+
+// validSubjectType enumerates the subject types the rule engine actually honors (resolveAccess).
+// "team" is deliberately EXCLUDED: Docs cannot resolve team membership (teams live upstream and are
+// never propagated to Check), so resolveAccess skips a team grant — it would persist and grant
+// nothing. Rejecting it at write time turns that silent lie ("you shared this") into a loud error.
+// A grant with any other subject type was equally inert on the read path.
+var validSubjectType = map[string]bool{
+	"member": true, "everyone": true,
 }
 
 type Permission struct {
@@ -117,6 +127,11 @@ func (s *Store) Grant(ctx context.Context, p Permission) error {
 	}
 	if p.SubjectType == "" || p.SubjectID == "" {
 		return errors.New("permission: subject required")
+	}
+	if !validSubjectType[p.SubjectType] {
+		// Only member/everyone are honored by resolveAccess; "team" (and anything else) is inert, so
+		// persisting it would tell the admin a share happened when it did not. Fail loud instead.
+		return fmt.Errorf("permission: unsupported subject_type %q (only \"member\" and \"everyone\" are honored)", p.SubjectType)
 	}
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO permissions (resource_type, resource_id, subject_type, subject_id, access, workspace_id, granted_by)
@@ -256,9 +271,10 @@ func resolveAccess(res resourceContext, memberID string, perms []Permission) Acc
 	}
 	best := AccessNone
 	consider := func(p Permission) {
-		// "member" must match exactly; "everyone" always matches.
-		// "team" matches by exact subject_id — the host is expected
-		// to expand a member's team membership before calling Check.
+		// "member" must match exactly; "everyone" always matches. "team" (and any other subject
+		// type) confers NOTHING: Docs can't resolve team membership, so a team grant is inert —
+		// which is why Grant now rejects it at write time. Legacy team rows already in the table
+		// fall through to the default and are ignored here, exactly as before.
 		switch p.SubjectType {
 		case "member":
 			if p.SubjectID != memberID {
@@ -266,11 +282,8 @@ func resolveAccess(res resourceContext, memberID string, perms []Permission) Acc
 			}
 		case "everyone":
 			// match
-		case "team":
-			// Phase 8 store cannot resolve team membership directly.
-			// Treat as not-applicable to a per-member Check.
-			return
 		default:
+			// team, or anything else the write-side allow-list no longer permits: not applicable.
 			return
 		}
 		if rank(p.Access) > rank(best) {
@@ -306,3 +319,29 @@ func (s *Store) Check(ctx context.Context, memberID string, res resourceContext,
 	}
 	return resolveAccess(res, memberID, perms), nil
 }
+
+// CheckSpace and CheckPage are the NON-HTTP entry points to the same rule engine the RequireAccess
+// middleware uses — for callers that have no *http.Request (the MCP tools). They build the
+// resourceContext from the caller-supplied meta exactly as SpaceResolverFromParam /
+// PageResolverFromParam do, then delegate to Check. No new access model: the enforcement is
+// resolveAccess, unchanged.
+func (s *Store) CheckSpace(ctx context.Context, memberID, spaceID string, md SpaceMeta, wsIDs []string) (AccessLevel, error) {
+	return s.Check(ctx, memberID, resourceContext{
+		Type: ResourceSpace, ID: spaceID, WorkspaceID: md.WorkspaceID, Private: md.Private, CreatedBy: md.CreatedBy,
+	}, wsIDs)
+}
+
+// CheckPage mirrors PageResolverFromParam: the page inherits its space's privacy + creator-admin rule
+// and its space-level grants (preloaded here), so a page with no page-level grant still resolves
+// through the space.
+func (s *Store) CheckPage(ctx context.Context, memberID, pageID string, md PageMeta, wsIDs []string) (AccessLevel, error) {
+	spacePerms, _ := s.ListForResource(ctx, ResourceSpace, md.SpaceID, wsIDs)
+	return s.Check(ctx, memberID, resourceContext{
+		Type: ResourcePage, ID: pageID, WorkspaceID: md.WorkspaceID, SpaceID: md.SpaceID,
+		Private: md.SpacePrivate, CreatedBy: md.SpaceCreatedBy, SpacePerms: spacePerms,
+	}, wsIDs)
+}
+
+// AtLeast reports whether level a meets or exceeds b on the access ladder (none<view<comment<edit<admin).
+// Exposes the same rank() comparison RequireAccess uses, for callers gating on a minimum tier.
+func AtLeast(a, b AccessLevel) bool { return rank(a) >= rank(b) }

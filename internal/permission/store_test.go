@@ -57,6 +57,54 @@ func TestGrant_RejectsInvalidAccess(t *testing.T) {
 	}
 }
 
+func TestGrant_RejectsTeamSubjectType(t *testing.T) {
+	// A team grant is INERT: resolveAccess skips subject_type="team" (the host can't resolve team
+	// membership), so a persisted team grant silently grants nothing — the worst state, because it
+	// tells an admin they shared when they didn't. Reject it at write time so the failure is loud.
+	// The ExpectExec is allowed so the ONLY source of a non-nil err is the write-time validation we
+	// add — not an unexpected-call mock error (RED without it: team reaches the INSERT and succeeds).
+	store, pool := newMockStore(t)
+	pool.ExpectExec(`INSERT INTO permissions`).
+		WithArgs("space", "sp-1", "team", "t-eng", "view", "ws-1", "u-admin").
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	err := store.Grant(context.Background(), Permission{
+		ResourceType: ResourceSpace, ResourceID: "sp-1",
+		SubjectType: "team", SubjectID: "t-eng",
+		Access: AccessView, WorkspaceID: "ws-1", GrantedBy: "u-admin",
+	})
+	if err == nil {
+		t.Fatal("Grant accepted subject_type=team — team grants are inert (resolveAccess skips them); " +
+			"want a write-time rejection so an admin is not told a share happened when it did not")
+	}
+}
+
+func TestGrant_AcceptsEveryone(t *testing.T) {
+	// The removal must not over-reject: "everyone" is a real, honored subject type.
+	store, pool := newMockStore(t)
+	pool.ExpectExec(`INSERT INTO permissions`).
+		WithArgs("space", "sp-1", "everyone", "everyone", "view", "ws-1", "u-admin").
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	err := store.Grant(context.Background(), Permission{
+		ResourceType: ResourceSpace, ResourceID: "sp-1",
+		SubjectType: "everyone", SubjectID: "everyone",
+		Access: AccessView, WorkspaceID: "ws-1", GrantedBy: "u-admin",
+	})
+	if err != nil {
+		t.Fatalf("Grant rejected subject_type=everyone: %v", err)
+	}
+}
+
+func TestResolveAccess_TeamGrant_IsIgnored(t *testing.T) {
+	// Characterization lock: even a team grant whose subject_id equals the caller confers nothing.
+	// This is why team grants are removed at write time (above) rather than left to mislead.
+	got := resolveAccess(resourceContext{Type: ResourceSpace, Private: true}, "t-eng", []Permission{
+		{SubjectType: "team", SubjectID: "t-eng", Access: AccessAdmin},
+	})
+	if got != AccessNone {
+		t.Fatalf("team grant conferred %q, want none (team is not resolved on the per-member path)", got)
+	}
+}
+
 func TestRevoke_DeletesByResourceAndSubject(t *testing.T) {
 	store, pool := newMockStore(t)
 

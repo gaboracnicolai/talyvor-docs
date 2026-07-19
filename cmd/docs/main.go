@@ -381,6 +381,21 @@ func main() {
 		return pageID, md, nil
 	}
 	blockEnf := permission.NewEnforcer(permStore, permission.PageResolverFromBlock("blockID", blockPageLooker, permStore))
+	// /databases/{dbID}/* routes resolve the owning page from the database id (databases carry page_id),
+	// exactly like blocks — so an inline database inherits its page's edit/view tier instead of being
+	// gated by workspace membership alone (which let a view-only member mutate schema/rows/views).
+	dbPageLooker := func(ctx context.Context, dbID string) (string, permission.PageMeta, error) {
+		var pageID string
+		if err := pool.QueryRow(ctx, `SELECT page_id FROM databases WHERE id=$1`, dbID).Scan(&pageID); err != nil {
+			return "", permission.PageMeta{}, err
+		}
+		md, err := pageLooker(ctx, pageID)
+		if err != nil {
+			return "", permission.PageMeta{}, err
+		}
+		return pageID, md, nil
+	}
+	dbEnf := permission.NewEnforcer(permStore, permission.PageResolverFromDatabase("dbID", dbPageLooker, permStore))
 
 	spaceHandler.WithAccess(spaceEnf)
 	pageHandler.WithAccess(pageEnf, spaceEnf)
@@ -391,12 +406,16 @@ func main() {
 	editSessionHandler.WithAccess(pageEnf)
 	linkHandler.WithAccess(pageEnf)
 	analyticsHandler.WithAccess(pageEnf)
-	dbHandler.WithAccess(pageEnf)
+	dbHandler.WithAccess(pageEnf, dbEnf)
 	changelogHandler.WithAccess(pageEnf)
 	freshHandler.WithAccess(pageEnf)
 	exportHandler.WithAccess(pageEnf)
 	approvalHandler.WithAccess(pageEnf)
 	permHandler.WithAccess(spaceEnf, pageEnf)
+	// MCP write tools (create/update/verify_page) enforce the same AccessEdit tier as the REST doors:
+	// the membership chokepoint authorizes the workspace, this adds the within-workspace tier via the
+	// shared permission rule engine + the scoped page/space lookers. Unwired ⇒ MCP writes fail closed.
+	mcpServer.WithAccess(mcp.NewPermissionAccess(permStore, pageLooker, spaceLooker))
 
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles

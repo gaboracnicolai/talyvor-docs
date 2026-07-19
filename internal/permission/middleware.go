@@ -274,6 +274,20 @@ func PageResolverFromBlock(blockParam string, looker BlockPageLookup, store *Sto
 	}
 }
 
+// DatabasePageLookup resolves a database id to its owning page id + that page's meta, for gating the
+// by-database-id routes (/databases/{dbID}/*) — an inline database is page content (databases.page_id),
+// so it inherits the page's access, exactly like a block. Same shape as BlockPageLookup; the host
+// scopes its lookup to the caller's workspaces (a foreign db → error → 404).
+type DatabasePageLookup = BlockPageLookup
+
+// PageResolverFromDatabase gates a /databases/{dbID}/... route on the access of the PAGE that owns the
+// database. It reuses PageResolverFromBlock verbatim — both resolve an id → its owning page and inherit
+// that page's access — and is named distinctly only so the wiring in main.go reads for what it gates.
+// No new access mechanism: this composes the existing Enforcer/RequireAccess primitive.
+func PageResolverFromDatabase(dbParam string, looker DatabasePageLookup, store *Store) ResourceResolver {
+	return PageResolverFromBlock(dbParam, looker, store)
+}
+
 func writeForbidden(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)

@@ -5,8 +5,22 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/talyvor/docs/internal/permission"
 	"github.com/talyvor/docs/internal/testutil"
 )
+
+// grantEdit gives member an edit grant on a page — the AccessEdit tier the MCP write gate now requires.
+// These attribution tests are about WHO a write is credited to, not the tier, so the actor is granted
+// edit to keep exercising the write path (wiring the real permission, not weakening the gate).
+func grantEdit(t *testing.T, d *testutil.DB, ws, pageID, member, grantedBy string) {
+	t.Helper()
+	if err := permission.NewStore(d.Pool).Grant(context.Background(), permission.Permission{
+		ResourceType: permission.ResourcePage, ResourceID: pageID, SubjectType: "member",
+		SubjectID: member, Access: permission.AccessEdit, WorkspaceID: ws, GrantedBy: grantedBy,
+	}); err != nil {
+		t.Fatalf("grant edit: %v", err)
+	}
+}
 
 // MCP tools took their ACTOR from client-supplied JSON-RPC args:
 //
@@ -35,6 +49,7 @@ func TestSecMCP_UpdatePage_ActorIsVerifiedNotArgs(t *testing.T) {
 	alice := d.Member(t, ws, "alice@corp.com")
 	mallory := d.Member(t, ws, "mallory@corp.com")
 	pageID := d.Page(t, ws, alice, "Spec")
+	grantEdit(t, d, ws, pageID, mallory, alice)
 
 	chain := newMCPChain(t, d)
 
@@ -84,6 +99,7 @@ func TestSecMCP_VerifyPage_VerifierIsVerifiedNotArgs(t *testing.T) {
 	alice := d.Member(t, ws, "alice@corp.com")
 	mallory := d.Member(t, ws, "mallory@corp.com")
 	pageID := d.Page(t, ws, alice, "Spec")
+	grantEdit(t, d, ws, pageID, mallory, alice)
 
 	chain := newMCPChain(t, d)
 	rr := callTool(chain, "mallory@corp.com", true, "verify_page", map[string]any{

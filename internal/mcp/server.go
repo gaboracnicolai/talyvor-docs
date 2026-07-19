@@ -64,8 +64,9 @@ type deps struct {
 }
 
 type Server struct {
-	deps  deps
-	limit *ratelimit.Limiter // nil = unthrottled (tests); main.go always wires it
+	deps   deps
+	limit  *ratelimit.Limiter // nil = unthrottled (tests); main.go always wires it
+	access AccessController    // nil = write tools DENY (fail-closed); main.go always wires it
 }
 
 // WithRateLimit attaches the per-workspace LLM limiter. It applies ONLY to llmTools, keyed
@@ -73,6 +74,14 @@ type Server struct {
 // arg, which would let an agent name a fresh bucket and evade the ceiling.
 func (s *Server) WithRateLimit(l *ratelimit.Limiter) *Server {
 	s.limit = l
+	return s
+}
+
+// WithAccess attaches the within-workspace tier gate for the write tools (create/update/verify_page).
+// The membership chokepoint authorizes the workspace; this enforces the AccessEdit tier inside it, so
+// a view-tier member cannot mutate via MCP as they cannot via REST. Unwired ⇒ write tools DENY.
+func (s *Server) WithAccess(a AccessController) *Server {
+	s.access = a
 	return s
 }
 
@@ -130,6 +139,15 @@ const (
 // belongs here, or it is an unmetered hole.
 var llmTools = map[string]bool{
 	"ask_docs": true,
+}
+
+// writeTools are the tools that MUTATE a resource and therefore require the AccessEdit tier (not just
+// workspace membership). Keep this set honest — a new mutating tool that is not listed here bypasses the
+// tier gate, the same class of hole this closes for create/update/verify_page.
+var writeTools = map[string]bool{
+	"create_page": true,
+	"update_page": true,
+	"verify_page": true,
 }
 
 func writeRPC(w http.ResponseWriter, resp rpcResponse) {
@@ -384,6 +402,16 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 		return nil, &rpcError{Code: errRateLimited, Message: "rate limit exceeded for this workspace, please retry shortly"}
 	}
 
+	// SEC-4 within-workspace TIER gate. The chokepoint above authorized the WORKSPACE; the write
+	// tools additionally require the AccessEdit tier on the target page/space — the same the REST
+	// doors enforce — so a view-tier member cannot create/update/verify via MCP. Fail-closed.
+	if writeTools[name] {
+		allowed, err := s.authorizeWrite(ctx, name, args, m.MemberID)
+		if err != nil || !allowed {
+			return nil, &rpcError{Code: errUnauthorized, Message: "not authorized: this action requires edit access"}
+		}
+	}
+
 	switch name {
 	case "search_docs":
 		return s.toolSearchDocs(ctx, args)
@@ -407,6 +435,24 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 		return s.toolGetSpaceTree(ctx, args)
 	}
 	return nil, &rpcError{Code: errMethodNotFound, Message: "unknown tool: " + name}
+}
+
+// authorizeWrite enforces the AccessEdit tier a write tool needs, on the object it targets. It reuses
+// the permission rule engine via the AccessController (permission.CheckPage / CheckSpace) — the same
+// resolveAccess the REST enforcer runs. FAIL-CLOSED: a nil controller denies every write, so a dropped
+// wiring is a loud total denial rather than a silent reopening of the tier hole. memberID is the actor
+// the chokepoint already resolved from the VERIFIED identity (never a client arg).
+func (s *Server) authorizeWrite(ctx context.Context, name string, args map[string]any, memberID string) (bool, error) {
+	if s.access == nil {
+		return false, nil
+	}
+	switch name {
+	case "create_page":
+		return s.access.CanEditSpace(ctx, stringArg(args, "space_id", ""), memberID)
+	case "update_page", "verify_page":
+		return s.access.CanEditPage(ctx, stringArg(args, "page_id", ""), memberID)
+	}
+	return false, nil // an unmapped write tool denies (fail-closed)
 }
 
 // toolWorkspace resolves the workspace a tool call acts on, for the authz chokepoint. Direct

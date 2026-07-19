@@ -63,6 +63,18 @@ func l2Chain(d *testutil.DB) http.Handler {
 	}
 	spaceEnf := permission.NewEnforcer(permStore, permission.SpaceResolverFromParam("spaceID", spaceLooker))
 	pageEnf := permission.NewEnforcer(permStore, permission.PageResolverFromParam("pageID", pageLooker, permStore))
+	dbPageLooker := func(ctx context.Context, dbID string) (string, permission.PageMeta, error) {
+		var pageID string
+		if err := d.Pool.QueryRow(ctx, `SELECT page_id FROM databases WHERE id=$1`, dbID).Scan(&pageID); err != nil {
+			return "", permission.PageMeta{}, err
+		}
+		md, err := pageLooker(ctx, pageID)
+		if err != nil {
+			return "", permission.PageMeta{}, err
+		}
+		return pageID, md, nil
+	}
+	dbEnf := permission.NewEnforcer(permStore, permission.PageResolverFromDatabase("dbID", dbPageLooker, permStore))
 
 	r := chi.NewRouter()
 	r.Route("/v1", func(r chi.Router) {
@@ -71,7 +83,7 @@ func l2Chain(d *testutil.DB) http.Handler {
 		r.Use(authz.Middleware(authz.NewPGResolver(d.Pool), exempt))
 		approval.NewHandler(approval.NewStore(d.Pool)).WithAccess(pageEnf).Mount(r)
 		permission.NewHandler(permStore).WithAccess(spaceEnf, pageEnf).Mount(r)
-		database.NewHandler(database.NewStore(d.Pool)).WithAccess(pageEnf).Mount(r)
+		database.NewHandler(database.NewStore(d.Pool)).WithAccess(pageEnf, dbEnf).Mount(r)
 		changelog.NewHandler(changelog.NewStore(d.Pool, nil)).WithAccess(pageEnf).Mount(r)
 		templatelib.NewHandler(templatelib.NewStore(d.Pool, nil)).Mount(r)
 		customdomain.NewHandler(customdomain.NewStore(d.Pool), nil).Mount(r)
