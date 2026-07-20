@@ -8,11 +8,23 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/talyvor/docs/internal/authz"
+	"github.com/talyvor/docs/internal/spaceauth"
 )
 
-type Handler struct{ store *Store }
+type Handler struct {
+	store  *Store
+	access *spaceauth.Authorizer // gates Use on the TARGET space's edit tier (space_id is in the body)
+}
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
+
+// WithAccess wires the space-write authorizer that gates Use on the target space's AccessEdit tier.
+// Without it Use fails closed (a nil authorizer refuses every write). SpaceResolverFromParam can't gate
+// this route because space_id arrives in the request body, not the URL.
+func (h *Handler) WithAccess(a *spaceauth.Authorizer) *Handler {
+	h.access = a
+	return h
+}
 
 func (h *Handler) Mount(r chi.Router) {
 	r.Get("/workspaces/{wsID}/template-library", h.List)
@@ -110,24 +122,23 @@ func (h *Handler) Use(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "space_id is required")
 		return
 	}
-	// TEMPLATE read scoped to the caller's VERIFIED set; the NEW page's owner
-	// is the {wsID} path workspace, but only if the caller is a verified
-	// member (else 404 — a raw path param can't name a foreign target).
+	// TEMPLATE read is scoped to the caller's VERIFIED set (wsIDs). The NEW page is created in the
+	// BODY-named space, so its creation must clear THAT space's AccessEdit tier — the same page.Create
+	// enforces at the canonical door. The {wsID} path param cannot authorize a body-named space, and
+	// SpaceResolverFromParam only reads chi URL params, so spaceauth resolves + tier-checks it in-handler.
+	// Fail-closed: a foreign/unresolvable space → 404 (no oracle); an under-edit tier → 403. The page's
+	// workspace + author come from the resolved SPACE, never a client-supplied id.
 	wsIDs := authz.WorkspaceIDs(r.Context())
-	target := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized write-target: authz.AuthorizeWorkspace below rejects non-members before this workspace owns the new object
-	// AuthorizeWorkspace hands back the caller's Membership — use ITS member id. It is the
-	// caller's id in THIS workspace, correct for any membership count, unlike ActorOrEmpty
-	// which is "" for anyone with != 1 memberships (leaving the object unattributed).
-	m, ok := authz.AuthorizeWorkspace(r.Context(), target)
-	if !ok {
+	d := h.access.AuthorizeSpaceWrite(r.Context(), in.SpaceID)
+	if !d.Found {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
-	creator := m.MemberID
-	if creator == "" {
-		creator = "user"
+	if !d.CanEdit {
+		writeErr(w, http.StatusForbidden, "insufficient access: creating a page requires edit access on the space")
+		return
 	}
-	page, err := h.store.UseTemplate(r.Context(), templateID, in.SpaceID, target, creator, wsIDs)
+	page, err := h.store.UseTemplate(r.Context(), templateID, in.SpaceID, d.WorkspaceID, d.Actor, wsIDs)
 	if errors.Is(err, ErrNotFound) {
 		writeErr(w, http.StatusNotFound, err.Error())
 		return

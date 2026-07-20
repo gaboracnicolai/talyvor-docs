@@ -65,6 +65,7 @@ import (
 	"github.com/talyvor/docs/internal/search"
 	"github.com/talyvor/docs/internal/sharing"
 	"github.com/talyvor/docs/internal/space"
+	"github.com/talyvor/docs/internal/spaceauth"
 	"github.com/talyvor/docs/internal/templatelib"
 	"github.com/talyvor/docs/internal/trackintegration"
 	"github.com/talyvor/docs/migrations"
@@ -416,6 +417,13 @@ func main() {
 	// the membership chokepoint authorizes the workspace, this adds the within-workspace tier via the
 	// shared permission rule engine + the scoped page/space lookers. Unwired ⇒ MCP writes fail closed.
 	mcpServer.WithAccess(mcp.NewPermissionAccess(permStore, pageLooker, spaceLooker))
+	// template-use + import create page content into a space named in the request BODY/FORM (not the
+	// URL), so SpaceResolverFromParam can't gate them. spaceauth resolves the target space scoped to the
+	// caller's workspaces and enforces its AccessEdit tier via permission.CheckSpace — the same engine.
+	// Unwired ⇒ both fail closed (refuse).
+	spaceWriteAuth := spaceauth.New(spaceStore, permStore)
+	tmplHandler.WithAccess(spaceWriteAuth)
+	importerHandler.WithAccess(spaceWriteAuth)
 
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
