@@ -421,8 +421,12 @@ func main() {
 	// the handler layer below upgrades the HTTP request and shuttles
 	// frames through the engine's per-client send channels.
 	otEngine := collab.NewOTEngine()
-	// SEC-4: WithPageScope binds every collab session to the caller's workspace membership.
-	collabHandler := collab.NewHandler(otEngine).WithGuard(lockStore).WithPageScope(pageStore)
+	// SEC-4: WithAccess binds every collab session to the caller's workspace membership (scope 404),
+	// resolves the verified actor in the page's workspace, AND gates `change` frames on the AccessEdit
+	// tier — the same permission rule engine the REST + MCP write gates use (reuses pageLooker +
+	// permission.CheckPage). A view-only member may connect (cursor/presence) but cannot mutate.
+	collabHandler := collab.NewHandler(otEngine).WithGuard(lockStore).
+		WithAccess(collab.NewPermissionSession(permStore, pageLooker))
 	saver := collab.NewAutoSaver(otEngine,
 		func(ctx context.Context, pageID, content string) error {
 			_, err := pageStore.Update(ctx, pageID, map[string]any{"content": content})

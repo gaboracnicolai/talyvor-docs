@@ -9,8 +9,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
-
-	"github.com/talyvor/docs/internal/authz"
 )
 
 // upgrader keeps the default check off so the dev frontend (on
@@ -42,24 +40,19 @@ type LockGuard interface {
 	CanEdit(ctx context.Context, pageID, memberID string, isAdmin bool) (bool, string, error)
 }
 
-// PageScoper answers "is this page in the caller's workspace membership?" — the SEC-4 gate
-// the WS entry point runs before opening a session. internal/page.Store satisfies it.
-type PageScoper interface {
-	PageInWorkspaces(ctx context.Context, pageID string, wsIDs []string) (bool, error)
-}
-
 type Handler struct {
 	engine *OTEngine
 	guard  LockGuard
-	scope  PageScoper
+	access SessionResolver
 }
 
 func NewHandler(engine *OTEngine) *Handler { return &Handler{engine: engine} }
 
-// WithPageScope attaches the SEC-4 membership scope check. REQUIRED for a gated deployment:
-// with no scoper wired, ServeWS fails closed (rejects every session).
-func (h *Handler) WithPageScope(s PageScoper) *Handler {
-	h.scope = s
+// WithAccess attaches the SEC-4 session resolver: the membership scope gate (404 for a page outside
+// the caller's workspaces), the verified actor, and the edit-tier decision that gates `change` frames.
+// REQUIRED for a gated deployment: with no resolver wired, ServeWS fails closed (rejects every session).
+func (h *Handler) WithAccess(s SessionResolver) *Handler {
+	h.access = s
 	return h
 }
 
@@ -92,28 +85,19 @@ func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// SEC-4 gate: verified actor + page-in-membership, checked BEFORE the upgrade so a reject
-	// is a clean HTTP 404, not a half-open socket. Fail closed if no scoper is wired.
-	//
-	// NOT an authority hole: the ?member_id= query param is ignored (retired), so nothing
-	// client-supplied names the actor and there is no fallback to forge. This is the last
-	// caller of authz.ActorOrEmpty, which returns "" for any caller with != 1 memberships —
-	// so a MULTI-WORKSPACE member opens a session with an empty member id: their presence
-	// is unlabelled and CanEdit will not recognise them as the holder of their own lock.
-	// A functional residue of the same root, not a privilege bug.
-	//
-	// The REST paths resolve this via permission.ActorFromContext, populated by
-	// RequireAccess — but this route is mounted directly (no resource middleware), so there
-	// is no resolved actor in context. Fixing it needs PageScoper to also yield the page's
-	// workspace, so the actor can be resolved with authz.MemberIDForWorkspace. Deferred:
-	// see BUILD_STATE §3.
-	//
-	// nosemgrep: docs-no-ambiguous-actor-helpers -- LAST remaining caller, deliberately deferred. Not an authority hole: the ?member_id= query param is ignored and there is NO body fallback here, so nothing client-supplied can name the actor — the only effect is that a multi-workspace member gets an empty member id (unlabelled presence; CanEdit will not match them to their own lock). Every other call site is migrated to permission.ActorFromContext / authz.AuthorizeWorkspace. Fixing this one requires PageScoper to also yield the page's workspace so the actor can come from authz.MemberIDForWorkspace — tracked in BUILD_STATE §3. Do not copy this suppression to a handler that HAS a body fallback.
-	memberID := authz.ActorOrEmpty(r.Context())
-	inScope := false
-	if h.scope != nil {
-		ok, sErr := h.scope.PageInWorkspaces(r.Context(), pageID, authz.WorkspaceIDs(r.Context()))
-		inScope = sErr == nil && ok
+	// SEC-4 gate, resolved from the VERIFIED gateway context BEFORE the upgrade so a reject is a
+	// clean HTTP status, not a half-open socket. The resolver yields all three at once:
+	//   - inScope: the page is in the caller's workspaces (else 404 — no live channel into a page
+	//     they can't see); fail-closed if no resolver is wired.
+	//   - actor: the caller's member id IN THE PAGE'S workspace (authz.MemberIDForWorkspace), correct
+	//     for ANY membership count — this REPLACES authz.ActorOrEmpty, which returned "" for any
+	//     caller with != 1 memberships (the empty-actor residue: unlabelled presence + CanEdit not
+	//     matching a multi-workspace member to their own lock). Nothing client-supplied names the
+	//     actor; ?member_id= is ignored.
+	//   - canEdit: whether the caller holds the edit tier — gates `change` frames below.
+	inScope, actor, canEdit := false, "", false
+	if h.access != nil {
+		inScope, actor, canEdit = h.access.ResolveSession(r.Context(), pageID)
 	}
 	if !inScope {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
@@ -125,7 +109,7 @@ func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
 		slog.Warn("collab: upgrade failed", slog.String("err", err.Error()))
 		return
 	}
-	client, err := h.engine.Join(pageID, clientID, memberID, memberName)
+	client, err := h.engine.Join(pageID, clientID, actor, memberName)
 	if err != nil {
 		_ = conn.Close()
 		return
@@ -134,10 +118,12 @@ func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	// Two goroutines per session: one writes the engine's outbound
 	// queue to the socket, the other reads inbound frames and
 	// dispatches them into the engine. The pair exits on the first
-	// io error.
+	// io error. canEdit is resolved once at connect and gates every
+	// `change` frame; cursor + presence flow regardless (read-only
+	// members still see live collaboration).
 	ctx, cancel := context.WithCancel(r.Context())
 	go h.writePump(ctx, conn, client, cancel)
-	h.readPump(ctx, conn, pageID, client, cancel)
+	h.readPump(ctx, conn, pageID, client, canEdit, cancel)
 
 	h.engine.Leave(pageID, clientID)
 	_ = conn.Close()
@@ -168,7 +154,7 @@ func (h *Handler) writePump(ctx context.Context, conn *websocket.Conn, c *Collab
 	}
 }
 
-func (h *Handler) readPump(ctx context.Context, conn *websocket.Conn, pageID string, c *CollabClient, cancel context.CancelFunc) {
+func (h *Handler) readPump(ctx context.Context, conn *websocket.Conn, pageID string, c *CollabClient, canEdit bool, cancel context.CancelFunc) {
 	defer cancel()
 	_ = conn.SetReadDeadline(time.Now().Add(readWait))
 	conn.SetPongHandler(func(string) error {
@@ -181,7 +167,7 @@ func (h *Handler) readPump(ctx context.Context, conn *websocket.Conn, pageID str
 			return
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(readWait))
-		if !h.dispatch(ctx, pageID, c, raw) {
+		if !h.dispatch(ctx, pageID, c, canEdit, raw) {
 			return
 		}
 	}
@@ -190,7 +176,7 @@ func (h *Handler) readPump(ctx context.Context, conn *websocket.Conn, pageID str
 // dispatch routes one inbound JSON frame into the engine. Returns
 // false to signal the read pump to tear down (e.g. an unrecoverable
 // protocol error); true to continue.
-func (h *Handler) dispatch(ctx context.Context, pageID string, c *CollabClient, raw []byte) bool {
+func (h *Handler) dispatch(ctx context.Context, pageID string, c *CollabClient, canEdit bool, raw []byte) bool {
 	var env struct {
 		Type   string          `json:"type"`
 		Change *Change         `json:"change,omitempty"`
@@ -203,6 +189,19 @@ func (h *Handler) dispatch(ctx context.Context, pageID string, c *CollabClient, 
 	switch env.Type {
 	case "change":
 		if env.Change == nil {
+			return true
+		}
+		// TIER gate. canEdit was resolved once at connect (SessionResolver): the caller holds
+		// >= AccessEdit on this page. A view-only member may stay connected for cursor + presence
+		// but must not mutate — refuse the change at the boundary so the engine never sees it, and
+		// the autosaver never persists it. Fail-closed: canEdit is false unless the tier resolved to
+		// edit, so a broken/absent resolver denies. Same non-disconnecting shape as the lock guard.
+		if !canEdit {
+			rejected, _ := json.Marshal(map[string]any{
+				"type":   "change_rejected",
+				"reason": "you do not have edit access to this page",
+			})
+			trySend(c.send, rejected)
 			return true
 		}
 		// Lock guard. A foreign lock or approved doc_status blocks
