@@ -77,6 +77,19 @@ func (h *Handler) FromPage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad json")
 		return
 	}
+	// A template COPIES the source page's content verbatim into the library (readable via List), so
+	// creating one requires VIEW on that page — not just workspace membership. Otherwise a member could
+	// templatize a page in a private space they cannot read and then read its content from the library.
+	// page_id is in the body, so SpaceResolverFromParam can't gate it; spaceauth resolves + tier-checks
+	// it in-handler via permission.CheckPage. Fail-closed: a foreign/unresolvable page → 404 (no oracle);
+	// resolvable but under View → 403.
+	if found, canView := h.access.AuthorizePageRead(r.Context(), in.PageID); !found {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	} else if !canView {
+		writeErr(w, http.StatusForbidden, "insufficient access: creating a template requires view access to the source page")
+		return
+	}
 	// The SOURCE page read is scoped to the caller's VERIFIED set. The NEW
 	// template's owner is the {wsID} path workspace, but ONLY if the caller
 	// is a verified member of it — otherwise a raw path param could name a

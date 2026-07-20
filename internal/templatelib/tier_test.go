@@ -32,8 +32,25 @@ const tierSecret = "sec4-test-gateway-secret-0123456789"
 func tierChain(d *testutil.DB) http.Handler {
 	permStore := permission.NewStore(d.Pool)
 	spaceStore := space.NewStore(d.Pool)
-	h := templatelib.NewHandler(templatelib.NewStore(d.Pool, page.NewStore(d.Pool))).
-		WithAccess(spaceauth.New(spaceStore, permStore))
+	pageStore := page.NewStore(d.Pool)
+	// page-meta looker (page+space join, scoped to the caller's workspaces) — the same shape main.go
+	// wires; AuthorizePageRead (FromPage's gate) needs it.
+	pageLooker := func(ctx context.Context, id string) (permission.PageMeta, error) {
+		pg, err := pageStore.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.PageMeta{}, err
+		}
+		sp, err := spaceStore.GetByIDInWorkspaces(ctx, pg.SpaceID, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.PageMeta{}, err
+		}
+		return permission.PageMeta{
+			WorkspaceID: pg.WorkspaceID, SpaceID: pg.SpaceID, SpaceCreatedBy: sp.CreatedBy,
+			SpacePrivate: sp.Private, PageCreatedBy: pg.CreatedBy,
+		}, nil
+	}
+	h := templatelib.NewHandler(templatelib.NewStore(d.Pool, pageStore)).
+		WithAccess(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
 	r := chi.NewRouter()
 	r.Route("/v1", func(r chi.Router) {
 		exempt := func(string) bool { return false }
@@ -135,5 +152,87 @@ func TestA3_TemplateUse_TierEnforcement(t *testing.T) {
 	}
 	if n := pagesIn(foreignSpace.ID); n != 0 {
 		t.Errorf("template-use created a page in a foreign-workspace space (%d)", n)
+	}
+}
+
+// A3 read-tier enforcement for template FROM-PAGE. POST /v1/workspaces/{wsID}/template-library/from-page
+// COPIES the source page's content verbatim into a library_templates row (readable via List), gated
+// (pre-fix) only by AuthorizeWorkspace + the source read scoped to workspace MEMBERSHIP — never the source
+// page's AccessView. So a member could templatize a page in a private space they cannot read, lifting its
+// content into the library. RED (handler ungated): a no-grant member creates a template — assert on
+// library_templates rows, not just status. GREEN (AuthorizePageRead gate): no-grant 403 + NO template
+// row; a member WITH view succeeds; a source page in another workspace is 404 (no oracle).
+func TestA3_TemplateFromPage_ViewGate(t *testing.T) {
+	d := testutil.New(t)
+	ctx := context.Background()
+
+	W := d.Workspace(t)
+	owner := d.Member(t, W, "owner@corp.com")
+	viewer := d.Member(t, W, "viewer@corp.com")   // View grant on the private space
+	nogrant := d.Member(t, W, "nogrant@corp.com") // member of W, NO grant on the private space
+	_ = nogrant
+
+	// A PRIVATE space + a source page in it, both by owner. nogrant cannot read it; viewer (below) can.
+	privSpace, err := space.NewStore(d.Pool).Create(ctx, model.Space{
+		WorkspaceID: W, Name: "Priv", Slug: "priv-" + owner[len(owner)-6:], Private: true, CreatedBy: owner,
+	})
+	if err != nil {
+		t.Fatalf("seed private space: %v", err)
+	}
+	srcPage, err := page.NewStore(d.Pool).Create(ctx, model.Page{
+		SpaceID: privSpace.ID, WorkspaceID: W, Title: "Secret", Content: `{"type":"doc","tag":"SECRET-abc123"}`, CreatedBy: owner,
+	})
+	if err != nil {
+		t.Fatalf("seed source page: %v", err)
+	}
+	if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+		ResourceType: permission.ResourceSpace, ResourceID: privSpace.ID, SubjectType: "member",
+		SubjectID: viewer, Access: permission.AccessView, WorkspaceID: W, GrantedBy: owner,
+	}); err != nil {
+		t.Fatalf("grant view: %v", err)
+	}
+
+	// A source page in a DIFFERENT workspace (for the cross-tenant 404 case).
+	W2 := d.Workspace(t)
+	other := d.Member(t, W2, "other@corp.com")
+	foreignPage := d.Page(t, W2, other, "Foreign")
+
+	chain := tierChain(d)
+	code := func(r *http.Request) int { rr := httptest.NewRecorder(); chain.ServeHTTP(rr, r); return rr.Code }
+	templates := func() int {
+		var n int
+		if err := d.Pool.QueryRow(ctx, `SELECT count(*) FROM library_templates WHERE is_built_in = false`).Scan(&n); err != nil {
+			t.Fatalf("count templates: %v", err)
+		}
+		return n
+	}
+	url := "/v1/workspaces/" + W + "/template-library/from-page"
+	body := func(pageID string) string { return `{"page_id":"` + pageID + `","name":"T","category":"general"}` }
+	wrote := func(c int) bool { return c == http.StatusOK || c == http.StatusCreated }
+
+	// ── (a) RED: a member WITHOUT view on the private page must be REFUSED and NO template created. ──
+	before := templates()
+	if c := code(tierReq(http.MethodPost, url, "nogrant@corp.com", body(srcPage.ID))); c != http.StatusForbidden {
+		t.Errorf("no-grant FromPage = %d, want 403 (templatizing needs view on the source page)", c)
+	}
+	if after := templates(); after != before {
+		t.Errorf("no-grant FromPage CREATED a template (%d→%d) — the private page's content was lifted", before, after)
+	}
+
+	// ── (b) POSITIVE: a member WITH view succeeds and a template IS created. ──
+	if c := code(tierReq(http.MethodPost, url, "viewer@corp.com", body(srcPage.ID))); !wrote(c) {
+		t.Errorf("viewer FromPage = %d, want 200/201 (has view on the source page)", c)
+	}
+	if after := templates(); after != before+1 {
+		t.Errorf("viewer FromPage did not create exactly one template (%d→%d)", before, after)
+	}
+
+	// ── (c) Cross-workspace: a source page in another workspace → 404 (no oracle), no template. ──
+	mid := templates()
+	if c := code(tierReq(http.MethodPost, url, "viewer@corp.com", body(foreignPage))); c != http.StatusNotFound {
+		t.Errorf("FromPage of a foreign-workspace page = %d, want 404 (no oracle)", c)
+	}
+	if after := templates(); after != mid {
+		t.Errorf("FromPage of a foreign page created a template (%d→%d)", mid, after)
 	}
 }

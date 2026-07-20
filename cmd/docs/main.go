@@ -421,9 +421,11 @@ func main() {
 	// URL), so SpaceResolverFromParam can't gate them. spaceauth resolves the target space scoped to the
 	// caller's workspaces and enforces its AccessEdit tier via permission.CheckSpace — the same engine.
 	// Unwired ⇒ both fail closed (refuse).
-	spaceWriteAuth := spaceauth.New(spaceStore, permStore)
-	tmplHandler.WithAccess(spaceWriteAuth)
-	importerHandler.WithAccess(spaceWriteAuth)
+	importerHandler.WithAccess(spaceauth.New(spaceStore, permStore))
+	// templatelib also does FromPage, which COPIES a source page's content into a template — so it needs
+	// the page-read gate (AccessView on the source page) too. WithPageMeta wires the scoped page-meta
+	// looker the REST page enforcer uses; importer omits it (no page-read).
+	tmplHandler.WithAccess(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
 
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
