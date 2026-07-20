@@ -1,6 +1,7 @@
 package collab_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,8 +14,31 @@ import (
 	"github.com/talyvor/docs/internal/collab"
 	"github.com/talyvor/docs/internal/gatewayauth"
 	"github.com/talyvor/docs/internal/page"
+	"github.com/talyvor/docs/internal/permission"
+	"github.com/talyvor/docs/internal/space"
 	"github.com/talyvor/docs/internal/testutil"
 )
+
+// collabPageLooker builds the scoped page+space meta looker the SessionResolver needs — the same
+// looker that backs the REST enforcers in main.go.
+func collabPageLooker(d *testutil.DB) func(context.Context, string) (permission.PageMeta, error) {
+	spaceStore := space.NewStore(d.Pool)
+	pageStore := page.NewStore(d.Pool)
+	return func(ctx context.Context, id string) (permission.PageMeta, error) {
+		pg, err := pageStore.GetByIDInWorkspaces(ctx, id, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.PageMeta{}, err
+		}
+		sp, err := spaceStore.GetByIDInWorkspaces(ctx, pg.SpaceID, authz.WorkspaceIDs(ctx))
+		if err != nil {
+			return permission.PageMeta{}, err
+		}
+		return permission.PageMeta{
+			WorkspaceID: pg.WorkspaceID, SpaceID: pg.SpaceID, SpaceCreatedBy: sp.CreatedBy,
+			SpacePrivate: sp.Private, PageCreatedBy: pg.CreatedBy,
+		}, nil
+	}
+}
 
 const testGatewaySecret = "sec4-test-gateway-secret-0123456789"
 
@@ -31,7 +55,8 @@ func newCollabChain(t *testing.T, d *testutil.DB) http.Handler {
 	// GREEN wiring, mirroring main.go: collab inside the /v1 boundary (gatewayauth + authz),
 	// scoped to the caller's workspace membership. (Pre-fix this mounted on the root router
 	// with no middleware/scope — the RED baseline.)
-	h := collab.NewHandler(collab.NewOTEngine()).WithPageScope(page.NewStore(d.Pool))
+	h := collab.NewHandler(collab.NewOTEngine()).
+		WithAccess(collab.NewPermissionSession(permission.NewStore(d.Pool), collabPageLooker(d)))
 	r := chi.NewRouter()
 	r.Route("/v1", func(r chi.Router) {
 		exempt := func(string) bool { return false }
