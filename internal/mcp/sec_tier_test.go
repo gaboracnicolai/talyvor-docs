@@ -107,8 +107,7 @@ func TestSEC4_MCP_TierEnforcement(t *testing.T) {
 		t.Errorf("viewer's update_page PERSISTED — the write went through despite the view tier")
 	}
 
-	// ── POSITIVE controls — the gate must not over-block the edit tier. (update_page/verify_page work
-	//    against a real store; create_page's separate workspace_id bug keeps it out of the positives.) ──
+	// ── POSITIVE controls — the gate must not over-block the edit tier. ──
 	if rr := callTool(chain, "editor@corp.com", true, "update_page", map[string]any{"page_id": pg.ID, "title": "editor edit"}); toolDenied(rr) {
 		t.Errorf("editor update_page denied — edit grant must be allowed:\n%s", rr.Body.String())
 	}
@@ -117,6 +116,12 @@ func TestSEC4_MCP_TierEnforcement(t *testing.T) {
 	}
 	if rr := callTool(chain, "editor@corp.com", true, "verify_page", map[string]any{"page_id": pg.ID}); toolDenied(rr) {
 		t.Errorf("editor verify_page denied:\n%s", rr.Body.String())
+	}
+	// create_page needs EDIT on the SPACE — the owner (space creator=admin) can. This positive was
+	// omitted while create_page was broken (it never set workspace_id, so page.Store.Create errored);
+	// it passes now that the workspace is sourced from the verified chokepoint workspace.
+	if rr := callTool(chain, "owner@corp.com", true, "create_page", map[string]any{"space_id": sp.ID, "title": "owner new page"}); toolDenied(rr) {
+		t.Errorf("owner create_page denied/errored — space admin must be able to create:\n%s", rr.Body.String())
 	}
 }
 
@@ -139,5 +144,51 @@ func TestSEC4_MCP_WriteFailsClosedWithoutController(t *testing.T) {
 	})
 	if rr := callTool(r, "owner@corp.com", true, "update_page", map[string]any{"page_id": pg, "title": "x"}); !toolDenied(rr) {
 		t.Errorf("update_page with NO AccessController was allowed — write tools must fail closed:\n%s", rr.Body.String())
+	}
+}
+
+// create_page never set workspace_id, which page.Store.Create requires — so it always errored against a
+// real store (it only "worked" in unit tests with fakes). The fix must source workspace_id from the
+// chokepoint's VERIFIED workspace (the space's workspace it resolved + authorized), never a client arg.
+func TestSEC4_MCP_CreatePage_SetsVerifiedWorkspace(t *testing.T) {
+	d := testutil.New(t)
+	ctx := context.Background()
+
+	W := d.Workspace(t)
+	owner := d.Member(t, W, "owner@corp.com")   // space creator → admin (may create pages)
+	viewer := d.Member(t, W, "viewer@corp.com") // view on the space → tier-denied on create
+
+	sp, err := space.NewStore(d.Pool).Create(ctx, model.Space{
+		WorkspaceID: W, Name: "S", Slug: "s-" + owner[len(owner)-6:], Private: true, CreatedBy: owner,
+	})
+	if err != nil {
+		t.Fatalf("seed space: %v", err)
+	}
+	if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+		ResourceType: permission.ResourceSpace, ResourceID: sp.ID, SubjectType: "member",
+		SubjectID: viewer, Access: permission.AccessView, WorkspaceID: W, GrantedBy: owner,
+	}); err != nil {
+		t.Fatalf("grant view: %v", err)
+	}
+
+	chain := newMCPChain(t, d)
+
+	// RED: create_page currently errors (never sets workspace_id). GREEN: the owner's create_page succeeds
+	// AND the new page's workspace_id is the VERIFIED workspace — the space's workspace the chokepoint
+	// resolved and authorized — never a client argument.
+	if rr := callTool(chain, "owner@corp.com", true, "create_page", map[string]any{"space_id": sp.ID, "title": "New"}); toolDenied(rr) {
+		t.Fatalf("owner create_page errored — want success with workspace_id from the verified workspace:\n%s", rr.Body.String())
+	}
+	var ws string
+	if err := d.Pool.QueryRow(ctx, `SELECT workspace_id FROM pages WHERE space_id=$1`, sp.ID).Scan(&ws); err != nil {
+		t.Fatalf("created page not found (create_page did not persist): %v", err)
+	}
+	if ws != W {
+		t.Errorf("created page workspace_id = %q, want the verified workspace %q (from the chokepoint, not a client arg)", ws, W)
+	}
+
+	// The tier gate STILL holds: a view-tier member is refused on create_page (before dispatch).
+	if rr := callTool(chain, "viewer@corp.com", true, "create_page", map[string]any{"space_id": sp.ID, "title": "hax"}); !tierDenied(rr) {
+		t.Errorf("viewer create_page not tier-denied — the tier gate must still hold:\n%s", rr.Body.String())
 	}
 }
