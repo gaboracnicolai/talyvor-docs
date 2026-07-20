@@ -668,11 +668,20 @@ func (s *Server) toolCreatePage(ctx context.Context, args map[string]any) (any, 
 	if !ok {
 		return nil, &rpcError{Code: errUnauthorized, Message: "cannot resolve the acting member"}
 	}
+	// SEC + correctness: the new page's workspace is the VERIFIED workspace the chokepoint resolved from
+	// the space and authorized (authz.AuthorizedWorkspace) — never a client-supplied workspace_id, which
+	// would let a caller plant a page in a workspace they merely named. page.Store.Create REQUIRES it, so
+	// omitting it also made create_page error against a real store (only unit fakes hid it).
+	ws, ok := authz.AuthorizedWorkspace(ctx)
+	if !ok {
+		return nil, &rpcError{Code: errUnauthorized, Message: "cannot resolve the verified workspace"}
+	}
 	created, err := s.deps.pages.Create(ctx, model.Page{
-		SpaceID:   stringArg(args, "space_id", ""),
-		Title:     stringArg(args, "title", ""),
-		Content:   pm,
-		CreatedBy: actor,
+		SpaceID:     stringArg(args, "space_id", ""),
+		WorkspaceID: ws,
+		Title:       stringArg(args, "title", ""),
+		Content:     pm,
+		CreatedBy:   actor,
 	})
 	if err != nil {
 		return nil, err

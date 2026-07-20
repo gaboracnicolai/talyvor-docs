@@ -164,6 +164,18 @@ func AuthorizedMember(ctx context.Context) (string, bool) {
 	return ac.authMember, true
 }
 
+// AuthorizedWorkspace returns the workspace the last AuthorizeWorkspace VERIFIED for this call — for the
+// MCP chokepoint, the space's workspace it resolved and authorized the caller's membership on (stashed by
+// WithAuthorized, symmetric to AuthorizedMember). ok=false if none. This is the only trustworthy tenancy
+// for a created object: it is derived from the verified chokepoint, never a client-supplied workspace_id.
+func AuthorizedWorkspace(ctx context.Context) (string, bool) {
+	ac, ok := ctx.Value(ctxKey{}).(*authCtx)
+	if !ok || ac.authWS == "" {
+		return "", false
+	}
+	return ac.authWS, true
+}
+
 // WithMemberships returns a context carrying a verified identity + memberships. The middleware
 // installs it after resolution; handler tests use it to exercise a handler without the full
 // middleware chain.
