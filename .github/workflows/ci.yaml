@@ -38,6 +38,17 @@ jobs:
         with:
           go-version: "1.25"
           cache: true
+      # Formatting gate. Nothing checked gofmt before this — not `go vet`, not the frontend
+      # job, nowhere in this file — and 5 files had already drifted. talyvor-lens had exactly
+      # this hole and reached 37 files, at which point a stricter linter version would have
+      # reddened every unrelated PR. Cheap to hold at zero, expensive to pay down later.
+      #
+      # `gofmt -l` lists files whose formatting differs; test -z fails the build if the list
+      # is non-empty, and the second invocation prints WHICH files so the failure is
+      # actionable. Uses the toolchain's own gofmt, so "formatted" means one thing here and on
+      # a developer's machine.
+      - name: gofmt (formatting must not drift)
+        run: test -z "$(gofmt -l .)" || { echo "::error::unformatted files — run gofmt -w"; gofmt -l .; exit 1; }
       - run: go vet ./...
       # DOCS_TEST_DATABASE_URL is the ADMIN dsn: testutil.New(t) connects to it to
       # CREATE/DROP an isolated per-test database, then applies the embedded

@@ -136,6 +136,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Honour DOCS_LOG_LEVEL. It was read into Config and then never used — the handler above
+	// is built with nil options, which pins the level at Info — so `DOCS_LOG_LEVEL=debug` was
+	// documented, accepted, and silently inert. Re-install the default logger now that the
+	// config is loaded; boot-time errors above still log at the fixed Info default because
+	// there is no config to read yet.
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: cfg.SlogLevel(),
+	})))
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -436,6 +445,7 @@ func main() {
 	// tier — the same permission rule engine the REST + MCP write gates use (reuses pageLooker +
 	// permission.CheckPage). A view-only member may connect (cursor/presence) but cannot mutate.
 	collabHandler := collab.NewHandler(otEngine).WithGuard(lockStore).
+		WithAllowedOrigins(cfg.AllowedOrigins).
 		WithAccess(collab.NewPermissionSession(permStore, pageLooker))
 	saver := collab.NewAutoSaver(otEngine,
 		func(ctx context.Context, pageID, content string) error {

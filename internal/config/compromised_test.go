@@ -1,7 +1,9 @@
 package config_test
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"regexp"
 	"strings"
@@ -129,5 +131,57 @@ func TestEnvExampleShipsNoUsableSecret(t *testing.T) {
 			t.Errorf("GATEWAY_AUTH_SECRET in .env.example must be empty so a copied template "+
 				"fails the boot check; got a value (%d chars)", len(v))
 		}
+	}
+}
+
+// DOCS_LOG_LEVEL was parsed into Config and never applied — the logger was built with nil
+// HandlerOptions, pinning the level at Info — so `debug` was documented, accepted and inert.
+// Asserting on the absence of DEBUG lines at boot would prove nothing (nothing logs at DEBUG
+// during startup), so test the mapping itself, plus that a handler built from it admits a
+// Debug record.
+func TestSlogLevel_HonoursDocsLogLevel(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want slog.Level
+	}{
+		{"debug", slog.LevelDebug},
+		{"DEBUG", slog.LevelDebug},
+		{" warn ", slog.LevelWarn},
+		{"warning", slog.LevelWarn},
+		{"error", slog.LevelError},
+		{"info", slog.LevelInfo},
+		{"", slog.LevelInfo},
+		{"nonsense", slog.LevelInfo}, // a typo must not take the service down
+	} {
+		t.Setenv("DOCS_DATABASE_URL", "postgres://x")
+		t.Setenv("GATEWAY_AUTH_SECRET", "a3f9c1e07b52d84af61c9e3b0d7a5182c4e6f9b0d1")
+		t.Setenv("DOCS_LOG_LEVEL", tc.env)
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("load(%q): %v", tc.env, err)
+		}
+		if got := cfg.SlogLevel(); got != tc.want {
+			t.Errorf("DOCS_LOG_LEVEL=%q → %v, want %v", tc.env, got, tc.want)
+		}
+	}
+
+	// End to end: a handler built the way main.go builds it must actually EMIT a Debug record
+	// when the level is debug — the property that was missing.
+	t.Setenv("DOCS_LOG_LEVEL", "debug")
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: cfg.SlogLevel()})).
+		Debug("visible-at-debug")
+	if !strings.Contains(buf.String(), "visible-at-debug") {
+		t.Error("DOCS_LOG_LEVEL=debug must admit Debug records; got none")
+	}
+	// And the old behaviour (nil options) must NOT — proving the two differ.
+	buf.Reset()
+	slog.New(slog.NewJSONHandler(&buf, nil)).Debug("visible-at-debug")
+	if buf.Len() != 0 {
+		t.Error("control failed: nil HandlerOptions should suppress Debug")
 	}
 }

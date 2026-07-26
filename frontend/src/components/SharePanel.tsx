@@ -72,8 +72,10 @@ export function SharePanel({
     onSuccess: () => qc.invalidateQueries({ queryKey: ["page-permissions", pageID] }),
   });
 
-  // Section 2 — public link.
-  const [linkAccess, setLinkAccess] = useState<AccessLevel>("view");
+  // Section 2 — public link. Fixed at "view": the public share surface is a single GET
+  // (/v1/public/s/{token}) with no write path, so "comment" was never enforceable on it. Not
+  // state, because nothing can change it.
+  const linkAccess: AccessLevel = "view";
   const [expiresInDays, setExpiresInDays] = useState<number>(7);
   const [password, setPassword] = useState("");
   const create = useMutation({
@@ -153,14 +155,23 @@ export function SharePanel({
           <section className="border-t border-border pt-3">
             <h3 className="mb-1 text-xs font-semibold">Share link</h3>
             <div className="flex flex-wrap items-center gap-1">
-              <select
-                value={linkAccess}
-                onChange={(e) => setLinkAccess(e.target.value as AccessLevel)}
-                className="rounded border border-border bg-bg px-1 py-1 text-xs"
-              >
-                <option value="view">Anyone can view</option>
-                <option value="comment">Anyone can comment</option>
-              </select>
+              {/*
+                Share links are VIEW-ONLY, so there is no selector here any more.
+
+                This offered "Anyone can comment", and the backend stored and echoed
+                access:"comment" — but the entire public surface is one route,
+                GET /v1/public/s/{token} (sharing.MountPublic). There is no public write path,
+                so an unauthenticated share visitor could never comment: the option promised a
+                capability the system does not have. Commenting requires the AccessComment tier
+                on a real membership, which the member grants above do offer.
+
+                Fixed by removing the option rather than the label, because implementing public
+                commenting would mean an unauthenticated write path — a much larger decision
+                than a dropdown.
+              */}
+              <span className="rounded border border-border bg-bg px-1 py-1 text-xs text-muted">
+                Anyone with the link can view
+              </span>
               <select
                 value={expiresInDays}
                 onChange={(e) => setExpiresInDays(Number(e.target.value))}
