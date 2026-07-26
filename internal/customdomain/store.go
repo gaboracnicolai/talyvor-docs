@@ -155,6 +155,49 @@ func (s *Store) Create(ctx context.Context, workspaceID, domain, createdBy strin
 		return nil, fmt.Errorf("customdomain: invalid domain %q", domain)
 	}
 
+	// VALIDATE THE MAPPED SPACE before the row exists.
+	//
+	// A verified custom domain routes to PublicHandler, which serves EVERY page in the mapped
+	// space with no authentication: publicIndex lists whatever ListBySpace returns (skipping
+	// only templates) and publicPage serves any slug via GetBySlug, whose query carries no
+	// privacy predicate. There is no per-page filter to apply either — model.Page has no
+	// published/visibility column at all.
+	//
+	// space_id arrives in the request BODY. The handler authorizes the {wsID} PATH param, but
+	// this value was written straight to the row, so two things were possible:
+	//
+	//  1. CROSS-TENANT PUBLICATION. A tenant could point their own DNS-verified domain at
+	//     another workspace's space id and publish that tenant's pages.
+	//  2. SILENT PUBLICATION OF A PRIVATE SPACE. Mapping to a space marked Private
+	//     world-published it, with no warning anywhere.
+	//
+	// Both are refused here. This is the CHEAP half of the fix — "don't allow the mapping" —
+	// chosen because the full fix (a per-page `published` column defaulting to false, plus a
+	// publish action and a filter in both renderer queries) needs a migration. Refusing costs
+	// one query and removes the silent case now.
+	if spaceID != nil {
+		var spaceWS string
+		var private bool
+		if err := s.pool.QueryRow(ctx,
+			`SELECT workspace_id, private FROM spaces WHERE id = $1`, *spaceID,
+		).Scan(&spaceWS, &private); err != nil {
+			// Unknown space, or an unreadable one: refuse rather than create a mapping whose
+			// target cannot be established. Fail-closed.
+			return nil, fmt.Errorf("customdomain: space %q not found", *spaceID)
+		}
+		if spaceWS != workspaceID {
+			// Deliberately does not confirm the space exists elsewhere — no cross-tenant
+			// existence oracle, matching the 404-not-403 convention used on the read paths.
+			return nil, fmt.Errorf("customdomain: space %q not found", *spaceID)
+		}
+		if private {
+			return nil, fmt.Errorf("customdomain: space %q is private — a custom domain "+
+				"publishes every page in the space it maps to, and Docs has no per-page "+
+				"publish control yet, so mapping a private space would expose all of it. "+
+				"Make the space public first, or map a different space", *spaceID)
+		}
+	}
+
 	// Workspace-scoped quota — bounded to keep a single tenant from
 	// flooding the table.
 	var count int
