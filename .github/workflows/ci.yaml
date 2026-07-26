@@ -58,26 +58,26 @@ jobs:
         run: go test -timeout 300s -race -count=1 ./...
         env:
           DOCS_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
-      # Fail the build if the real-PG suite went back to skipping (a regression to
-      # green-by-absence would otherwise be invisible: skips do not fail a build).
-      - name: assert real-PG tests actually ran
-        run: |
-          set -euo pipefail
-          out=$(go test -v -count=1 -run 'RealPG|SEC4|A3' ./internal/... 2>&1)
-          skips=$(printf '%s' "$out" | grep -c '^--- SKIP' || true)
-          passes=$(printf '%s' "$out" | grep -c '^--- PASS' || true)
-          echo "real-PG suite: $passes passed, $skips skipped"
-          if [ "$skips" -ne 0 ]; then
-            echo "::error::$skips real-PG test(s) SKIPPED — DOCS_TEST_DATABASE_URL is not reaching the suite (green-by-absence regression)"
-            printf '%s\n' "$out" | grep '^--- SKIP' || true
-            exit 1
-          fi
-          if [ "$passes" -eq 0 ]; then
-            echo "::error::real-PG suite matched 0 tests — the -run filter or the suite moved"
-            exit 1
-          fi
-        env:
-          DOCS_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+      # NOTE — the "assert real-PG tests actually ran" step was REMOVED here, deliberately.
+      #
+      # It ran `go test -v -run 'RealPG|SEC4|A3'` and failed on any skip, to catch the suite
+      # regressing to green-by-absence. Two things made it worse than no guard:
+      #
+      #   · SCOPE. It selected tests BY NAME. That matched 36 of the 78 tests in this repo
+      #     that need a real Postgres — 46%. The other 42, including the roster-provenance
+      #     guards added in #43, were never covered, so a passing step implied protection it
+      #     did not have. A guard built to prevent green-by-absence was itself covering
+      #     almost half of what it named, and nothing about it passing said so.
+      #   · REDUNDANCY. internal/testutil now FAILS rather than skips when
+      #     DOCS_TEST_DATABASE_URL is unset (see requireDatabaseURL). That covers all 78 by
+      #     construction, with no list to keep current — a missing DSN or a service container
+      #     that did not come up now fails the main `go test` step above, loudly.
+      #
+      # WHAT IS NO LONGER GUARDED, stated plainly: an explicitly authored `t.Skip` inside a
+      # real-PG test. That is a visible line in a pull-request diff, unlike the invisible
+      # env-var failure this step was built for — which is now impossible. If that residual
+      # case ever wants covering, the shape is a WHOLE-SUITE assertion over `go test -json`,
+      # never another name filter.
 
   # The SEC-4 tenancy class-guard. Written in .semgrep/ since the SEC-4 work but
   # never wired into CI — a rule that does not run is not a guardrail.

@@ -31,8 +31,9 @@ type DB struct {
 }
 
 // New provisions an isolated database, applies the full schema, and returns a
-// live pool. Skips (not fails) when DOCS_TEST_DATABASE_URL is unset so unit-only
-// runs stay green. The cleanup drops the database whether the test passes or fails.
+// live pool. FAILS (does not skip) when DOCS_TEST_DATABASE_URL is unset — see
+// requireDatabaseURL for why, and use `-short` for a unit-only run. The cleanup
+// drops the database whether the test passes or fails.
 //
 // DOCS_TEST_DATABASE_URL must point at a pgvector/pgvector:pg16-class Postgres:
 // the migrations require the `vector` extension (0001_core.sql, 0004_search.sql)
@@ -48,16 +49,53 @@ func New(t *testing.T) *DB {
 	return d
 }
 
+// requireDatabaseURL returns the admin DSN, FAILING when it is unset.
+//
+// IT FAILS RATHER THAN SKIPS, and that is the whole point. 78 tests in this repo need a real
+// Postgres — every tenancy, IDOR and cross-workspace test among them — and they used to
+// t.Skip when DOCS_TEST_DATABASE_URL was missing. A dropped variable or a service container
+// that failed to come up would take all 78 out of the run while `go test` still exited 0. A
+// skipped IDOR suite is indistinguishable from a passing one, and telling those apart is the
+// only reason a pre-deployment gate exists.
+//
+// CI had a guard for exactly this — a step asserting the real-PG suite ran — but it selected
+// tests BY NAME (-run 'RealPG|SEC4|A3'), which matched 36 of the 78. The other 42, including
+// the roster-provenance guards added in #43, were covered only by CI happening to provide
+// Postgres: the same coincidence #43 existed to remove. Scope is the part of a guard nobody
+// checks, because a passing guard looks identical whether it covers everything or almost
+// nothing. Failing here covers all 78 by construction, with no list to keep current.
+//
+// -short IS THE ESCAPE HATCH, and it must be explicit. `go test -short ./...` still skips, so
+// a unit-only local run works exactly as before; CI never passes -short, so CI can never skip.
+// Silence is not consent: an unset variable with no -short is an error, not a preference.
+// (Same shape as talyvor-track internal/testutil/require.go, which fixed the identical class.)
+func requireDatabaseURL(t *testing.T) string {
+	t.Helper()
+	if dsn := os.Getenv("DOCS_TEST_DATABASE_URL"); dsn != "" {
+		return dsn
+	}
+	if testing.Short() {
+		t.Skipf("DOCS_TEST_DATABASE_URL not set and -short given — skipping real-Postgres test by explicit request")
+	}
+	t.Fatalf(`DOCS_TEST_DATABASE_URL is not set.
+
+This test needs a real Postgres. It FAILS rather than skips: a silently skipped real-PG suite
+looks exactly like a passing one, and this repo has 78 such tests.
+
+  · CI: the postgres service supplies it (pgvector/pgvector:pg16 — the migrations need the
+    vector extension).
+  · Locally: DOCS_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable
+  · Unit-only run: go test -short ./...`)
+	return "" // unreachable; t.Fatalf stops the test
+}
+
 // NewBlank provisions an isolated database with the `vector` extension available but
 // NO schema applied — an empty database. internal/migrate's tests need this: a runner
 // that can only be tested against an already-migrated database proves nothing about
 // applying from zero.
 func NewBlank(t *testing.T) *DB {
 	t.Helper()
-	admin := os.Getenv("DOCS_TEST_DATABASE_URL")
-	if admin == "" {
-		t.Skip("DOCS_TEST_DATABASE_URL not set — skipping real-Postgres integration test")
-	}
+	admin := requireDatabaseURL(t)
 	ctx := context.Background()
 	name := "docs_test_" + randToken(t) // unique per New() → parallel-safe
 
