@@ -160,3 +160,15 @@ cd frontend && npm run build
 The `Makefile` also exposes `make up` / `make down` / `make dev`
 for everyday workflows. CI runs the same gates plus a multi-arch
 container build on push to `main`.
+
+---
+
+## License
+
+[Business Source License 1.1](LICENSE) (BUSL-1.1). **Not an open-source licence today.**
+
+You may read, modify and self-host Talyvor Docs, including in production, for your own
+organisation's purposes, and an integrator may run it on behalf of a single client. You may
+**not** run one deployment serving two or more unrelated organisations — that needs a
+commercial licence (`hello@talyvor.com`). See the `Additional Use Grant` in [LICENSE](LICENSE)
+for the exact boundary, and the `Change Date`, on which this converts to Apache License 2.0.
