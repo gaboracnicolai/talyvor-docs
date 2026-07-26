@@ -76,3 +76,59 @@ func TestSyncMembers_Unconfigured_NoOp(t *testing.T) {
 		t.Fatalf("unconfigured member-sync called GetWorkspaceMembers %d times, want 0", len(fake.calls))
 	}
 }
+
+// PARKED — THE COLD-START DEADLOCK. This test pins a KNOWN LIMITATION, not a property
+// worth having: a workspace Track knows about but Docs holds no content for is never
+// enumerated, so its roster is never pulled, so nobody can be a member of it, so nobody
+// can create the content that would enumerate it. The full decision, its reopening
+// condition and the fix shape live on DistinctWorkspaceIDs in internal/membership/store.go.
+//
+// It is deliberately written to FAIL the moment the deadlock is broken. Whoever breaks it
+// will see this test go red; the fix is not finished until they DELETE this test and the
+// note it points at. A limitation recorded only in prose rots silently — this one cannot.
+func TestSyncMembers_CannotReachAWorkspaceWithNoContent(t *testing.T) {
+	d := testutil.New(t)
+	ctx := context.Background()
+
+	withContent := d.Workspace(t)
+	d.Page(t, withContent, "author", "PageA")
+
+	// A brand-new per-user workspace: Track holds its roster, Docs holds nothing in it yet.
+	empty := d.Workspace(t)
+
+	store := membership.NewStore(d.Pool)
+	fake := &fakeMemberSource{configured: true, rosters: map[string][]membership.MemberRef{
+		withContent: {{Email: "alice@corp.com", Role: "admin", MemberID: "m1"}},
+		empty:       {{Email: "newjoiner@corp.com", Role: "owner", MemberID: "m9"}},
+	}}
+	NewSyncer(nil, nil, nil, "").WithMemberSync(fake, store).SyncMembers(ctx)
+
+	// Track is never even ASKED about the empty workspace — enumeration comes from content.
+	for _, ws := range fake.calls {
+		if ws == empty {
+			t.Fatal("deadlock broken: SyncMembers asked Track about a workspace with no content. " +
+				"If that is now intended, delete this test AND the parked-decision note on " +
+				"DistinctWorkspaceIDs in internal/membership/store.go")
+		}
+	}
+
+	// ...so no roster lands, and AuthorizeWorkspace can never pass for it.
+	count := func(wsID string) int {
+		var n int
+		if err := d.Pool.QueryRow(ctx,
+			`SELECT count(*) FROM workspace_members WHERE workspace_id=$1`, wsID).Scan(&n); err != nil {
+			t.Fatalf("count members: %v", err)
+		}
+		return n
+	}
+	if n := count(empty); n != 0 {
+		t.Fatalf("deadlock broken: %d roster rows landed for a workspace with no content — see above", n)
+	}
+
+	// The premise, checked rather than assumed: the CONTENTFUL workspace DID sync. Without
+	// this, a zero above is equally consistent with "SyncMembers did nothing at all", and the
+	// test would pass while proving nothing.
+	if n := count(withContent); n != 1 {
+		t.Fatalf("premise broken: the workspace WITH content synced %d rows, want 1 — this test proves nothing", n)
+	}
+}
