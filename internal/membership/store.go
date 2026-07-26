@@ -24,9 +24,54 @@ type Store struct{ pool *pgxpool.Pool }
 
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
-// DistinctWorkspaceIDs returns every workspace Docs holds content for — the set the
+// DistinctWorkspaceIDs returns every workspace Docs holds CONTENT for — the set the
 // member-sync iterates. Union of spaces + pages (a space-only workspace still gets its
 // roster synced; every page carries workspace_id directly, covering orphan cases).
+//
+// ── PARKED: THE COLD-START DEADLOCK ─────────────────────────────────────────────────
+//
+// Enumerating from content means a workspace with no content is never enumerated, and
+// that closes a cycle no caller can break from outside:
+//
+//	no spaces/pages in W  ⇒  W is not in this result
+//	                      ⇒  SyncMembers never pulls W's roster from Track
+//	                      ⇒  workspace_members has no row for W
+//	                      ⇒  authz.AuthorizeWorkspace(ctx, W) returns false
+//	                      ⇒  space.Create 403s BEFORE its insert (space/handler.go)
+//	                      ⇒  W can never acquire content — back to the top.
+//
+// Content is needed to get a roster, and a roster to create content. Nothing in this
+// repo breaks the cycle: workspace_members has exactly one production writer
+// (ReconcileWorkspace, called only by SyncMembers); spaces and pages have exactly one
+// production writer each, both behind AuthorizeWorkspace; there is no seed subcommand
+// (`docs [serve|migrate]`), no seeding migration, no member-add route, and the only authz
+// exemption is /v1/public/* (share-token viewing, which creates nothing).
+//
+// THIS IS A LATENT DEFECT, NOT A CONSEQUENCE OF ANY LATER PLAN. It does not need per-user
+// workspaces or a second tenant to appear: it is what a FIRST deploy against an empty
+// database does. The pinned workspace is not privileged here — SyncMembers iterates this
+// result and does not union its configured workspace in (trackintegration/syncer.go).
+// Whoever deploys Docs must therefore create the first workspace_members row out of band,
+// and no runbook step in talyvor-suite/deploy does; its troubleshooting table says "add
+// the membership" without naming a mechanism, because there is not one.
+//
+//	REOPENING CONDITION — whichever comes first:
+//	  · the first deploy of Docs against an empty database (soonest, and unavoidable);
+//	  · a second trial cohort, or any second workspace;
+//	  · the first customer who wants Docs without a shared workspace.
+//
+// FIX SHAPE — invert the enumeration: ask TRACK which workspaces exist rather than
+// inferring the list from content Docs already holds. Track owns provisioning (it mints a
+// workspace per identity at login, talyvor-track /v1/bootstrap) and is already this
+// package's roster source, so it is the source of truth for the LIST as well — arguably
+// always was, and this function is the one place that assumed otherwise. It replaces one
+// query with one client call and needs no new tenancy concepts. The alternative — having
+// the caller announce a workspace — must NOT be hung off the authz middleware: a security
+// chokepoint that provisions on an unrecognised id will provision from a typo, and races
+// on concurrent first requests.
+//
+// TestSyncMembers_CannotReachAWorkspaceWithNoContent (trackintegration) pins the deadlock
+// and FAILS when it is broken, so the fix cannot land while this note quietly survives it.
 func (s *Store) DistinctWorkspaceIDs(ctx context.Context) ([]string, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT workspace_id FROM spaces
@@ -67,8 +112,11 @@ func (s *Store) DistinctWorkspaceIDs(ctx context.Context) ([]string, error) {
 //
 //	REOPENING CONDITION: the first customer who wants Docs without Track.
 //
-// Nothing forecloses it today — Phase 5 enumerates workspaces from this very table
-// (DistinctWorkspaceIDs) and is origin-agnostic, so it works for rows of either provenance.
+// Nothing forecloses it today — DistinctWorkspaceIDs is origin-agnostic, so enumeration
+// works for rows of either provenance. ⚠ It enumerates from CONTENT (spaces ∪ pages), NOT
+// from this table; an earlier version of this sentence said "from this very table", which
+// reads as though a roster alone were enough to be enumerated. It is not, and that
+// difference is the whole cold-start deadlock documented on DistinctWorkspaceIDs below.
 // What WOULD foreclose it is this prune deleting Docs-native rows. Before the source column
 // that was prevented only by COINCIDENCE: a workspace Track never heard of pulls an empty
 // roster and hits the empty-pull guard above — a guard written to survive a bad fetch, which

@@ -11,10 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    # A real Postgres, or the whole real-schema suite is green-by-absence:
-    # testutil.New(t) SKIPS when DOCS_TEST_DATABASE_URL is unset, so before this
-    # block every SEC-4 cross-tenant test silently skipped on every PR while CI
-    # stayed green. pgvector/pgvector:pg16 matches docker-compose.yaml — the
+    # A real Postgres, or the whole real-schema suite is green-by-absence: testutil.New(t)
+    # USED TO SKIP when DOCS_TEST_DATABASE_URL was unset, so before this block every SEC-4
+    # cross-tenant test silently skipped on every PR while CI stayed green. It now FAILS
+    # instead (see requireDatabaseURL, and the note further down), which is what makes a
+    # service container that did not come up loud rather than invisible. pgvector/pgvector:pg16 matches docker-compose.yaml — the
     # migrations require the `vector` extension (0001_core.sql, 0004_search.sql).
     services:
       postgres:
