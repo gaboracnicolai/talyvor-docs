@@ -27,6 +27,10 @@ type pageUpdater interface {
 type memberSource interface {
 	MemberSyncConfigured() bool
 	GetWorkspaceMembers(ctx context.Context, workspaceID string) ([]membership.MemberRef, error)
+	// ListWorkspaceIDs answers "which workspaces exist" — the question the old content-derived
+	// enumeration could not answer for a workspace that had never been written to. See
+	// enumerate.go.
+	ListWorkspaceIDs(ctx context.Context) ([]string, error)
 }
 
 // membershipStore enumerates Docs's workspaces and reconciles one workspace's roster
@@ -147,7 +151,12 @@ func (s *Syncer) SyncMembers(ctx context.Context) {
 	if !s.memberSyncOn() {
 		return
 	}
-	wsIDs, err := s.store.DistinctWorkspaceIDs(ctx)
+	// Ask TRACK which workspaces exist, not Docs which ones have content. The old
+	// content-derived query could never enumerate a brand-new workspace, so its first write
+	// 403d for want of a membership row and it never got content — a deadlock a new tenant
+	// could not escape. Falls back to content-derived only if Track is unreachable; see
+	// enumerate.go for why an empty Track answer is NOT a fallback trigger.
+	wsIDs, err := enumerateWorkspaces(ctx, s.members, s.store)
 	if err != nil {
 		slog.Warn("trackintegration: member sync — enumerate workspaces", slog.String("err", err.Error()))
 		return

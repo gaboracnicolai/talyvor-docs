@@ -198,3 +198,41 @@ func (c *Client) fetch(ctx context.Context, path string, _ map[string]string, ou
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
+
+// ListWorkspaceIDs pulls every workspace id on the deployment from Track's
+// GET /v1/service/workspaces — the same gwExempt, member-sync-secret-gated surface as
+// GetWorkspaceMembers above.
+//
+// Track is the tenancy source of truth (it mints a workspace per identity at login), so this is
+// the question Docs actually needs answered: "which workspaces exist", not "which have content".
+// See enumerate.go for why that distinction was a deadlock.
+func (c *Client) ListWorkspaceIDs(ctx context.Context) ([]string, error) {
+	if !c.MemberSyncConfigured() {
+		return nil, errors.New("trackintegration: member sync not configured (need DOCS_TRACK_URL + DOCS_TRACK_MEMBER_SYNC_SECRET)")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.trackURL+"/v1/service/workspaces", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.memberSyncSecret)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("trackintegration: workspace enumeration: %s", resp.Status)
+	}
+	var out struct {
+		WorkspaceIDs []string `json:"workspace_ids"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("trackintegration: decode workspaces: %w", err)
+	}
+	// A nil slice and an empty one mean the same thing here — a deployment with no workspaces —
+	// and enumerateWorkspaces treats that as an ANSWER, not a failure.
+	if out.WorkspaceIDs == nil {
+		out.WorkspaceIDs = []string{}
+	}
+	return out.WorkspaceIDs, nil
+}

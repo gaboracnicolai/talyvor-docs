@@ -2,6 +2,7 @@ package trackintegration
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/talyvor/docs/internal/membership"
@@ -16,6 +17,14 @@ type fakeMemberSource struct {
 }
 
 func (f *fakeMemberSource) MemberSyncConfigured() bool { return f.configured }
+
+// ListWorkspaceIDs: this fake predates the enumeration inversion and its cases are about roster
+// reconciliation, not about WHICH workspaces are covered. Returning an error makes the syncer fall
+// back to the content-derived store these tests already seed — so they keep testing exactly what
+// they were written to test, rather than being quietly re-pointed at a new source.
+func (f *fakeMemberSource) ListWorkspaceIDs(context.Context) ([]string, error) {
+	return nil, errors.New("fake: enumeration not exercised by these cases")
+}
 
 func (f *fakeMemberSource) GetWorkspaceMembers(_ context.Context, wsID string) ([]membership.MemberRef, error) {
 	f.calls = append(f.calls, wsID)
