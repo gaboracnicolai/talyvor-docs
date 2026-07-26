@@ -56,6 +56,25 @@ func (s *Store) DistinctWorkspaceIDs(ctx context.Context) ([]string, error) {
 // or a misconfig) — pruning-to-empty would wipe every member's access. The syncer separately
 // treats a FETCH ERROR as skip-this-workspace (never reaching here), so this guards the
 // successful-but-empty case. The prune is scoped to $1 — it can never touch another workspace.
+//
+// PROVENANCE: THE PRUNE ONLY DELETES ROWS THIS SYNCER CREATED (source = 'track'). It is a
+// reconciler for TRACK's roster and has no authority over rows it did not write.
+//
+// This is deliberate and load-bearing, so it must not be "simplified" back out. Docs'
+// tenancy currently has exactly ONE source — this syncer — which is why Docs cannot be sold
+// without Track. That coupling was inherited from a roster sync built for a different job,
+// not chosen, and the option to give Docs its own tenancy root is PARKED, not closed:
+//
+//	REOPENING CONDITION: the first customer who wants Docs without Track.
+//
+// Nothing forecloses it today — Phase 5 enumerates workspaces from this very table
+// (DistinctWorkspaceIDs) and is origin-agnostic, so it works for rows of either provenance.
+// What WOULD foreclose it is this prune deleting Docs-native rows. Before the source column
+// that was prevented only by COINCIDENCE: a workspace Track never heard of pulls an empty
+// roster and hits the empty-pull guard above — a guard written to survive a bad fetch, which
+// says nothing about who owns a row. And inside a MIXED workspace there was no protection at
+// all, since a Docs-native member is simply absent from Track's roster and the prune deletes
+// what is absent. TestReconcileWorkspace_NeverPrunesRowsItDidNotSync fails if that returns.
 func (s *Store) ReconcileWorkspace(ctx context.Context, workspaceID string, refs []MemberRef) (upserted, pruned int, err error) {
 	if workspaceID == "" {
 		return 0, 0, errors.New("membership: ReconcileWorkspace requires a workspace_id")
@@ -74,8 +93,13 @@ func (s *Store) ReconcileWorkspace(ctx context.Context, workspaceID string, refs
 	for i, m := range refs {
 		emails[i] = m.Email
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO workspace_members (workspace_id, email, role, member_id, synced_at)
-			 VALUES ($1, $2, $3, $4, now())
+			// source is stamped on INSERT but deliberately NOT in the DO UPDATE set: if a
+			// Docs-native row already exists for this email, Track reporting the same
+			// person updates their role but must not seize ownership of the row — doing so
+			// would make it prunable on the next pass, which is the very deletion this
+			// design prevents.
+			`INSERT INTO workspace_members (workspace_id, email, role, member_id, synced_at, source)
+			 VALUES ($1, $2, $3, $4, now(), 'track')
 			 ON CONFLICT (workspace_id, email)
 			 DO UPDATE SET role = EXCLUDED.role, member_id = EXCLUDED.member_id, synced_at = now()`,
 			workspaceID, m.Email, m.Role, m.MemberID); err != nil {
@@ -83,9 +107,13 @@ func (s *Store) ReconcileWorkspace(ctx context.Context, workspaceID string, refs
 		}
 	}
 
-	// Prune departed — SCOPED to this workspace, and only among rows not in the pulled set.
+	// Prune departed — SCOPED to this workspace, only among rows not in the pulled set, and
+	// only among rows THIS SYNCER CREATED. See the provenance note above: without the source
+	// filter a Docs-native member of a mixed workspace is deleted on the first reconcile,
+	// because they are absent from Track's roster by definition.
 	ct, err := tx.Exec(ctx,
-		`DELETE FROM workspace_members WHERE workspace_id = $1 AND email <> ALL($2::text[])`,
+		`DELETE FROM workspace_members
+		 WHERE workspace_id = $1 AND source = 'track' AND email <> ALL($2::text[])`,
 		workspaceID, emails)
 	if err != nil {
 		return 0, 0, fmt.Errorf("membership: prune: %w", err)
