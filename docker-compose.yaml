@@ -13,15 +13,38 @@ services:
   docs:
     build: .
     ports:
-      - "4000:4000"
+      # LOOPBACK ONLY, matching talyvor-lens. "4000:4000" binds 0.0.0.0, publishing the API
+      # to every interface — and three surfaces sit OUTSIDE the gateway boundary there:
+      # /metrics, /healthz, /readyz, plus the custom-domain public renderer, which is
+      # selected by a client-supplied Host header. Reaching Docs directly also bypasses the
+      # edge gateway that injects x-gateway-auth, which is the only reason /v1 identity
+      # headers can be trusted. The reverse proxy is the front door; it connects over
+      # loopback (or the compose network) and nothing else needs to.
+      - "127.0.0.1:4000:4000"
     environment:
-      - DOCS_DATABASE_URL=postgres://docs:${POSTGRES_PASSWORD:-changeme}@postgres:5432/talyvor_docs?sslmode=disable
+      # POSTGRES_PASSWORD is REQUIRED too, for the same reason as the gateway secret below:
+      # `${POSTGRES_PASSWORD:-changeme}` committed a working database credential, and the
+      # shared compose-secret check (scripts/check-compose-secrets.sh) flags exactly that
+      # shape. Fixed rather than exempted — an exemption here would be the precedent every
+      # other repo copies.
+      - DOCS_DATABASE_URL=postgres://docs:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD — openssl rand -hex 16}@postgres:5432/talyvor_docs?sslmode=disable
       # SEC-4 Layer 1 root of trust. config.Load() REQUIRES this at >= 16 chars and
-      # exits(1) otherwise — correctly, since without it every /v1 identity is
-      # forgeable. It was absent from this file, so `docker compose up` (the README's
-      # quick start) crash-looped on a fail-closed boot check. The dev default below
-      # keeps the stack bootable; it is NOT safe for production.
-      - GATEWAY_AUTH_SECRET=${GATEWAY_AUTH_SECRET:-dev-only-insecure-gateway-secret-change-me}
+      # exits(1) otherwise — correctly, since without it every /v1 identity is forgeable.
+      #
+      # NO DEFAULT, deliberately. This carried `${GATEWAY_AUTH_SECRET:-dev-only-…}`, and a
+      # `:-` fallback silently SUPPLIES the value the boot check then approves — so
+      # `docker compose up` with no operator input produced a running server whose secret
+      # was published in this repo, i.e. one where anyone could forge any identity. The
+      # fail-closed check could never fire on the only configuration that needed it.
+      #
+      # `:?` makes compose itself refuse to start with a named error, before the container
+      # exists. That old placeholder is now permanently rejected by config.Load() too
+      # (publishedGatewaySecrets) — it is in git history and cannot be made secret again.
+      #
+      #   export GATEWAY_AUTH_SECRET="$(openssl rand -hex 32)"
+      #
+      # It must match the value the edge gateway signs (the same one Track uses).
+      - GATEWAY_AUTH_SECRET=${GATEWAY_AUTH_SECRET:?set GATEWAY_AUTH_SECRET to the gateway's shared secret — openssl rand -hex 32}
       - DOCS_LENS_URL=${DOCS_LENS_URL:-}
       - DOCS_LENS_API_KEY=${DOCS_LENS_API_KEY:-}
       - DOCS_TRACK_URL=${DOCS_TRACK_URL:-}
@@ -41,7 +64,8 @@ services:
       context: frontend
       dockerfile: Dockerfile
     ports:
-      - "4001:80"
+      # Loopback for the same reason as `docs` above — the reverse proxy fronts the SPA.
+      - "127.0.0.1:4001:80"
     restart: unless-stopped
 
   postgres:
@@ -49,7 +73,7 @@ services:
     environment:
       POSTGRES_DB: talyvor_docs
       POSTGRES_USER: docs
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD — openssl rand -hex 16}
     volumes:
       - pgdata:/var/lib/postgresql/data
       # The ./migrations:/docker-entrypoint-initdb.d mount is GONE. That hook runs only

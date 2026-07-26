@@ -66,7 +66,7 @@ type deps struct {
 type Server struct {
 	deps   deps
 	limit  *ratelimit.Limiter // nil = unthrottled (tests); main.go always wires it
-	access AccessController    // nil = write tools DENY (fail-closed); main.go always wires it
+	access AccessController   // nil = write tools DENY (fail-closed); main.go always wires it
 }
 
 // WithRateLimit attaches the per-workspace LLM limiter. It applies ONLY to llmTools, keyed

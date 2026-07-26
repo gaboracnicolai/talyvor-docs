@@ -1,7 +1,13 @@
 import { apiRequest } from "./client";
 
 export type AccessLevel = "none" | "view" | "comment" | "edit" | "admin";
-export type SubjectType = "member" | "team" | "everyone";
+
+// "team" is deliberately ABSENT. The backend rejects it at write time
+// (permission.Store.Grant → validSubjectType) because Docs cannot resolve team membership —
+// teams live upstream and never reach the rule engine, so a team grant would persist and
+// authorize nobody. Including it in the type invited a future caller to send a value the
+// server answers 400 to; the type now matches what the API accepts.
+export type SubjectType = "member" | "everyone";
 
 export interface Permission {
   id: string;

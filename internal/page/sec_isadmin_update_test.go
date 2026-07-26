@@ -87,7 +87,7 @@ func TestSec_Update_IgnoresClientSuppliedIsAdmin(t *testing.T) {
 		}
 		return permission.PageMeta{
 			WorkspaceID: pg.WorkspaceID,
-			SpaceID: pg.SpaceID, SpaceCreatedBy: sp.CreatedBy,
+			SpaceID:     pg.SpaceID, SpaceCreatedBy: sp.CreatedBy,
 			SpacePrivate: sp.Private, PageCreatedBy: pg.CreatedBy,
 		}, nil
 	}

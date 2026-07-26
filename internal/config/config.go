@@ -7,8 +7,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 )
 
 var ErrMissingEnv = errors.New("missing required env var")
@@ -98,11 +100,62 @@ type Config struct {
 	// >= MinGatewayAuthSecretLen: without it every /v1 request is forgeable, so Docs
 	// fail-closes at boot rather than run an open door.
 	GatewayAuthSecret string
+
+	// AllowedOrigins is the WebSocket Origin allow-list (DOCS_ALLOWED_ORIGINS,
+	// comma-separated). EMPTY MEANS SAME-ORIGIN ONLY, which is the correct posture behind a
+	// reverse proxy that serves the SPA and the API from one hostname.
+	//
+	// This exists because collab's upgrader had CheckOrigin return true unconditionally under
+	// a comment promising "production deployments tighten this via env" — there was no such
+	// env, so every deployment accepted every origin. Set it only for a split-origin setup,
+	// e.g. DOCS_ALLOWED_ORIGINS=http://localhost:5174 for the dev frontend.
+	AllowedOrigins []string
 }
 
 // MinGatewayAuthSecretLen mirrors Track — a short shared secret is brute-forceable, so a
 // weak value is a boot failure, not a runtime surprise.
+//
+// LENGTH IS NOT THE GUARD. This bound only stops a SHORT secret; it says nothing about a
+// long one everybody already knows. docker-compose.yaml and .env.example both shipped a
+// 42-character placeholder, so the check passed on every default deployment while the value
+// was readable by anyone with the repo — see publishedGatewaySecrets.
 const MinGatewayAuthSecretLen = 16
+
+// publishedGatewaySecrets are GATEWAY_AUTH_SECRET values that have been PUBLISHED — shipped
+// in this repo's compose file or env template, and therefore committed to git history.
+//
+// Git history is permanent: deleting a value from HEAD does not un-publish it. Anyone who
+// has ever cloned, forked, or read the repo has it, and with it can set x-gateway-auth +
+// x-user-email and be any user in any workspace. So these are rejected FOREVER, regardless
+// of length — a secret's strength is irrelevant once it is public.
+//
+// This is what makes the boot check a real guard rather than a formality: previously the
+// shipped default SATISFIED every check, so the fail-closed boot path never fired on the one
+// configuration that actually needed it. Add to this list, never remove from it.
+var publishedGatewaySecrets = map[string]bool{
+	// docker-compose.yaml:24 and .env.example:15 up to and including e0cf605.
+	"dev-only-insecure-gateway-secret-change-me": true,
+}
+
+// SlogLevel maps DOCS_LOG_LEVEL onto a slog.Level. An unrecognised value falls back to Info
+// rather than failing boot: a typo in a log setting must not take the service down, and the
+// same reasoning applies here as to the numeric getEnv* helpers below.
+//
+// This exists because LogLevel was parsed into Config and then never consumed — the logger
+// was built with nil HandlerOptions, fixing the level at Info — so the variable was
+// documented and accepted while doing nothing.
+func (c *Config) SlogLevel() slog.Level {
+	switch strings.ToLower(strings.TrimSpace(c.LogLevel)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
 
 func Load() (*Config, error) {
 	cfg := &Config{
@@ -116,6 +169,7 @@ func Load() (*Config, error) {
 		LensAPIKey:            os.Getenv("DOCS_LENS_API_KEY"),
 		DefaultWorkspaceID:    getEnv("DOCS_DEFAULT_WORKSPACE", "default"),
 		GatewayAuthSecret:     os.Getenv("GATEWAY_AUTH_SECRET"),
+		AllowedOrigins:        splitList(os.Getenv("DOCS_ALLOWED_ORIGINS")),
 		AIRatePerMin:          getEnvFloat("DOCS_AI_RATE_PER_MIN", 30),
 		AIRateBurst:           getEnvInt("DOCS_AI_RATE_BURST", 10),
 		SearchRatePerMin:      getEnvFloat("DOCS_SEARCH_RATE_PER_MIN", 240),
@@ -135,7 +189,27 @@ func Load() (*Config, error) {
 	if len(cfg.GatewayAuthSecret) < MinGatewayAuthSecretLen {
 		return nil, fmt.Errorf("%w: GATEWAY_AUTH_SECRET must be set and >= %d chars", ErrMissingEnv, MinGatewayAuthSecretLen)
 	}
+	// …and not a value that has already been published. Checked AFTER the length bound so a
+	// short secret still gets the more useful "too short" message, and deliberately not
+	// constant-time: these values are public by definition, so there is nothing to leak.
+	if publishedGatewaySecrets[cfg.GatewayAuthSecret] {
+		return nil, fmt.Errorf("%w: GATEWAY_AUTH_SECRET is a PUBLISHED placeholder from this "+
+			"repo and is permanently compromised — it is in git history, so it cannot be made "+
+			"secret again. Generate a fresh value: openssl rand -hex 32", ErrMissingEnv)
+	}
 	return cfg, nil
+}
+
+// splitList parses a comma-separated env var, dropping empties so a trailing comma or an
+// unset variable both yield nil (= same-origin default) rather than a list containing "".
+func splitList(v string) []string {
+	var out []string
+	for _, p := range strings.Split(v, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func getEnv(key, fallback string) string {

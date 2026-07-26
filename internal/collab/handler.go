@@ -5,21 +5,59 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 )
 
-// upgrader keeps the default check off so the dev frontend (on
-// :5174) can connect to the Docs API on :4000 without a custom
-// Origin allowlist. Production deployments tighten this via env.
-var upgrader = websocket.Upgrader{
+// baseUpgrader carries the buffer sizes; CheckOrigin is installed per-Handler by
+// originChecker so the policy is configurable rather than compiled in.
+var baseUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
-	CheckOrigin: func(_ *http.Request) bool {
-		return true
-	},
+}
+
+// originChecker builds the CheckOrigin policy from an allow-list.
+//
+// This replaces an unconditional `return true` whose comment claimed "production deployments
+// tighten this via env" — no such env existed anywhere in the repo, so the claim was false
+// and the policy was accept-every-origin in every deployment. Because the edge gateway
+// injects x-gateway-auth on requests it has authenticated (from a session cookie), a
+// cross-site page could open a socket that the gateway stamps with the victim's identity —
+// classic CSWSH, giving the attacker the document stream and, at edit tier, mutation.
+//
+// Policy, secure by default:
+//   - No Origin header ⇒ allow. Non-browser clients (the Go test clients, CLI tools) send
+//     none, and a request with no Origin cannot be a cross-site browser request.
+//   - allowed empty ⇒ SAME-ORIGIN only: Origin host must equal the request Host. This is
+//     gorilla's own default and the right behaviour behind a reverse proxy, where the SPA is
+//     served from the same hostname as the API.
+//   - allowed non-empty ⇒ the Origin must match one entry exactly (scheme+host+port). This
+//     is what a split-origin dev setup needs (SPA on :5174, API on :4000).
+func originChecker(allowed []string) func(*http.Request) bool {
+	set := make(map[string]bool, len(allowed))
+	for _, o := range allowed {
+		if o = strings.TrimSpace(o); o != "" {
+			set[strings.ToLower(strings.TrimRight(o, "/"))] = true
+		}
+	}
+	return func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		if len(set) == 0 {
+			u, err := url.Parse(origin)
+			if err != nil {
+				return false
+			}
+			return strings.EqualFold(u.Host, r.Host)
+		}
+		return set[strings.ToLower(strings.TrimRight(origin, "/"))]
+	}
 }
 
 const (
@@ -41,12 +79,28 @@ type LockGuard interface {
 }
 
 type Handler struct {
-	engine *OTEngine
-	guard  LockGuard
-	access SessionResolver
+	engine   *OTEngine
+	guard    LockGuard
+	access   SessionResolver
+	upgrader websocket.Upgrader
 }
 
-func NewHandler(engine *OTEngine) *Handler { return &Handler{engine: engine} }
+func NewHandler(engine *OTEngine) *Handler {
+	h := &Handler{engine: engine}
+	// Default to same-origin. A handler built without WithAllowedOrigins is therefore
+	// restrictive, not permissive — the previous package-level upgrader defaulted open.
+	h.upgrader = baseUpgrader
+	h.upgrader.CheckOrigin = originChecker(nil)
+	return h
+}
+
+// WithAllowedOrigins sets the WebSocket Origin allow-list (DOCS_ALLOWED_ORIGINS). Empty or
+// unset keeps the same-origin default, which is correct for a reverse-proxied deployment
+// where the SPA and API share a hostname. A split-origin dev setup lists its SPA origin.
+func (h *Handler) WithAllowedOrigins(origins []string) *Handler {
+	h.upgrader.CheckOrigin = originChecker(origins)
+	return h
+}
 
 // WithAccess attaches the SEC-4 session resolver: the membership scope gate (404 for a page outside
 // the caller's workspaces), the verified actor, and the edit-tier decision that gates `change` frames.
@@ -104,7 +158,7 @@ func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Warn("collab: upgrade failed", slog.String("err", err.Error()))
 		return

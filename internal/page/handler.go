@@ -125,7 +125,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "CREATE_FAILED", err.Error())
 		return
 	}
-	metrics.PagesCreated.WithLabelValues(out.SpaceID).Inc()
+	metrics.PagesCreated.Inc()
 	writeJSON(w, http.StatusCreated, out)
 }
 

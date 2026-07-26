@@ -38,6 +38,17 @@ jobs:
         with:
           go-version: "1.25"
           cache: true
+      # Formatting gate. Nothing checked gofmt before this — not `go vet`, not the frontend
+      # job, nowhere in this file — and 5 files had already drifted. talyvor-lens had exactly
+      # this hole and reached 37 files, at which point a stricter linter version would have
+      # reddened every unrelated PR. Cheap to hold at zero, expensive to pay down later.
+      #
+      # `gofmt -l` lists files whose formatting differs; test -z fails the build if the list
+      # is non-empty, and the second invocation prints WHICH files so the failure is
+      # actionable. Uses the toolchain's own gofmt, so "formatted" means one thing here and on
+      # a developer's machine.
+      - name: gofmt (formatting must not drift)
+        run: test -z "$(gofmt -l .)" || { echo "::error::unformatted files — run gofmt -w"; gofmt -l .; exit 1; }
       - run: go vet ./...
       # DOCS_TEST_DATABASE_URL is the ADMIN dsn: testutil.New(t) connects to it to
       # CREATE/DROP an isolated per-test database, then applies the embedded
@@ -70,6 +81,27 @@ jobs:
 
   # The SEC-4 tenancy class-guard. Written in .semgrep/ since the SEC-4 work but
   # never wired into CI — a rule that does not run is not a guardrail.
+  # ORG-LEVEL CLASS GUARD, not a Docs guard. talyvor-docs and talyvor-track independently
+  # shipped the identical defect — a compose file supplying a real default for
+  # GATEWAY_AUTH_SECRET — and two separate audits found them. A per-repo test cannot catch
+  # the next repo, so scripts/check-compose-secrets.sh contains no Docs-specific knowledge
+  # and is meant to be copied verbatim into talyvor-track, talyvor-lens and talyvor-suite
+  # alongside this job. Porting instructions are in the script header and the fix report.
+  #
+  # Deliberately its own job, with no `needs:`, so it runs in parallel and reports
+  # independently of the Go suite — the finding it makes is a deploy blocker, not a test
+  # failure, and should not be buried behind a 2-minute test job.
+  compose-secrets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: no compose file may supply a secret value
+        run: ./scripts/check-compose-secrets.sh
+
   semgrep:
     runs-on: ubuntu-latest
     permissions:

@@ -21,7 +21,7 @@ func newMockStore(t *testing.T) (*Store, pgxmock.PgxPoolIface) {
 	return newStore(pool), pool
 }
 
-func ptrStr(s string) *string { return &s }
+func ptrStr(s string) *string        { return &s }
 func ptrTime(t time.Time) *time.Time { return &t }
 
 func pageCols() []string {

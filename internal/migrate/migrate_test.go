@@ -171,7 +171,7 @@ func TestApply_ChecksumDrift_FailsClosed(t *testing.T) {
 // to prevent.
 func TestFiles_RejectsMalformedName(t *testing.T) {
 	bad := fstest.MapFS{
-		"0001_ok.sql":     &fstest.MapFile{Data: []byte(`SELECT 1;`)},
+		"0001_ok.sql":      &fstest.MapFile{Data: []byte(`SELECT 1;`)},
 		"not-numbered.sql": &fstest.MapFile{Data: []byte(`SELECT 1;`)},
 	}
 	if _, err := migrate.Files(bad); err == nil {
@@ -194,9 +194,9 @@ func TestFiles_RejectsDuplicateVersion(t *testing.T) {
 // ORDERING: files are returned in numeric NNNN order regardless of map iteration.
 func TestFiles_NumericOrder(t *testing.T) {
 	fs := fstest.MapFS{
-		"0010_ten.sql":  &fstest.MapFile{Data: []byte(`SELECT 1;`)},
-		"0002_two.sql":  &fstest.MapFile{Data: []byte(`SELECT 1;`)},
-		"0001_one.sql":  &fstest.MapFile{Data: []byte(`SELECT 1;`)},
+		"0010_ten.sql": &fstest.MapFile{Data: []byte(`SELECT 1;`)},
+		"0002_two.sql": &fstest.MapFile{Data: []byte(`SELECT 1;`)},
+		"0001_one.sql": &fstest.MapFile{Data: []byte(`SELECT 1;`)},
 	}
 	got, err := migrate.Files(fs)
 	if err != nil {

@@ -95,7 +95,7 @@ func writeAIErr(w http.ResponseWriter, err error) {
 // ─── /write ────────────────────────────────────────────────
 
 func (h *Handler) Write(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized on the next line by AuthorizeWorkspace, before the value reaches the engine or Lens
 	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
@@ -124,7 +124,7 @@ func (h *Handler) Write(w http.ResponseWriter, r *http.Request) {
 // ─── /transform ────────────────────────────────────────────
 
 func (h *Handler) Transform(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized on the next line by AuthorizeWorkspace, before the value reaches the engine or Lens
 	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
@@ -167,7 +167,7 @@ func (h *Handler) Transform(w http.ResponseWriter, r *http.Request) {
 // ─── /translate ────────────────────────────────────────────
 
 func (h *Handler) Translate(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized on the next line by AuthorizeWorkspace, before the value reaches the engine or Lens
 	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
@@ -202,7 +202,7 @@ type askResponse struct {
 }
 
 func (h *Handler) Ask(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized on the next line by AuthorizeWorkspace, before the value reaches the engine or Lens
 	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
@@ -257,7 +257,7 @@ func pageURL(p model.Page) string {
 // ─── /suggest-title ────────────────────────────────────────
 
 func (h *Handler) SuggestTitle(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized on the next line by AuthorizeWorkspace, before the value reaches the engine or Lens
 	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
