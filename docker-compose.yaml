@@ -22,7 +22,12 @@ services:
       # loopback (or the compose network) and nothing else needs to.
       - "127.0.0.1:4000:4000"
     environment:
-      - DOCS_DATABASE_URL=postgres://docs:${POSTGRES_PASSWORD:-changeme}@postgres:5432/talyvor_docs?sslmode=disable
+      # POSTGRES_PASSWORD is REQUIRED too, for the same reason as the gateway secret below:
+      # `${POSTGRES_PASSWORD:-changeme}` committed a working database credential, and the
+      # shared compose-secret check (scripts/check-compose-secrets.sh) flags exactly that
+      # shape. Fixed rather than exempted — an exemption here would be the precedent every
+      # other repo copies.
+      - DOCS_DATABASE_URL=postgres://docs:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD — openssl rand -hex 16}@postgres:5432/talyvor_docs?sslmode=disable
       # SEC-4 Layer 1 root of trust. config.Load() REQUIRES this at >= 16 chars and
       # exits(1) otherwise — correctly, since without it every /v1 identity is forgeable.
       #
@@ -68,7 +73,7 @@ services:
     environment:
       POSTGRES_DB: talyvor_docs
       POSTGRES_USER: docs
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD — openssl rand -hex 16}
     volumes:
       - pgdata:/var/lib/postgresql/data
       # The ./migrations:/docker-entrypoint-initdb.d mount is GONE. That hook runs only
