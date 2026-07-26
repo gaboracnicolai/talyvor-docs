@@ -59,24 +59,28 @@ rules:
       suppressed inline (documented limitation).
     patterns:
       - pattern: chi.URLParam($R, "wsID")
-    # BLIND SPOT (closed): this include list was exactly the 7 packages SEC-4's secondary
-    # sweep touched (6050788), so the rule structurally could not see the packages that
-    # sweep missed — and page + space had unguarded {wsID} routes for that entire time
-    # (GET /workspaces/{wsID}/pages/search, /pages/stale, /workspaces/{wsID}/spaces).
-    # A guardrail whose scope is "the code we already fixed" cannot catch the next miss.
-    # page/space/search are now included; search was already guarded and stays clean.
-    paths:
-      include:
-        - "/internal/approval/"
-        - "/internal/permission/"
-        - "/internal/database/"
-        - "/internal/changelog/"
-        - "/internal/templatelib/"
-        - "/internal/customdomain/"
-        - "/internal/export/"
-        - "/internal/page/"
-        - "/internal/space/"
-        - "/internal/search/"
+    # NO paths FILTER — this rule scans the whole tree, and that is load-bearing.
+    #
+    # It carried a `paths.include` allow-list of ten packages, alongside a comment declaring
+    # the blind spot "closed" because page/space/search had been added to it. The blind spot
+    # was NOT closed. Four packages that read {wsID} were never in the list — ai, analytics,
+    # freshness, trackintegration — and internal/trackintegration was, at that moment,
+    # shipping the exact defect this rule exists to catch: GetIssue and Search passed an
+    # unauthorized path {wsID} to the Track client, which forwards it under Docs's own
+    # service API key. The rule ran on every PR, exited 0, and could not see it.
+    #
+    # The comment even stated the correct principle — "a guardrail whose scope is 'the code
+    # we already fixed' cannot catch the next miss" — and was then satisfied by extending the
+    # list with the packages that had just been fixed. An allow-list can only ever ratify
+    # yesterday's sweep, and a false assurance printed beside a live gap is worse than no
+    # comment: the next reader trusts it.
+    #
+    # Exceptions are now a DENY-LIST of named sites, not remembered packages: every
+    # legitimate use carries an inline `// nosemgrep: docs-no-url-param-workspace-scope --
+    # <reason>` at the line itself. That is strictly better than a directory filter, because
+    # each exemption is one line long, states why it is safe, and is reviewed in the diff
+    # that introduces it — while any NEW unauthorized read is flagged by default, which is
+    # the property that failed here.
 
   - id: docs-by-id-write-requires-workspace-scope-sprintf
     languages: [go]

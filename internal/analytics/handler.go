@@ -119,7 +119,7 @@ func (h *Handler) PageStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) WorkspaceStats(w http.ResponseWriter, r *http.Request) {
-	wsID := chi.URLParam(r, "wsID")
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized below by AuthorizeWorkspace, before any store read
 	// A4D: authorize the URL workspace against the caller's verified memberships.
 	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
 		writeErr(w, http.StatusForbidden, "forbidden")
