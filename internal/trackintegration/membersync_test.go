@@ -14,16 +14,32 @@ type fakeMemberSource struct {
 	configured bool
 	rosters    map[string][]membership.MemberRef
 	calls      []string
+	// wsIDs, when non-nil, makes ListWorkspaceIDs SUCCEED and return it — i.e. exercise the
+	// production enumeration path (Track answers, no fallback). Left nil by the cases that are
+	// about roster reconciliation; see the note on ListWorkspaceIDs.
+	wsIDs []string
 }
 
 func (f *fakeMemberSource) MemberSyncConfigured() bool { return f.configured }
 
-// ListWorkspaceIDs: this fake predates the enumeration inversion and its cases are about roster
-// reconciliation, not about WHICH workspaces are covered. Returning an error makes the syncer fall
-// back to the content-derived store these tests already seed — so they keep testing exactly what
-// they were written to test, rather than being quietly re-pointed at a new source.
+// ListWorkspaceIDs. With wsIDs nil this returns an error, which makes the syncer fall back to the
+// content-derived store the roster-reconciliation cases already seed — so those keep testing what
+// they were written to test rather than being quietly re-pointed at a new source.
+//
+// ⚠ THAT DEFAULT ONCE NEUTRALISED AN EXPIRY, AND THE wsIDs FIELD EXISTS SO IT CANNOT AGAIN.
+// TestSyncMembers_CannotReachAWorkspaceWithNoContent existed for one purpose: to go RED the moment
+// the cold-start deadlock was broken, so the fix could not land while the parked-decision note
+// survived. The fix landed (c970329). The test kept PASSING — because this default routed it down
+// the fallback, so it was asserting the old behaviour of a path production no longer takes. Two
+// tests then asserted opposite things and both were green.
+//
+// A test used as an expiry must exercise the PRODUCTION path. Set wsIDs when the case is about
+// which workspaces get covered.
 func (f *fakeMemberSource) ListWorkspaceIDs(context.Context) ([]string, error) {
-	return nil, errors.New("fake: enumeration not exercised by these cases")
+	if f.wsIDs != nil {
+		return f.wsIDs, nil
+	}
+	return nil, errors.New("fake: enumeration not exercised by this case (set wsIDs to exercise it)")
 }
 
 func (f *fakeMemberSource) GetWorkspaceMembers(_ context.Context, wsID string) ([]membership.MemberRef, error) {
@@ -86,16 +102,26 @@ func TestSyncMembers_Unconfigured_NoOp(t *testing.T) {
 	}
 }
 
-// PARKED — THE COLD-START DEADLOCK. This test pins a KNOWN LIMITATION, not a property
-// worth having: a workspace Track knows about but Docs holds no content for is never
-// enumerated, so its roster is never pulled, so nobody can be a member of it, so nobody
-// can create the content that would enumerate it. The full decision, its reopening
-// condition and the fix shape live on DistinctWorkspaceIDs in internal/membership/store.go.
+// ⚠ INVERTED, NOT DELETED — AND THE INVERSION IS OVERDUE.
 //
-// It is deliberately written to FAIL the moment the deadlock is broken. Whoever breaks it
-// will see this test go red; the fix is not finished until they DELETE this test and the
-// note it points at. A limitation recorded only in prose rots silently — this one cannot.
-func TestSyncMembers_CannotReachAWorkspaceWithNoContent(t *testing.T) {
+// This used to be TestSyncMembers_CannotReachAWorkspaceWithNoContent: a deliberate expiry, written
+// to go RED the moment the cold-start deadlock was broken, with the instruction that the fix "is
+// not finished until they DELETE this test and the note it points at".
+//
+// ⚠ THE DEADLOCK WAS BROKEN (c970329) AND THIS TEST KEPT PASSING. The fake's ListWorkspaceIDs
+// returned an error by default, so the syncer fell back to content-derived enumeration and the
+// test went on asserting the behaviour of a path production no longer takes. Meanwhile
+// TestEnumerate_IncludesAWorkspaceWithNoContent asserted the opposite. Both were green, and the
+// parked-decision note on DistinctWorkspaceIDs survived describing a defect that was already fixed.
+//
+// THE LESSON, recorded where it happened: an expiry implemented as a test must exercise the
+// PRODUCTION path. A fake that stands in for the thing whose behaviour changed can be adjusted for
+// locally good reasons by someone who has no idea a decision hangs off it.
+//
+// So this now pins the CURRENT contract, end to end and through the real enumeration: a workspace
+// Track knows about but Docs holds no content for IS synced. If that stops being true, the
+// cold-start deadlock is back and a brand-new tenant cannot create their first page.
+func TestSyncMembers_ReachesAWorkspaceWithNoContent(t *testing.T) {
 	d := testutil.New(t)
 	ctx := context.Background()
 
@@ -106,22 +132,29 @@ func TestSyncMembers_CannotReachAWorkspaceWithNoContent(t *testing.T) {
 	empty := d.Workspace(t)
 
 	store := membership.NewStore(d.Pool)
-	fake := &fakeMemberSource{configured: true, rosters: map[string][]membership.MemberRef{
-		withContent: {{Email: "alice@corp.com", Role: "admin", MemberID: "m1"}},
-		empty:       {{Email: "newjoiner@corp.com", Role: "owner", MemberID: "m9"}},
-	}}
+	fake := &fakeMemberSource{
+		configured: true,
+		// Track answers — the production path. Nil here is what neutralised the old expiry.
+		wsIDs: []string{withContent, empty},
+		rosters: map[string][]membership.MemberRef{
+			withContent: {{Email: "alice@corp.com", Role: "admin", MemberID: "m1"}},
+			empty:       {{Email: "newjoiner@corp.com", Role: "owner", MemberID: "m9"}},
+		},
+	}
 	NewSyncer(nil, nil, nil, "").WithMemberSync(fake, store).SyncMembers(ctx)
 
-	// Track is never even ASKED about the empty workspace — enumeration comes from content.
+	var asked bool
 	for _, ws := range fake.calls {
 		if ws == empty {
-			t.Fatal("deadlock broken: SyncMembers asked Track about a workspace with no content. " +
-				"If that is now intended, delete this test AND the parked-decision note on " +
-				"DistinctWorkspaceIDs in internal/membership/store.go")
+			asked = true
 		}
 	}
+	if !asked {
+		t.Fatal("SyncMembers never asked Track about a workspace with no content — the cold-start " +
+			"deadlock is back: no roster lands, so its first write 403s forever. Enumeration must " +
+			"come from Track (enumerate.go), not from Docs' own content.")
+	}
 
-	// ...so no roster lands, and AuthorizeWorkspace can never pass for it.
 	count := func(wsID string) int {
 		var n int
 		if err := d.Pool.QueryRow(ctx,
@@ -130,14 +163,13 @@ func TestSyncMembers_CannotReachAWorkspaceWithNoContent(t *testing.T) {
 		}
 		return n
 	}
-	if n := count(empty); n != 0 {
-		t.Fatalf("deadlock broken: %d roster rows landed for a workspace with no content — see above", n)
+	if n := count(empty); n != 1 {
+		t.Fatalf("the empty workspace synced %d roster rows, want 1 — a brand-new tenant still "+
+			"cannot be authorized for their own workspace", n)
 	}
-
-	// The premise, checked rather than assumed: the CONTENTFUL workspace DID sync. Without
-	// this, a zero above is equally consistent with "SyncMembers did nothing at all", and the
-	// test would pass while proving nothing.
+	// The premise, checked rather than assumed: without this a 1 above is equally consistent with
+	// a fixture that happened to write a row.
 	if n := count(withContent); n != 1 {
-		t.Fatalf("premise broken: the workspace WITH content synced %d rows, want 1 — this test proves nothing", n)
+		t.Fatalf("premise broken: the workspace WITH content synced %d rows, want 1", n)
 	}
 }
