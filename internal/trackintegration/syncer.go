@@ -162,23 +162,44 @@ func (s *Syncer) SyncMembers(ctx context.Context) {
 		return
 	}
 	for _, wsID := range wsIDs {
-		refs, err := s.members.GetWorkspaceMembers(ctx, wsID)
-		if err != nil {
-			// A fetch failure skips THIS workspace (never reaches reconcile) — its existing
-			// roster stays intact rather than being pruned on a transient error.
-			slog.Warn("trackintegration: member sync — pull failed, skipping workspace",
-				slog.String("workspace_id", wsID), slog.String("err", err.Error()))
-			continue
-		}
-		upserted, pruned, err := s.store.ReconcileWorkspace(ctx, wsID, refs)
-		if err != nil {
-			slog.Warn("trackintegration: member sync — reconcile failed",
-				slog.String("workspace_id", wsID), slog.String("err", err.Error()))
-			continue
-		}
-		slog.Info("trackintegration: member sync — workspace reconciled",
-			slog.String("workspace_id", wsID),
-			slog.Int("upserted", upserted),
-			slog.Int("pruned", pruned))
+		// A failure on one workspace never aborts the sweep — SyncOneWorkspace logs and returns.
+		_ = s.SyncOneWorkspace(ctx, wsID)
 	}
+}
+
+// SyncOneWorkspace pulls ONE workspace's roster from Track and reconciles it. Extracted verbatim
+// from the sweep above so the periodic path and the on-demand one cannot drift: the ticker calls it
+// per workspace, and the service route calls it for exactly the workspace a new identity just got.
+//
+// WHY IT EXISTS. The sweep runs on a timer, so a brand-new identity had no membership row until the
+// next tick — up to the full interval — and the first thing a new tester does is the thing that
+// 403s. This is the entry point that closes that window; see the service route in cmd/docs.
+//
+// IDEMPOTENT: ReconcileWorkspace is a full-pull upsert plus prune, so calling it twice costs a
+// second round-trip and changes nothing. That is what makes a retry free and a duplicate nudge
+// harmless.
+//
+// A transient failure returns an error and leaves the EXISTING roster intact rather than pruning it
+// — a pull that failed is not evidence that nobody is a member.
+func (s *Syncer) SyncOneWorkspace(ctx context.Context, wsID string) error {
+	if !s.memberSyncOn() {
+		return nil
+	}
+	refs, err := s.members.GetWorkspaceMembers(ctx, wsID)
+	if err != nil {
+		slog.Warn("trackintegration: member sync — pull failed, skipping workspace",
+			slog.String("workspace_id", wsID), slog.String("err", err.Error()))
+		return err
+	}
+	upserted, pruned, err := s.store.ReconcileWorkspace(ctx, wsID, refs)
+	if err != nil {
+		slog.Warn("trackintegration: member sync — reconcile failed",
+			slog.String("workspace_id", wsID), slog.String("err", err.Error()))
+		return err
+	}
+	slog.Info("trackintegration: member sync — workspace reconciled",
+		slog.String("workspace_id", wsID),
+		slog.Int("upserted", upserted),
+		slog.Int("pruned", pruned))
+	return nil
 }
