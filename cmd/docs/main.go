@@ -522,9 +522,13 @@ func main() {
 		// header is read; authz then resolves the verified x-user-email to workspace
 		// memberships (from workspace_members) and puts them in context. Handlers scope every
 		// by-id query to that membership set — never to a client-supplied header.
-		v1Exempt := func(p string) bool { return strings.HasPrefix(p, "/v1/public/") }
-		r.Use(gatewayauth.Middleware(cfg.GatewayAuthSecret, v1Exempt))
-		r.Use(authz.Middleware(authz.NewPGResolver(pool), v1Exempt))
+		// ⚠ TWO PREDICATES, NOT ONE. They were the same literal until the member-sync
+		// service route 403ed in production: it needs the transit proof but CANNOT have a
+		// verified identity, because it runs before the identity has any membership to
+		// resolve. See internal/gatewayauth/exempt.go for the two lanes and what keeps the
+		// service lane safe. Shared definitions so a test exercises this exact chain.
+		r.Use(gatewayauth.Middleware(cfg.GatewayAuthSecret, gatewayauth.ExemptTransitProof))
+		r.Use(authz.Middleware(authz.NewPGResolver(pool), gatewayauth.ExemptMembership))
 
 		// Collab WS is now INSIDE the boundary: the gateway proof + membership run on the
 		// upgrade request before ServeWS opens a session (chi's Timeout is disabled for
