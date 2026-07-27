@@ -173,3 +173,99 @@ func TestSyncMembers_ReachesAWorkspaceWithNoContent(t *testing.T) {
 		t.Fatalf("premise broken: the workspace WITH content synced %d rows, want 1", n)
 	}
 }
+
+// ⚠ ONE WORKSPACE RECONCILES WITHOUT TOUCHING OTHERS. This is the on-demand entry point the BFF
+// calls at login, and the property that makes it safe to call for a single new identity: it must
+// land THAT roster and leave every other workspace exactly as it was.
+//
+// Before SyncOneWorkspace existed the only way in was SyncMembers, which sweeps every workspace —
+// so a new tester either waited for the tick or the deployment paid a full sweep per login.
+func TestSyncOneWorkspace_LandsOnlyThatWorkspace(t *testing.T) {
+	d := testutil.New(t)
+	ctx := context.Background()
+	wsNew, wsOther := d.Workspace(t), d.Workspace(t)
+	store := membership.NewStore(d.Pool)
+
+	// wsOther already has a roster; wsNew is what a brand-new identity looks like — no content,
+	// no members, and (crucially) it is NOT enumerated from content.
+	fake := &fakeMemberSource{configured: true, rosters: map[string][]membership.MemberRef{
+		wsOther: {{Email: "bob@corp.com", Role: "member", MemberID: "m2"}},
+		wsNew:   {{Email: "alice@corp.com", Role: "admin", MemberID: "m1"}},
+	}}
+	s := NewSyncer(nil, nil, nil, "").WithMemberSync(fake, store)
+	if err := s.SyncOneWorkspace(ctx, wsOther); err != nil {
+		t.Fatalf("seed wsOther: %v", err)
+	}
+	before := len(fake.calls)
+
+	if err := s.SyncOneWorkspace(ctx, wsNew); err != nil {
+		t.Fatalf("SyncOneWorkspace(wsNew): %v", err)
+	}
+
+	count := func(wsID string) int {
+		var n int
+		_ = d.Pool.QueryRow(ctx, `SELECT count(*) FROM workspace_members WHERE workspace_id=$1`, wsID).Scan(&n)
+		return n
+	}
+	if count(wsNew) != 1 {
+		t.Errorf("wsNew has %d members, want 1 — a brand-new workspace must reconcile on demand, "+
+			"which is what stops its owner's first request 403ing", count(wsNew))
+	}
+	if count(wsOther) != 1 {
+		t.Errorf("wsOther has %d members, want 1 — an on-demand sync must not disturb another "+
+			"workspace's roster", count(wsOther))
+	}
+	// It asked Track about wsNew and NOTHING else: a per-login nudge must not become a full sweep.
+	if got := fake.calls[before:]; len(got) != 1 || got[0] != wsNew {
+		t.Errorf("upstream calls = %v, want exactly [%s] — one workspace, not a sweep", got, wsNew)
+	}
+	var leak int
+	_ = d.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM workspace_members WHERE workspace_id=$1 AND email='bob@corp.com'`, wsNew).Scan(&leak)
+	if leak != 0 {
+		t.Error("cross-workspace leak: wsOther's member landed in wsNew")
+	}
+}
+
+// Idempotent: calling it twice changes nothing. That is what makes a retry free and two logins
+// racing harmless, which the BFF's best-effort call relies on.
+func TestSyncOneWorkspace_IsIdempotent(t *testing.T) {
+	d := testutil.New(t)
+	ctx := context.Background()
+	ws := d.Workspace(t)
+	store := membership.NewStore(d.Pool)
+	fake := &fakeMemberSource{configured: true, rosters: map[string][]membership.MemberRef{
+		ws: {{Email: "alice@corp.com", Role: "admin", MemberID: "m1"}},
+	}}
+	s := NewSyncer(nil, nil, nil, "").WithMemberSync(fake, store)
+	for i := 0; i < 3; i++ {
+		if err := s.SyncOneWorkspace(ctx, ws); err != nil {
+			t.Fatalf("run %d: %v", i, err)
+		}
+	}
+	var n int
+	_ = d.Pool.QueryRow(ctx, `SELECT count(*) FROM workspace_members WHERE workspace_id=$1`, ws).Scan(&n)
+	if n != 1 {
+		t.Errorf("after three syncs the roster has %d rows, want 1 — a full-pull upsert must not "+
+			"accumulate", n)
+	}
+}
+
+// Unconfigured member sync is a clean no-op, not a silent success: the route reports 503 rather
+// than telling a caller membership landed when nothing was reconciled.
+func TestSyncOneWorkspace_UnconfiguredIsNoOp(t *testing.T) {
+	d := testutil.New(t)
+	ctx := context.Background()
+	ws := d.Workspace(t)
+	store := membership.NewStore(d.Pool)
+	fake := &fakeMemberSource{configured: false, rosters: map[string][]membership.MemberRef{
+		ws: {{Email: "alice@corp.com", Role: "admin", MemberID: "m1"}},
+	}}
+	s := NewSyncer(nil, nil, nil, "").WithMemberSync(fake, store)
+	if err := s.SyncOneWorkspace(ctx, ws); err != nil {
+		t.Fatalf("unconfigured must be a quiet no-op, got %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Errorf("unconfigured sync called upstream %v — it must not", fake.calls)
+	}
+}

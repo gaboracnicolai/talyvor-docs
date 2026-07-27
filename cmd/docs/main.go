@@ -221,7 +221,7 @@ func main() {
 	membershipStore := membership.NewStore(pool)
 	trackSyncer := trackintegration.NewSyncer(trackClient, pageStore, linkStore, cfg.DefaultWorkspaceID).
 		WithMemberSync(trackClient, membershipStore)
-	go trackSyncer.Start(ctx, 15*time.Minute)
+	go trackSyncer.Start(ctx, 2*time.Minute)
 
 	// Lens integration. Every AI call routes through here; an empty
 	// DOCS_LENS_URL/API key flips IsAvailable() off and the handler
@@ -530,6 +530,10 @@ func main() {
 		// upgrade request before ServeWS opens a session (chi's Timeout is disabled for
 		// hijacked connections, so long-lived sockets are unaffected).
 		r.Get("/collab/{pageID}/ws", collabHandler.ServeWS)
+
+		// On-demand member sync for ONE workspace, so a brand-new identity does not wait for the
+		// sweep. Inside this group, so gatewayauth has already proved transit.
+		trackSyncer.MountService(r)
 
 		spaceHandler.Mount(r)
 		pageHandler.Mount(r)

@@ -61,6 +61,13 @@ func IdentityFrom(ctx context.Context) (Identity, bool) {
 // SHA-256 digests, so there is no length-dependent path). Absent or mismatched → 401
 // immediately, BEFORE any identity header is read. Identity is read only after the proof.
 func Middleware(secret string, exempt func(path string) bool) func(http.Handler) http.Handler {
+	// ⚠ FAIL CLOSED ON AN UNSET SECRET. Without this, sha256("") is the digest of an ABSENT
+	// x-gateway-auth header as well as of an empty configured secret, so the compare below matches
+	// and an unauthenticated caller passes the root-of-trust boundary — the whole /v1 surface, not
+	// one route. config.Load already refuses to boot below MinGatewayAuthSecretLen, but this
+	// boundary must not depend on a check that lives somewhere else: a middleware handed no secret
+	// refuses everything.
+	unset := secret == ""
 	secretDigest := sha256.Sum256([]byte(secret))
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +76,10 @@ func Middleware(secret string, exempt func(path string) bool) func(http.Handler)
 				return
 			}
 			// Transit proof FIRST — nothing identity-related is read until this passes.
+			if unset {
+				unauthorized(w)
+				return
+			}
 			proofDigest := sha256.Sum256([]byte(r.Header.Get(HeaderGatewayAuth)))
 			if subtle.ConstantTimeCompare(proofDigest[:], secretDigest[:]) != 1 {
 				unauthorized(w)
