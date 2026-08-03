@@ -66,9 +66,11 @@ func TestCreate_AutoSlugAndDepthAndVersion(t *testing.T) {
 		WillReturnRows(pgxmock.NewRows([]string{"depth"}).AddRow(int(1)))
 	// INSERT — store derives slug "my-new-page" from title.
 	pool.ExpectQuery(`INSERT INTO pages`).
+		// The trailing "document" is page_type: Create now WRITES the column, and an
+		// unspecified type resolves to the schema default rather than being left out.
 		WithArgs("sp-1", "ws-1", &parent, "My New Page", "my-new-page",
 			"{}", "", "", "", float64(0), 2, false, "creator", "creator",
-			[]string{}, float64(0), 0).
+			[]string{}, float64(0), 0, "document").
 		WillReturnRows(pageRow("pg-1", "My New Page", "my-new-page", 2, &parent))
 	// Version 1 insert — now carries the page's workspace_id.
 	pool.ExpectExec(`INSERT INTO page_versions \(page_id, workspace_id, version`).

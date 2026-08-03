@@ -120,13 +120,13 @@ func (c *Client) IsConfigured() bool {
 	return c.trackURL != "" && c.apiKey != ""
 }
 
-// GetIssue fetches one issue + caches the result for cacheTTL. On
-// network failure the call returns (nil, nil) rather than an error
-// — embeds should render an "issue unavailable" state, not fail the
-// docs page render. Returns (nil, nil) when Track is unconfigured.
-func (c *Client) GetIssue(ctx context.Context, workspaceID, issueID string) (*IssueRef, error) {
+// fetchIssue is the ONE fetch+cache path behind both issue reads below. It reports failure
+// honestly; the two exported wrappers decide what to do about it, which is the only thing they
+// disagree on. Keeping the fetch single-sourced is what stops the embed path and the money path
+// from drifting apart the next time either is touched.
+func (c *Client) fetchIssue(ctx context.Context, workspaceID, issueID string) (*IssueRef, error) {
 	if !c.IsConfigured() {
-		return nil, nil
+		return nil, errors.New("track: not configured")
 	}
 	key := workspaceID + "|" + issueID
 	c.mu.RLock()
@@ -139,14 +139,53 @@ func (c *Client) GetIssue(ctx context.Context, workspaceID, issueID string) (*Is
 	path := fmt.Sprintf("/v1/workspaces/%s/issues/%s", workspaceID, issueID)
 	var ref IssueRef
 	if err := c.fetch(ctx, path, nil, &ref); err != nil {
-		// Network / 4xx / 5xx — return nil so embeds degrade
-		// gracefully. The error is intentionally swallowed.
-		return nil, nil
+		return nil, err
 	}
 	c.mu.Lock()
 	c.cache[key] = cachedRef{ref: &ref, expires: time.Now().Add(cacheTTL)}
 	c.mu.Unlock()
 	return &ref, nil
+}
+
+// GetIssue fetches one issue + caches the result for cacheTTL. On
+// network failure the call returns (nil, nil) rather than an error
+// — embeds should render an "issue unavailable" state, not fail the
+// docs page render. Returns (nil, nil) when Track is unconfigured.
+//
+// ⚠ THE SWALLOW IS CORRECT HERE AND ONLY HERE. It is right for a rendered embed and wrong for
+// anything that adds numbers up: a caller that treats the nil as "cost nothing" turns an
+// outage into a silent write-down. The cost syncer used to do exactly that. Money reads go
+// through IssueCost, which surfaces what this deliberately hides.
+func (c *Client) GetIssue(ctx context.Context, workspaceID, issueID string) (*IssueRef, error) {
+	ref, err := c.fetchIssue(ctx, workspaceID, issueID)
+	if err != nil {
+		return nil, nil
+	}
+	return ref, nil
+}
+
+// IssueCost reads one issue's AI cost for the MONEY path, and reports every failure as an
+// error rather than as a number.
+//
+// EVERY non-success is an error, 404 included. A missing issue is not an authoritative $0.00:
+// the likeliest cause of a 404 in the cost loop is a workspace-scoping mistake — asking about
+// tenant B's issue under tenant A's workspace — which is precisely the defect that used to
+// write every non-default tenant's pages down to zero. "Not found" and "cost nothing" must not
+// be the same value, because the caller sums whatever it gets back.
+//
+// The cost of this strictness, stated plainly: a genuinely-deleted Track issue that a page is
+// still linked to will keep that page's total from refreshing until the link is removed. That
+// is a visible, logged stall on a stale-but-once-true number, which is the right trade against
+// an invisible write-down to a number that was never true.
+func (c *Client) IssueCost(ctx context.Context, workspaceID, issueID string) (float64, error) {
+	ref, err := c.fetchIssue(ctx, workspaceID, issueID)
+	if err != nil {
+		return 0, err
+	}
+	if ref == nil {
+		return 0, fmt.Errorf("trackintegration: issue %q in workspace %q: no issue returned", issueID, workspaceID)
+	}
+	return ref.AICostUSD, nil
 }
 
 // SearchIssues hits Track's full-text search. Returns an empty slice

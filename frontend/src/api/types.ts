@@ -43,7 +43,10 @@ export interface Page {
   locked: boolean;
   locked_by?: string;
   locked_at?: string;
-  page_type?: "document" | "changelog" | "template";
+  // "template" was never a page_type — templates are the separate `is_template` boolean, and
+  // nothing on either side of the wire ever produced the value. Kept closed to what the API
+  // now accepts (page.validatePageType).
+  page_type?: "document" | "changelog";
   created_at: string;
   updated_at: string;
 }

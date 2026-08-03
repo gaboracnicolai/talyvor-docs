@@ -18,6 +18,9 @@ type fakeMemberSource struct {
 	// production enumeration path (Track answers, no fallback). Left nil by the cases that are
 	// about roster reconciliation; see the note on ListWorkspaceIDs.
 	wsIDs []string
+	// enumCalls counts ListWorkspaceIDs calls. That surface is gated on the member-sync
+	// secret, so a caller must not reach for it when member sync is unconfigured.
+	enumCalls int
 }
 
 func (f *fakeMemberSource) MemberSyncConfigured() bool { return f.configured }
@@ -36,6 +39,7 @@ func (f *fakeMemberSource) MemberSyncConfigured() bool { return f.configured }
 // A test used as an expiry must exercise the PRODUCTION path. Set wsIDs when the case is about
 // which workspaces get covered.
 func (f *fakeMemberSource) ListWorkspaceIDs(context.Context) ([]string, error) {
+	f.enumCalls++
 	if f.wsIDs != nil {
 		return f.wsIDs, nil
 	}

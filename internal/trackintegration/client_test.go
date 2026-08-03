@@ -160,3 +160,63 @@ func TestGetPageBacklinks_StubReturnsEmpty(t *testing.T) {
 		t.Errorf("expected empty stub result, got %+v", out)
 	}
 }
+
+// ─── IssueCost (the money path) ────────────────────────────
+
+// ⚠ TWO CALLERS, TWO CONTRACTS, ONE FETCH.
+//
+// GetIssue swallows every error and returns (nil, nil) — deliberately, and correctly, for the
+// embed it was written for: an unavailable issue should render "issue unavailable", not fail
+// the whole docs page. The cost syncer reused it, and on the money path that same swallow means
+// an unreachable issue silently contributes $0.00 to a total that gets written to the database.
+//
+// This pins BOTH contracts against the SAME upstream failure, so neither can be quietly changed
+// into the other.
+func TestIssueCost_SurfacesWhatGetIssueDeliberatelySwallows(t *testing.T) {
+	srv := httpFixture(t, map[string]http.HandlerFunc{
+		"/v1/workspaces/ws-1/issues/i-1": func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		},
+	})
+	c := New(srv.URL, "k")
+
+	// The embed contract: degrade quietly.
+	ref, err := c.GetIssue(context.Background(), "ws-1", "i-1")
+	if ref != nil || err != nil {
+		t.Fatalf("GetIssue on a 500 = (%v, %v), want (nil, nil) — embeds must still render", ref, err)
+	}
+
+	// The money contract: say so.
+	cost, err := c.IssueCost(context.Background(), "ws-1", "i-1")
+	if err == nil {
+		t.Fatalf("IssueCost on a 500 returned ($%.2f, nil) — an unreachable issue reads as costing "+
+			"nothing, and that $0 lands in a page total a customer reconciles against an invoice", cost)
+	}
+	if cost != 0 {
+		t.Errorf("IssueCost returned $%.2f alongside an error, want $0 — a failed read must not "+
+			"carry a number a caller might add up", cost)
+	}
+}
+
+// A 404 is NOT an authoritative $0.00. The likeliest cause of a 404 in the cost loop is a
+// workspace-scoping mistake — asking about tenant B's issue under tenant A's workspace — and
+// that is precisely the bug that wrote every non-default tenant's pages down to zero. Treating
+// "not found" as "cost nothing" would rebuild it behind a different status code.
+func TestIssueCost_A404IsNotAZero(t *testing.T) {
+	srv := httpFixture(t, map[string]http.HandlerFunc{}) // every path 404s
+	c := New(srv.URL, "k")
+
+	if _, err := c.IssueCost(context.Background(), "ws-1", "i-missing"); err == nil {
+		t.Fatal("IssueCost on a 404 returned no error — a missing issue would be summed as $0.00, " +
+			"which is how a mis-scoped workspace id silently writes a tenant's costs down")
+	}
+}
+
+// Unconfigured Track is an error on the money path, never a zero: no upstream was consulted, so
+// there is no total to report. (GetIssue's (nil, nil) stays as-is — see the test above.)
+func TestIssueCost_UnconfiguredIsAnErrorNotAZero(t *testing.T) {
+	if _, err := New("", "").IssueCost(context.Background(), "ws-1", "i-1"); err == nil {
+		t.Fatal("IssueCost with Track unconfigured returned no error — nothing was asked, so $0.00 " +
+			"is a fabricated answer rather than a measured one")
+	}
+}

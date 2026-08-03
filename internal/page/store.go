@@ -238,6 +238,11 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
 	if p.ContentText == "" {
 		p.ContentText = extractContentText(p.Content)
 	}
+	pageType, err := validatePageType(p.PageType)
+	if err != nil {
+		return nil, err
+	}
+	p.PageType = pageType
 
 	// Depth = parent.depth + 1; root pages are depth 0.
 	if p.ParentID != nil {
@@ -259,13 +264,13 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
             (space_id, workspace_id, parent_id, title, slug,
              content, content_text, icon, cover_url, position, depth,
              is_template, created_by, updated_by,
-             linked_issues, ai_cost_usd, stale_after_days)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+             linked_issues, ai_cost_usd, stale_after_days, page_type)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         RETURNING `+columns,
 		p.SpaceID, p.WorkspaceID, p.ParentID, p.Title, p.Slug,
 		p.Content, p.ContentText, p.Icon, p.CoverURL, p.Position, p.Depth,
 		p.IsTemplate, p.CreatedBy, p.CreatedBy,
-		p.LinkedIssues, p.AICostUSD, p.StaleAfterDays,
+		p.LinkedIssues, p.AICostUSD, p.StaleAfterDays, p.PageType,
 	))
 	if err != nil {
 		return nil, fmt.Errorf("page: insert: %w", err)
@@ -339,7 +344,33 @@ var updatableFields = map[string]struct{}{
 	"title": {}, "content": {}, "icon": {}, "cover_url": {},
 	"position": {}, "is_template": {}, "stale_after_days": {},
 	"linked_issues": {}, "ai_cost_usd": {}, "parent_id": {},
-	"updated_by": {},
+	"updated_by": {}, "page_type": {},
+}
+
+// pageTypes is the CLOSED set of values pages.page_type may hold. The column is TEXT with a
+// NOT NULL DEFAULT 'document' (0012_changelog.sql) and the frontend switches on it — PageView
+// routes "changelog" to ChangelogView, Sidebar picks the icon — so a value outside this set
+// falls through every branch and renders a page that looks empty rather than failing the write.
+// The gate lives here, at the column, because both Create and Update reach it.
+//
+// ⚠ "template" IS NOT ONE OF THEM, despite what the old model.Page comment claimed. Templates
+// are `is_template`, a separate boolean this store already filters on; giving one concept two
+// representations only creates a way for them to disagree.
+var pageTypes = map[string]struct{}{
+	"document":  {},
+	"changelog": {},
+}
+
+// validatePageType normalises the empty string to the column's default and rejects anything
+// outside the closed set.
+func validatePageType(v string) (string, error) {
+	if v == "" {
+		return "document", nil
+	}
+	if _, ok := pageTypes[v]; !ok {
+		return "", fmt.Errorf("page: unknown page_type %q (want \"document\" or \"changelog\")", v)
+	}
+	return v, nil
 }
 
 // Update applies the supplied field map and returns the materialised
@@ -388,6 +419,20 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 		existing = got
 	}
 
+	// The closed set is enforced on BOTH write paths — an allowlist entry only says the column
+	// may be written, never that any string may go in it.
+	if v, ok := updates["page_type"]; ok {
+		raw, isStr := v.(string)
+		if !isStr {
+			return nil, fmt.Errorf("page: page_type must be a string, got %T", v)
+		}
+		pageType, err := validatePageType(raw)
+		if err != nil {
+			return nil, err
+		}
+		updates["page_type"] = pageType
+	}
+
 	var (
 		set  []string
 		args []any
@@ -399,6 +444,7 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 		"title", "content", "content_text", "icon", "cover_url",
 		"position", "is_template", "stale_after_days",
 		"linked_issues", "ai_cost_usd", "parent_id", "updated_by",
+		"page_type",
 	} {
 		v, ok := updates[k]
 		if !ok {
