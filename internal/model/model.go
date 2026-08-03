@@ -76,9 +76,18 @@ type Page struct {
 	LockedBy *string    `json:"locked_by,omitempty"   db:"locked_by"`
 	LockedAt *time.Time `json:"locked_at,omitempty"   db:"locked_at"`
 
-	// PageType switches the frontend surface — "document" (default),
-	// "changelog", or "template". Backed by a column on `pages`; the
-	// changelog package reads this when generating entries.
+	// PageType switches the frontend surface: "document" (the default) or "changelog", which
+	// is what routes PageView to ChangelogView and picks the Sidebar icon. Backed by a column
+	// on `pages`; the closed set and both write paths live in page.Store (validatePageType).
+	//
+	// ⚠ THE PREVIOUS COMMENT HERE NAMED A CONSUMER THAT DID NOT EXIST and a value nothing
+	// produced: it claimed "the changelog package reads this when generating entries" — that
+	// package has never mentioned page_type, it keys entries off page_id — and listed
+	// "template" as a third value, when templates are the separate `is_template` boolean.
+	// Worse, NOTHING WROTE THE COLUMN AT ALL: no INSERT column, no Update allowlist entry, no
+	// API field. So every row was 'document' forever and the changelog surface was unreachable
+	// while the comment described it as working. The writer is the fix; this note is the
+	// record of why a column's stated consumer has to be checked rather than believed.
 	PageType string `json:"page_type,omitempty" db:"page_type"`
 
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
