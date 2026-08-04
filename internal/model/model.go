@@ -51,7 +51,24 @@ type Page struct {
 
 	// Track integration.
 	LinkedIssues []string `json:"linked_issues,omitempty" db:"linked_issues"`
-	AICostUSD    float64  `json:"ai_cost_usd"             db:"ai_cost_usd"`
+	// AICostUSD is the cost of the Track ISSUES linked to this page — NOT the cost of AI work on
+	// the document, which is OwnAICostUSD. Derived: recomputed from a complete set of links on
+	// every sweep and overwritten (see migration 0018).
+	AICostUSD float64 `json:"ai_cost_usd"             db:"ai_cost_usd"`
+
+	// OwnAICostUSD is the cost of AI operations performed ON this document (write, summarize,
+	// translate, title …), accumulated exactly-once from page_ai_spend_events.
+	//
+	// ⚠ IT IS A LOWER BOUND, and the field name cannot say that, so this comment and the API
+	// response do. Two Docs AI operations have no single page — docs-ai-ask answers across many
+	// pages, docs-search spans the workspace — and are deliberately attributed to none. Their cost
+	// is visible in Lens under its operation feature.
+	OwnAICostUSD float64 `json:"own_ai_cost_usd" db:"own_ai_cost_usd"`
+
+	// TotalAICostUSD is AICostUSD + OwnAICostUSD, computed on read and never stored. It exists so
+	// a caller that wants "everything this page cost" does not add the two itself and get it
+	// subtly wrong — and so neither underlying number had to quietly widen to mean the sum.
+	TotalAICostUSD float64 `json:"total_ai_cost_usd" db:"-"`
 
 	// Analytics.
 	ViewCount    int        `json:"view_count"               db:"view_count"`

@@ -226,7 +226,30 @@ func main() {
 	// Lens integration. Every AI call routes through here; an empty
 	// DOCS_LENS_URL/API key flips IsAvailable() off and the handler
 	// returns 503 with a friendly message instead of erroring.
-	aiEngine := ai.New(lensClient)
+	// PAGE-SCOPED AI COST ATTRIBUTION (migration 0018). The engine binds Lens's request id to the
+	// page an operation was performed on; a sweep prices those bindings from Lens later. Without
+	// the binder the engine behaves exactly as before and records nothing — so a deployment that
+	// wires one and not the other degrades to today's behaviour rather than reporting a zero it
+	// never measured.
+	aiEngine := ai.New(lensClient).WithSpendBinder(pageStore)
+
+	// The pricing sweep. Its workspace list comes from the BINDINGS, never from configuration, so
+	// it cannot regress to the single-workspace bug #51 fixed in the linked-issue sweep — see
+	// internal/lensintegration/pagecost.go.
+	pageCostSyncer := lensintegration.NewPageCostSyncer(lensClient, pageStore, 2)
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		pageCostSyncer.Sync(ctx) // price what is already waiting rather than idling a full interval
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				pageCostSyncer.Sync(ctx)
+			}
+		}
+	}()
 	// Per-workspace LLM rate limiting — the ONLY per-tenant LLM control in this repo (Docs
 	// calls Lens on one service key with no balance/quota check anywhere; see BUILD_STATE
 	// §0 Q3). Bounds RATE, not cost. Separate limiters because the two surfaces have very

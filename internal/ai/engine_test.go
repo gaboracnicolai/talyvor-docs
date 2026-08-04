@@ -66,7 +66,7 @@ func TestWriteWithAI_ReturnsGeneratedText(t *testing.T) {
 	}
 	e := newEngine(srv)
 
-	out, err := e.WriteWithAI(context.Background(), "ws-1", "explain caching", "surrounding text")
+	out, err := e.WriteWithAI(context.Background(), "ws-1", "explain caching", "surrounding text", "")
 	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestSummarize_ReturnsBullets(t *testing.T) {
 	}
 	e := newEngine(srv)
 
-	out, err := e.Summarize(context.Background(), "ws-1", "long content goes here")
+	out, err := e.Summarize(context.Background(), "ws-1", "long content goes here", "")
 	if err != nil {
 		t.Fatalf("summarize: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestFixGrammar_ReturnsCorrectedText(t *testing.T) {
 	}
 	e := newEngine(srv)
 
-	out, err := e.FixGrammar(context.Background(), "ws-1", "the cat sit on teh mat")
+	out, err := e.FixGrammar(context.Background(), "ws-1", "the cat sit on teh mat", "")
 	if err != nil {
 		t.Fatalf("grammar: %v", err)
 	}
@@ -136,14 +136,14 @@ func TestMakeShorter_AndLonger_UseHaikuAndDifferentFeatures(t *testing.T) {
 	defer srv.Close()
 	e := newEngine(srv)
 
-	if _, err := e.MakeShorter(context.Background(), "ws-1", "x"); err != nil {
+	if _, err := e.MakeShorter(context.Background(), "ws-1", "x", ""); err != nil {
 		t.Fatalf("shorter: %v", err)
 	}
 	if srv.lastFeature != "docs-ai-shorter" {
 		t.Fatalf("wrong feature shorter: %q", srv.lastFeature)
 	}
 
-	if _, err := e.MakeLonger(context.Background(), "ws-1", "x"); err != nil {
+	if _, err := e.MakeLonger(context.Background(), "ws-1", "x", ""); err != nil {
 		t.Fatalf("longer: %v", err)
 	}
 	if srv.lastFeature != "docs-ai-longer" {
@@ -156,7 +156,7 @@ func TestTranslate_SendsTargetLanguageInSystemPrompt(t *testing.T) {
 	defer srv.Close()
 	e := newEngine(srv)
 
-	if _, err := e.Translate(context.Background(), "ws-1", "hello", "Spanish"); err != nil {
+	if _, err := e.Translate(context.Background(), "ws-1", "hello", "Spanish", ""); err != nil {
 		t.Fatalf("translate: %v", err)
 	}
 	system, _ := srv.lastBody["system"].(string)
@@ -209,7 +209,7 @@ func TestSuggestTitle_TrimsQuotesAndWhitespace(t *testing.T) {
 	}
 	e := newEngine(srv)
 
-	title, err := e.SuggestTitle(context.Background(), "ws-1", "content")
+	title, err := e.SuggestTitle(context.Background(), "ws-1", "content", "")
 	if err != nil {
 		t.Fatalf("title: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestEngine_DegradesGracefullyWhenLensDown(t *testing.T) {
 	srv.Close()
 	e := newEngine(srv)
 
-	_, err := e.WriteWithAI(context.Background(), "ws-1", "x", "y")
+	_, err := e.WriteWithAI(context.Background(), "ws-1", "x", "y", "")
 	if err == nil {
 		t.Fatal("expected error when Lens unreachable")
 	}
