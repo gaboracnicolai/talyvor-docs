@@ -112,25 +112,67 @@ func (c *Client) CompleteOpenAI(ctx context.Context, workspaceID, prompt, system
 	return parseOpenAI(raw)
 }
 
+// CompleteWithRequestID is CompleteWithFeature plus Lens's request id for the call.
+//
+// ⚠ THE REQUEST ID IS THE ATTRIBUTION KEY, and this is why the Track-style mechanism does not
+// transfer. Track binds spend to an issue by sending the issue's human IDENTIFIER as
+// X-Talyvor-Feature and matching it back with `WHERE identifier = feature`. A page has no such
+// identifier: its id is a UUID (unreadable in a feature column, and it would blow up the
+// cardinality of Lens's by-feature aggregation — one feature value per page rather than per
+// operation), and its slug is MUTABLE, so a rename would orphan every cost recorded under the old
+// one. Lens instead returns X-Talyvor-Request-ID on every proxied completion and serves
+// /v1/api/spend/by-request keyed by the same value — so Docs binds page↔request at the moment it
+// makes the call, and prices it later. The binding is recorded by the process that observed it
+// rather than reconstructed from a string, and it survives a rename.
+//
+// The feature header is deliberately LEFT as the operation ("docs-ai-write"). Making it
+// page-scoped would give Lens's own dashboards a per-page dimension at the cost of making
+// by-feature aggregation useless, and Docs would still not be able to read it back — Lens has no
+// by-feature-prefix query. A page-scoped feature would be a header nothing reads.
+func (c *Client) CompleteWithRequestID(ctx context.Context, workspaceID, prompt, systemPrompt, model, feature string) (text, requestID string, err error) {
+	if !c.IsConfigured() {
+		return "", "", errors.New("lens: not configured")
+	}
+	body := map[string]any{
+		"model":      model,
+		"max_tokens": 2048,
+		"system":     systemPrompt,
+		"messages": []map[string]any{
+			{"role": "user", "content": prompt},
+		},
+	}
+	raw, reqID, err := c.postWithRequestID(ctx, "/v1/proxy/anthropic/v1/messages", workspaceID, feature, body)
+	if err != nil {
+		return "", "", err
+	}
+	out, err := parseAnthropic(raw)
+	return out, reqID, err
+}
+
 func (c *Client) post(ctx context.Context, path, workspaceID, feature string, body map[string]any) ([]byte, error) {
+	raw, _, err := c.postWithRequestID(ctx, path, workspaceID, feature, body)
+	return raw, err
+}
+
+func (c *Client) postWithRequestID(ctx context.Context, path, workspaceID, feature string, body map[string]any) ([]byte, string, error) {
 	enc, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	// Per-workspace bearer — Lens meters + rate-limits off THIS token's claim. The shared
 	// global key (c.apiKey) is the MINTING credential only; it is never sent here. On a mint
 	// failure we error the completion (fail-closed) rather than fall back to the global key,
 	// which would silently re-collapse per-tenant rate-limit + spend attribution.
 	if c.tokens == nil {
-		return nil, errors.New("lens: no token provider wired")
+		return nil, "", errors.New("lens: no token provider wired")
 	}
 	tok, err := c.tokens.TokenFor(ctx, workspaceID)
 	if err != nil {
-		return nil, fmt.Errorf("lens: token for %q: %w", workspaceID, err)
+		return nil, "", fmt.Errorf("lens: token for %q: %w", workspaceID, err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.lensURL+path, bytes.NewReader(enc))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+tok)
@@ -139,13 +181,22 @@ func (c *Client) post(ctx context.Context, path, workspaceID, feature string, bo
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("lens: %s", resp.Status)
+		return nil, "", fmt.Errorf("lens: %s", resp.Status)
 	}
-	return io.ReadAll(resp.Body)
+	// Lens stamps X-Talyvor-Request-ID on every proxied completion (talyvor-lens
+	// internal/proxy/proxy.go). It is the key /v1/api/spend/by-request is served by, so it is what
+	// a page↔cost binding is recorded against. Absent (an older Lens) ⇒ empty, and the caller
+	// simply records no binding rather than inventing one.
+	reqID := resp.Header.Get("X-Talyvor-Request-ID")
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+	return raw, reqID, nil
 }
 
 // parseAnthropic pulls the assistant text out of an Anthropic Messages

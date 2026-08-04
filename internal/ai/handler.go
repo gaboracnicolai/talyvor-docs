@@ -113,7 +113,7 @@ func (h *Handler) Write(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt required"})
 		return
 	}
-	out, err := h.engine.WriteWithAI(r.Context(), wsID, in.Prompt, in.Context)
+	out, err := h.engine.WriteWithAI(r.Context(), wsID, in.Prompt, in.Context, in.PageID)
 	if err != nil {
 		writeAIErr(w, err)
 		return
@@ -144,13 +144,13 @@ func (h *Handler) Transform(w http.ResponseWriter, r *http.Request) {
 	)
 	switch in.Action {
 	case "summarize":
-		out, err = h.engine.Summarize(r.Context(), wsID, in.Text)
+		out, err = h.engine.Summarize(r.Context(), wsID, in.Text, in.PageID)
 	case "grammar":
-		out, err = h.engine.FixGrammar(r.Context(), wsID, in.Text)
+		out, err = h.engine.FixGrammar(r.Context(), wsID, in.Text, in.PageID)
 	case "shorter":
-		out, err = h.engine.MakeShorter(r.Context(), wsID, in.Text)
+		out, err = h.engine.MakeShorter(r.Context(), wsID, in.Text, in.PageID)
 	case "longer":
-		out, err = h.engine.MakeLonger(r.Context(), wsID, in.Text)
+		out, err = h.engine.MakeLonger(r.Context(), wsID, in.Text, in.PageID)
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": fmt.Sprintf("unknown action: %s", in.Action),
@@ -181,7 +181,7 @@ func (h *Handler) Translate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
 	}
-	out, err := h.engine.Translate(r.Context(), wsID, in.Text, in.Language)
+	out, err := h.engine.Translate(r.Context(), wsID, in.Text, in.Language, in.PageID)
 	if err != nil {
 		writeAIErr(w, err)
 		return
@@ -270,7 +270,7 @@ func (h *Handler) SuggestTitle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
 	}
-	title, err := h.engine.SuggestTitle(r.Context(), wsID, in.Content)
+	title, err := h.engine.SuggestTitle(r.Context(), wsID, in.Content, in.PageID)
 	if err != nil {
 		writeAIErr(w, err)
 		return

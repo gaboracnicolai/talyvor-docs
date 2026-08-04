@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/talyvor/docs/internal/lensintegration"
@@ -27,13 +28,25 @@ const (
 // rather than a raw error string.
 var ErrUnavailable = errors.New("ai: lens unavailable")
 
+// AISpendBinder records that a Lens request belonged to a page. Optional: nil ⇒ the engine
+// behaves exactly as before and no attribution is recorded, which is what a bare test mount and
+// any deployment without the page store get.
+type AISpendBinder interface {
+	BindAISpend(ctx context.Context, requestID, pageID, workspaceID, operation string) error
+}
+
 type Engine struct {
 	lensClient *lensintegration.Client
+	binder     AISpendBinder
 }
 
 func New(lensClient *lensintegration.Client) *Engine {
 	return &Engine{lensClient: lensClient}
 }
+
+// WithSpendBinder wires page-scoped cost attribution. Without it every operation still runs; it
+// simply records nothing, so the feature degrades to today's behaviour rather than failing.
+func (e *Engine) WithSpendBinder(b AISpendBinder) *Engine { e.binder = b; return e }
 
 // IsAvailable reports whether the engine can fulfil AI requests.
 // Lens being misconfigured (empty URL/key) is the only thing that
@@ -56,13 +69,34 @@ func (e *Engine) IsAvailable() bool {
 
 // run is the shared call site. Every feature method delegates here so
 // the model + feature tag policy stays in one place.
-func (e *Engine) run(ctx context.Context, workspaceID, system, user, model, feature string) (string, error) {
+// run performs the completion and, when this operation belongs to ONE page, binds Lens's request
+// id to it so the cost can be attributed later.
+//
+// ⚠ pageID IS DELIBERATELY ALLOWED TO BE EMPTY, and two operations always pass it empty:
+// docs-ai-ask (answers across many pages by construction) and docs-search (workspace-wide). Their
+// cost stays visible in Lens under its operation feature and is attributed to no page, because
+// attributing a multi-page answer to one page would be a fabrication. SuggestTitle also passes
+// empty when the page does not exist yet — a title suggested before the first save has nothing to
+// attach to.
+//
+// The binding NEVER fails the completion. The user asked for AI text, not for bookkeeping; a
+// ledger write that failed must not cost them the answer they already paid for.
+func (e *Engine) run(ctx context.Context, workspaceID, system, user, model, feature, pageID string) (string, error) {
 	if !e.IsAvailable() {
 		return "", ErrUnavailable
 	}
-	out, err := e.lensClient.CompleteWithFeature(ctx, workspaceID, user, system, model, feature)
+	out, reqID, err := e.lensClient.CompleteWithRequestID(ctx, workspaceID, user, system, model, feature)
 	if err != nil {
 		return "", err
+	}
+	if e.binder != nil && pageID != "" && reqID != "" {
+		if bErr := e.binder.BindAISpend(ctx, reqID, pageID, workspaceID, feature); bErr != nil {
+			slog.Warn("ai: page spend binding failed — this operation's cost will not be attributed",
+				slog.String("workspace_id", workspaceID),
+				slog.String("page_id", pageID),
+				slog.String("operation", feature),
+				slog.String("err", bErr.Error()))
+		}
 	}
 	return strings.TrimSpace(out), nil
 }
@@ -71,51 +105,51 @@ func (e *Engine) run(ctx context.Context, workspaceID, system, user, model, feat
 
 const writeSystem = `You are a technical documentation assistant. Write clear, concise documentation. Return ONLY the text to insert, no explanations.`
 
-func (e *Engine) WriteWithAI(ctx context.Context, workspaceID, prompt, docContext string) (string, error) {
+func (e *Engine) WriteWithAI(ctx context.Context, workspaceID, prompt, docContext string, pageID string) (string, error) {
 	user := fmt.Sprintf("Context:\n%s\n\nWrite: %s", docContext, prompt)
-	return e.run(ctx, workspaceID, writeSystem, user, modelFast, "docs-ai-write")
+	return e.run(ctx, workspaceID, writeSystem, user, modelFast, "docs-ai-write", pageID)
 }
 
 // ─── Feature 2: Summarize ─────────────────────────────────
 
 const summarizeSystem = `Summarize the following documentation into 2-3 clear bullet points. Return ONLY the bullets, no intro text.`
 
-func (e *Engine) Summarize(ctx context.Context, workspaceID, content string) (string, error) {
-	return e.run(ctx, workspaceID, summarizeSystem, content, modelFast, "docs-ai-summarize")
+func (e *Engine) Summarize(ctx context.Context, workspaceID, content string, pageID string) (string, error) {
+	return e.run(ctx, workspaceID, summarizeSystem, content, modelFast, "docs-ai-summarize", pageID)
 }
 
 // ─── Feature 3: Fix grammar ───────────────────────────────
 
 const grammarSystem = `Fix grammar and spelling in the following text. Return ONLY the corrected text, no explanations. Preserve the original meaning and tone.`
 
-func (e *Engine) FixGrammar(ctx context.Context, workspaceID, text string) (string, error) {
-	return e.run(ctx, workspaceID, grammarSystem, text, modelFast, "docs-ai-grammar")
+func (e *Engine) FixGrammar(ctx context.Context, workspaceID, text string, pageID string) (string, error) {
+	return e.run(ctx, workspaceID, grammarSystem, text, modelFast, "docs-ai-grammar", pageID)
 }
 
 // ─── Feature 4: Make shorter ──────────────────────────────
 
 const shorterSystem = `Shorten the following text while preserving all key information. Return ONLY the shortened text.`
 
-func (e *Engine) MakeShorter(ctx context.Context, workspaceID, text string) (string, error) {
-	return e.run(ctx, workspaceID, shorterSystem, text, modelFast, "docs-ai-shorter")
+func (e *Engine) MakeShorter(ctx context.Context, workspaceID, text string, pageID string) (string, error) {
+	return e.run(ctx, workspaceID, shorterSystem, text, modelFast, "docs-ai-shorter", pageID)
 }
 
 // ─── Feature 5: Make longer ───────────────────────────────
 
 const longerSystem = `Expand the following text with more detail and examples. Return ONLY the expanded text.`
 
-func (e *Engine) MakeLonger(ctx context.Context, workspaceID, text string) (string, error) {
-	return e.run(ctx, workspaceID, longerSystem, text, modelFast, "docs-ai-longer")
+func (e *Engine) MakeLonger(ctx context.Context, workspaceID, text string, pageID string) (string, error) {
+	return e.run(ctx, workspaceID, longerSystem, text, modelFast, "docs-ai-longer", pageID)
 }
 
 // ─── Feature 6: Translate ─────────────────────────────────
 
-func (e *Engine) Translate(ctx context.Context, workspaceID, text, targetLanguage string) (string, error) {
+func (e *Engine) Translate(ctx context.Context, workspaceID, text, targetLanguage, pageID string) (string, error) {
 	if strings.TrimSpace(targetLanguage) == "" {
 		targetLanguage = defaultLang
 	}
 	system := fmt.Sprintf("Translate the following text to %s. Return ONLY the translation.", targetLanguage)
-	return e.run(ctx, workspaceID, system, text, modelFast, "docs-ai-translate")
+	return e.run(ctx, workspaceID, system, text, modelFast, "docs-ai-translate", pageID)
 }
 
 // ─── Feature 7: Q&A over docs ─────────────────────────────
@@ -142,15 +176,16 @@ func (e *Engine) AskDocs(ctx context.Context, workspaceID, question string, rele
 			fmt.Fprintf(&b, "Source: %s\n", p.URL)
 		}
 	}
-	return e.run(ctx, workspaceID, askSystem, b.String(), modelSmart, "docs-ai-ask")
+	// NO PAGE ID: an answer drawn from several pages belongs to none of them. See run().
+	return e.run(ctx, workspaceID, askSystem, b.String(), modelSmart, "docs-ai-ask", "")
 }
 
 // ─── Feature 8: Suggest title ─────────────────────────────
 
 const titleSystem = `Suggest a concise, descriptive title for this documentation page. Return ONLY the title, no quotes.`
 
-func (e *Engine) SuggestTitle(ctx context.Context, workspaceID, content string) (string, error) {
-	out, err := e.run(ctx, workspaceID, titleSystem, content, modelFast, "docs-ai-title")
+func (e *Engine) SuggestTitle(ctx context.Context, workspaceID, content, pageID string) (string, error) {
+	out, err := e.run(ctx, workspaceID, titleSystem, content, modelFast, "docs-ai-title", pageID)
 	if err != nil {
 		return "", err
 	}

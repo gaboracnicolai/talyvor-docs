@@ -180,7 +180,7 @@ func walkContent(node any, b *strings.Builder) {
 const columns = `id, space_id, workspace_id, parent_id, title, slug,
     content, content_text, icon, cover_url,
     position, depth, is_template, created_by, updated_by,
-    linked_issues, ai_cost_usd,
+    linked_issues, ai_cost_usd, own_ai_cost_usd,
     view_count, last_viewed_at,
     last_verified_at, verified_by, stale_after_days,
     doc_status,
@@ -194,7 +194,7 @@ func scan(s interface{ Scan(...any) error }) (*model.Page, error) {
 		&p.ID, &p.SpaceID, &p.WorkspaceID, &p.ParentID, &p.Title, &p.Slug,
 		&p.Content, &p.ContentText, &p.Icon, &p.CoverURL,
 		&p.Position, &p.Depth, &p.IsTemplate, &p.CreatedBy, &p.UpdatedBy,
-		&p.LinkedIssues, &p.AICostUSD,
+		&p.LinkedIssues, &p.AICostUSD, &p.OwnAICostUSD,
 		&p.ViewCount, &p.LastViewedAt,
 		&p.LastVerifiedAt, &p.VerifiedBy, &p.StaleAfterDays,
 		&p.DocStatus,
@@ -207,7 +207,7 @@ func scan(s interface{ Scan(...any) error }) (*model.Page, error) {
 	if p.LinkedIssues == nil {
 		p.LinkedIssues = []string{}
 	}
-	return &p, nil
+	return withDerivedTotal(&p), nil
 }
 
 // ─── Create ────────────────────────────────────────────────
@@ -821,7 +821,7 @@ func scanPlus(s interface{ Scan(...any) error }, extras ...any) (*model.Page, er
 		&p.ID, &p.SpaceID, &p.WorkspaceID, &p.ParentID, &p.Title, &p.Slug,
 		&p.Content, &p.ContentText, &p.Icon, &p.CoverURL,
 		&p.Position, &p.Depth, &p.IsTemplate, &p.CreatedBy, &p.UpdatedBy,
-		&p.LinkedIssues, &p.AICostUSD,
+		&p.LinkedIssues, &p.AICostUSD, &p.OwnAICostUSD,
 		&p.ViewCount, &p.LastViewedAt,
 		&p.LastVerifiedAt, &p.VerifiedBy, &p.StaleAfterDays,
 		&p.DocStatus,
@@ -833,7 +833,7 @@ func scanPlus(s interface{ Scan(...any) error }, extras ...any) (*model.Page, er
 	if err := s.Scan(dest...); err != nil {
 		return nil, err
 	}
-	return &p, nil
+	return withDerivedTotal(&p), nil
 }
 
 func prefixedColumns(alias string) string {
@@ -1021,4 +1021,15 @@ func (s *Store) UpdateAICost(ctx context.Context, pageID string, costUSD float64
 		costUSD, pageID,
 	)
 	return err
+}
+
+// withDerivedTotal fills the computed TotalAICostUSD. Kept as one function so the two numbers can
+// never be summed two different ways: the linked-issue cost plus the page's own AI cost, and
+// nothing else. See migration 0018 for why they are stored separately.
+func withDerivedTotal(p *model.Page) *model.Page {
+	if p == nil {
+		return nil
+	}
+	p.TotalAICostUSD = p.AICostUSD + p.OwnAICostUSD
+	return p
 }
