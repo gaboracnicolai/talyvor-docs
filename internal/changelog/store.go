@@ -153,17 +153,35 @@ func (s *Store) CreateEntry(ctx context.Context, e ChangelogEntry) (*ChangelogEn
 	return scan(row)
 }
 
-// ErrNotFound signals a by-id op resolved to no row IN THE CALLER'S WORKSPACES — the handler
-// maps it to 404. Distinct from a raw DB error so a real failure is never masked as not-found.
-// wsIDs empty (caller has no membership) matches nothing → ErrNotFound (fail-closed).
-var ErrNotFound = errors.New("changelog: not found in workspace")
+// ErrNotFound signals a by-id op resolved to no row ON THE CALLER'S PAGE, in the caller's
+// workspaces — the handler maps it to 404. Distinct from a raw DB error so a real failure is
+// never masked as not-found. wsIDs empty (caller has no membership) matches nothing →
+// ErrNotFound (fail-closed).
+var ErrNotFound = errors.New("changelog: not found on that page in workspace")
 
-func (s *Store) GetEntry(ctx context.Context, id string, wsIDs []string) (*ChangelogEntry, error) {
+// ⚠ EVERY BY-ID METHOD BELOW TAKES pageID, AND IT IS NOT A CONVENIENCE — IT IS THE OBJECT THE
+// ROUTE'S GATE ACTUALLY AUTHORIZED.
+//
+// The four by-id routes are `.With(pageEnf.Require(...))` on {pageID}, so the enforcer answers
+// about the PAGE in the URL. These statements used to name only {id} + the workspace, so the
+// gate and the statement were about two different objects and the only thing between them was
+// the WORKSPACE — a ring both are already inside. MEASURED through the real routes on real
+// Postgres (crosspage_realpg_test.go): a member with no grant on a private space read, rewrote,
+// PUBLISHED and DELETED that space's changelog entries by naming a page he could reach.
+//
+// `page_id` is NOT NULL (migrations/0012), so scoping by it makes no row unreachable; and every
+// SPA caller already builds the URL from the page whose list produced the id. The workspace
+// predicate stays: it is a different claim (it is what refuses a cross-TENANT id, asserted by
+// TestDeleteEntry_RefusesAnotherWorkspacesEntryAndLeavesIt_RealPG), and page scope does not
+// subsume it. The shape is sharing.Store.Revoke's and comment.Store.assertInPage's, which have
+// held it since ce8bfe3 — this package was the outlier.
+func (s *Store) GetEntry(ctx context.Context, id, pageID string, wsIDs []string) (*ChangelogEntry, error) {
 	if s.pool == nil {
 		return nil, errors.New("changelog: no pool")
 	}
 	row := s.pool.QueryRow(ctx,
-		`SELECT `+cols+` FROM changelog_entries WHERE id = $1 AND workspace_id = ANY($2)`, id, wsIDs)
+		`SELECT `+cols+` FROM changelog_entries WHERE id = $1 AND page_id = $2 AND workspace_id = ANY($3)`,
+		id, pageID, wsIDs)
 	e, err := scan(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -174,7 +192,7 @@ func (s *Store) GetEntry(ctx context.Context, id string, wsIDs []string) (*Chang
 // UpdateEntry applies the allow-listed updates and re-stamps
 // updated_at. Allow-listing keeps internal columns (id, created_at,
 // page_id) immutable.
-func (s *Store) UpdateEntry(ctx context.Context, id string, updates map[string]any, wsIDs []string) (*ChangelogEntry, error) {
+func (s *Store) UpdateEntry(ctx context.Context, id, pageID string, updates map[string]any, wsIDs []string) (*ChangelogEntry, error) {
 	if s.pool == nil {
 		return nil, errors.New("changelog: no pool")
 	}
@@ -199,11 +217,11 @@ func (s *Store) UpdateEntry(ctx context.Context, id string, updates map[string]a
 		return nil, errors.New("changelog: no updatable fields")
 	}
 	setParts = append(setParts, fmt.Sprintf("updated_at = NOW()"))
-	// id is $idx; the workspace scope set is $idx+1.
-	args = append(args, id, wsIDs)
+	// id is $idx; the authorized page is $idx+1; the workspace scope set is $idx+2.
+	args = append(args, id, pageID, wsIDs)
 	row := s.pool.QueryRow(ctx,
-		fmt.Sprintf(`UPDATE changelog_entries SET %s WHERE id = $%d AND workspace_id = ANY($%d) RETURNING %s`,
-			strings.Join(setParts, ", "), idx, idx+1, cols),
+		fmt.Sprintf(`UPDATE changelog_entries SET %s WHERE id = $%d AND page_id = $%d AND workspace_id = ANY($%d) RETURNING %s`,
+			strings.Join(setParts, ", "), idx, idx+1, idx+2, cols),
 		args...,
 	)
 	e, err := scan(row)
@@ -213,14 +231,14 @@ func (s *Store) UpdateEntry(ctx context.Context, id string, updates map[string]a
 	return e, err
 }
 
-func (s *Store) PublishEntry(ctx context.Context, id string, wsIDs []string) (*ChangelogEntry, error) {
+func (s *Store) PublishEntry(ctx context.Context, id, pageID string, wsIDs []string) (*ChangelogEntry, error) {
 	if s.pool == nil {
 		return nil, errors.New("changelog: no pool")
 	}
 	row := s.pool.QueryRow(ctx,
 		`UPDATE changelog_entries SET published_at = NOW(), updated_at = NOW()
-        WHERE id = $1 AND workspace_id = ANY($2) RETURNING `+cols,
-		id, wsIDs,
+        WHERE id = $1 AND page_id = $2 AND workspace_id = ANY($3) RETURNING `+cols,
+		id, pageID, wsIDs,
 	)
 	e, err := scan(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -229,12 +247,13 @@ func (s *Store) PublishEntry(ctx context.Context, id string, wsIDs []string) (*C
 	return e, err
 }
 
-func (s *Store) DeleteEntry(ctx context.Context, id string, wsIDs []string) error {
+func (s *Store) DeleteEntry(ctx context.Context, id, pageID string, wsIDs []string) error {
 	if s.pool == nil {
 		return errors.New("changelog: no pool")
 	}
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM changelog_entries WHERE id = $1 AND workspace_id = ANY($2)`, id, wsIDs)
+		`DELETE FROM changelog_entries WHERE id = $1 AND page_id = $2 AND workspace_id = ANY($3)`,
+		id, pageID, wsIDs)
 	if err != nil {
 		return err
 	}

@@ -123,14 +123,14 @@ func TestCreateEntry_AcceptsSemverAndDates(t *testing.T) {
 func TestPublishEntry_SetsTimestamp(t *testing.T) {
 	store, pool := newMockStore(t, &fakeTrack{})
 	now := time.Now().UTC()
-	pool.ExpectQuery(`UPDATE changelog_entries SET published_at.*workspace_id = ANY`).
-		WithArgs("e-1", []string{"ws-1"}).
+	pool.ExpectQuery(`UPDATE changelog_entries SET published_at.*page_id = \$2 AND workspace_id = ANY`).
+		WithArgs("e-1", "pg-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(entryCols()).AddRow(
 			"e-1", "pg-1", "ws-1", "v2.1.0", "Auth refresh", "Summary",
 			"feature", []string{}, "{}", &now,
 			"u-author", now, now,
 		))
-	out, err := store.PublishEntry(context.Background(), "e-1", []string{"ws-1"})
+	out, err := store.PublishEntry(context.Background(), "e-1", "pg-1", []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("PublishEntry: %v", err)
 	}
@@ -141,10 +141,10 @@ func TestPublishEntry_SetsTimestamp(t *testing.T) {
 
 func TestDeleteEntry_DeletesByID(t *testing.T) {
 	store, pool := newMockStore(t, &fakeTrack{})
-	pool.ExpectExec(`DELETE FROM changelog_entries WHERE id.*workspace_id = ANY`).
-		WithArgs("e-1", []string{"ws-1"}).
+	pool.ExpectExec(`DELETE FROM changelog_entries WHERE id.*page_id = \$2 AND workspace_id = ANY`).
+		WithArgs("e-1", "pg-1", []string{"ws-1"}).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
-	if err := store.DeleteEntry(context.Background(), "e-1", []string{"ws-1"}); err != nil {
+	if err := store.DeleteEntry(context.Background(), "e-1", "pg-1", []string{"ws-1"}); err != nil {
 		t.Fatalf("DeleteEntry: %v", err)
 	}
 }
