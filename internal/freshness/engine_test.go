@@ -177,7 +177,12 @@ func TestGetStaleReport_SortsByStalenessThenDaysSinceEdit(t *testing.T) {
 		*freshPage("pg-c", 35, 30),
 	}
 	pages := &fakePageStore{stale: stale}
-	e := newEngine(pages, &fakeLinks{}, &fakeTrack{})
+	// AN EXPLICIT ALLOW-ALL READ GATE. GetStaleReport is request-scoped and now refuses without
+	// one (WithPageRead), so this test states which pages the caller may read instead of
+	// inheriting an unfiltered list by omission. Allow-all is right here — the subject is the
+	// SORT, not access — and what the gate actually decides is measured against real Postgres
+	// and the real permission engine in privatespace_realpg_test.go.
+	e := newEngine(pages, &fakeLinks{}, &fakeTrack{}).WithPageRead(allowAllPages{})
 
 	out, err := e.GetStaleReport(context.Background(), "ws-1")
 	if err != nil {
@@ -191,3 +196,8 @@ func TestGetStaleReport_SortsByStalenessThenDaysSinceEdit(t *testing.T) {
 		t.Fatalf("not sorted: %+v", out)
 	}
 }
+
+// allowAllPages is the explicit allow-all gate the bare-engine tests in this package use.
+type allowAllPages struct{}
+
+func (allowAllPages) AuthorizePageRead(context.Context, string) (bool, bool) { return true, true }

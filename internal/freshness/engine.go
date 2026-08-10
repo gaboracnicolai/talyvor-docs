@@ -8,6 +8,7 @@ package freshness
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -67,10 +68,41 @@ type trackReader interface {
 }
 
 type FreshnessEngine struct {
-	pages pageReader
-	links linkReader
-	track trackReader
+	pages  pageReader
+	links  linkReader
+	track  trackReader
+	access pageVisibility
 }
+
+// pageVisibility authorizes a READ of ONE page for the verified caller. *spaceauth.Authorizer
+// satisfies it — the same shipped primitive internal/search, page.Handler and internal/ai use, so
+// this package introduces NO new access model.
+type pageVisibility interface {
+	AuthorizePageRead(ctx context.Context, pageID string) (found, canView bool)
+}
+
+// WithPageRead attaches the per-page read gate the two REQUEST-SCOPED stale reads need.
+//
+// ⚠ THE ENGINE HAS TWO KINDS OF READER AND THE GATE BELONGS TO ONLY ONE OF THEM. GetStaleReport
+// answers a PERSON (the SPA's stale screen and sidebar count, and the MCP get_stale_pages tool);
+// SendStaleDigest is a daily batch started from main.go on a context that has no caller and never
+// will. Filtering the digest per-caller would report zero stale pages to an operator forever, so
+// the unfiltered list stays — as `staleReportAll`, UNEXPORTED, so that the only stale report
+// reachable from outside this package is the gated one. That is the whole design: not a naming
+// convention a future caller has to notice, a compiler boundary.
+//
+// ⚠ NIL ERRORS RATHER THAN RETURNING AN EMPTY LIST. An empty stale report is not a neutral
+// response — it is the positive claim "nothing in this workspace needs attention", and the SPA
+// paints it as a zero on the sidebar. Same reasoning as internal/ai's refusal; deliberately
+// unlike page.Handler's nil-is-an-empty-list, whose route returns rows rather than a verdict.
+func (e *FreshnessEngine) WithPageRead(a pageVisibility) *FreshnessEngine {
+	e.access = a
+	return e
+}
+
+// ErrNoPageReadGate is what a request-scoped stale read returns when no gate was wired. It is a
+// server misconfiguration, reported as one.
+var ErrNoPageReadGate = errors.New("freshness: no page-read gate wired (cmd/docs/main.go must call freshEngine.WithPageRead)")
 
 func New(pages pageReader, links linkReader, track trackReader) *FreshnessEngine {
 	return newFreshnessEngine(pages, links, track)
@@ -94,11 +126,54 @@ func (e *FreshnessEngine) GetStatus(ctx context.Context, pageID string) (*Freshn
 	return e.buildReport(ctx, p), nil
 }
 
-// GetStaleReport returns every page in the workspace that's past
-// (or approaching) its TTL. The list is sorted by status (stale
-// first, then warning) and then by days-since-edit DESC so the
-// most-overdue pages come first.
+// GetStaleReport returns every page in the workspace that's past (or approaching) its TTL AND
+// THAT THE CALLER MAY VIEW. The list is sorted by status (stale first, then warning) and then by
+// days-since-edit DESC so the most-overdue pages come first.
+//
+// ⚠ THIS IS THE REQUEST-SCOPED READER. Both of its callers answer a caller — the SPA's stale
+// screen and sidebar count via GET /v1/workspaces/{wsID}/freshness, and the MCP get_stale_pages
+// tool — and both authorized the WORKSPACE and stopped, so a member with no grant on a private
+// space received its page titles and a working /spaces/{space_id}/pages/{page_id} link. Measured
+// in privatespace_realpg_test.go. The system-scoped list is staleReportAll, and it is unexported
+// so that this is the only stale report reachable from outside the package.
 func (e *FreshnessEngine) GetStaleReport(ctx context.Context, workspaceID string) ([]FreshnessReport, error) {
+	// NIL-RECEIVER SAFE, AND THAT IS NOT DEFENSIVE PADDING — IT IS A CRASH THIS CONTROL RUN FOUND.
+	// mcp.New takes a *FreshnessEngine and stores it in a freshDeps INTERFACE field, so a nil
+	// engine becomes a NON-nil interface holding a nil pointer: internal/mcp/server.go:874's
+	// `if s.deps.freshness == nil` reads as a nil-check and is not one, and the call proceeds on a
+	// nil receiver. MEASURED: mcp.New(..., nil, "test") + get_stale_pages = SIGSEGV, before this
+	// line and equally before it existed (the old body dereferenced e.pages one statement later).
+	// The same Go footgun ai.Engine.IsAvailable documents and answers the same way — the receiver
+	// check is part of the contract, rather than every caller being asked to remember it.
+	//
+	// ⚠ THE DEAD nil GUARD IN internal/mcp IS ITS OWN FINDING AND IS NOT FIXED HERE.
+	if e == nil || e.access == nil {
+		return nil, ErrNoPageReadGate
+	}
+	all, err := e.staleReportAll(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	// Drop every page the caller may not VIEW, asking the same engine the by-id freshness route
+	// asks. There is no LIMIT anywhere on this path — GetStalePages returns the whole predicate —
+	// so unlike the search seams this filter is complete rather than a mitigation, and no
+	// over-fetch is needed.
+	out := make([]FreshnessReport, 0, len(all))
+	for _, r := range all {
+		found, canView := e.access.AuthorizePageRead(ctx, r.PageID)
+		if !found || !canView {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// staleReportAll is the SYSTEM view: every stale page in the workspace, with no caller in it.
+// SendStaleDigest is its only caller and runs on a background context started from main.go, which
+// has no memberships and never will — filtering it per-caller would report an empty workspace to
+// an operator every day at 09:00.
+func (e *FreshnessEngine) staleReportAll(ctx context.Context, workspaceID string) ([]FreshnessReport, error) {
 	pages, err := e.pages.GetStalePages(ctx, workspaceID)
 	if err != nil {
 		return nil, err
@@ -133,7 +208,7 @@ func statusRank(s FreshnessStatus) int {
 // SendStaleDigest is the daily-batch entry point. Phase 7 logs the
 // summary; future phases ship Slack / email integrations.
 func (e *FreshnessEngine) SendStaleDigest(ctx context.Context, workspaceID string) error {
-	reports, err := e.GetStaleReport(ctx, workspaceID)
+	reports, err := e.staleReportAll(ctx, workspaceID)
 	if err != nil {
 		return err
 	}

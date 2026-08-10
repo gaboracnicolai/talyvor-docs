@@ -476,6 +476,15 @@ func main() {
 	// them. Measured in internal/ai/privatespace_realpg_test.go; internal/ai/mainwiring_test.go
 	// is the tripwire on this line.
 	aiHandler.WithPageRead(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
+	// AND THE SEAM'S FOURTH COPY, WHICH TWO SURFACES SHARE. FreshnessEngine.GetStaleReport calls
+	// the same page.Store.GetStalePages and feeds BOTH the SPA's stale screen + sidebar count
+	// (GET /workspaces/{wsID}/freshness) and the MCP get_stale_pages tool. Both authorized the
+	// workspace and stopped, so a member with no grant on a private space received its page
+	// titles and a working deep link. Measured in internal/freshness/privatespace_realpg_test.go;
+	// internal/freshness/mainwiring_test.go is the tripwire on this line. The daily digest
+	// started by freshEngine.Start above is UNAFFECTED and must stay so — it runs with no caller,
+	// and it reads the unexported system-scoped list rather than this one.
+	freshEngine.WithPageRead(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
 
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
