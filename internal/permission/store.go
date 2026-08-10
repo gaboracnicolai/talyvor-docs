@@ -166,12 +166,33 @@ func (s *Store) Revoke(ctx context.Context, resourceType ResourceType, resourceI
 // a grant outside them can't be deleted — 0 rows affected → ErrNotFound → 404. This is the worst
 // op to leave unscoped, since a cross-tenant caller could otherwise revoke any grant (incl. admin)
 // in a workspace they don't belong to.
-func (s *Store) RevokeByID(ctx context.Context, id string, wsIDs []string) error {
+//
+// ⚠⚠ AND THE PARAGRAPH ABOVE REASONS ABOUT THE OUTER RING ONLY — WHICH IS HOW THE INNER ONE STAYED
+// OPEN. (resType, resID) is the resource the ROUTE'S ENFORCER AUTHORIZED, and it is required for
+// the same reason wsIDs is. `h.delete` is the only permission handler MOUNTED TWICE — under
+// `spaceEnf` at /spaces/{spaceID}/permissions/{permID} and under `pageEnf` at
+// /spaces/{spaceID}/pages/{pageID}/permissions/{permID} — and it used to read only {permID}. So
+// the enforcer answered about one resource and this statement named another, with the WORKSPACE
+// (a ring both are already inside) the only thing between them. MEASURED through the real routes
+// on real Postgres (crossresource_realpg_test.go): a member who is refused 403 from even LISTING a
+// private space's grants revoked one of them by naming a space of his own, which anyone can create
+// (`POST /spaces` has no enforcer, and the creator is Admin by resolveAccess's owner-is-admin arm).
+//
+// The TYPE is part of the scope and not decoration: the two routes are one handler, resource_id
+// is not unique across resource kinds, and the space route must not reach a page grant. The other
+// five permission routes have always derived (type, id) from the URL — listSpace/listPage into
+// ListForResource, grantSpace/grantPage into Grant. This was the sixth.
+//
+// internal/database/sec4_l2_test.go (b) drives this exact route and asserts 404 for a FOREIGN
+// TENANT; it was green through the whole leak. A guard at the outer boundary reads as coverage.
+func (s *Store) RevokeByID(ctx context.Context, id string, resType ResourceType, resID string, wsIDs []string) error {
 	if s.pool == nil {
 		return errors.New("permission: no pool")
 	}
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM permissions WHERE id = $1 AND workspace_id = ANY($2)`, id, wsIDs)
+		`DELETE FROM permissions
+          WHERE id = $1 AND resource_type = $2 AND resource_id = $3 AND workspace_id = ANY($4)`,
+		id, string(resType), resID, wsIDs)
 	if err != nil {
 		return fmt.Errorf("permission: revoke by id: %w", err)
 	}
