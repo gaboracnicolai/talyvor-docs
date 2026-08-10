@@ -273,16 +273,13 @@ func TestDelete_ReparentsChildren(t *testing.T) {
 }
 
 // ─── 7. RecordView ─────────────────────────────────────────
-
-func TestRecordView_IncrementsCount(t *testing.T) {
-	store, pool := newMockStore(t)
-	pool.ExpectExec(`UPDATE pages SET view_count`).
-		WithArgs("pg-1").
-		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
-	if err := store.RecordView(context.Background(), "pg-1", "viewer-1"); err != nil {
-		t.Fatalf("RecordView: %v", err)
-	}
-}
+//
+// TestRecordView_IncrementsCount was here. It exercised page.Store.RecordView, which is
+// deleted: the method was unreachable and its statement diverged from the live one in
+// internal/analytics by also setting updated_at, which reset the page's staleness clock. The
+// mock could not see that — its expectation matched `UPDATE pages SET view_count`, which is
+// true of both statements. analytics's own TestRecordView_* covers the live path, and
+// TestRecordedView_DoesNotResetTheStalenessClock_RealPG covers the column the mock cannot.
 
 // ─── 8. Verify ─────────────────────────────────────────────
 

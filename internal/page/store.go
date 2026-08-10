@@ -586,23 +586,21 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 }
 
 // ─── RecordView ────────────────────────────────────────────
-
-// RecordView increments view_count + bumps last_viewed_at. viewerID
-// isn't persisted as a per-viewer row in Phase 1 — Phase 2 can
-// introduce a per-viewer table for unique-views reporting.
-func (s *Store) RecordView(ctx context.Context, pageID, viewerID string) error {
-	_ = viewerID
-	if s.pool == nil {
-		return errors.New("page: store has no pool")
-	}
-	// nosemgrep: docs-by-id-write-requires-workspace-scope -- RecordView is a primitive reached only via RecordViewInWorkspaces (store.go), which calls assertInWorkspaces(pageID, authz.WorkspaceIDs) first.
-	_, err := s.pool.Exec(ctx,
-		`UPDATE pages SET view_count = view_count + 1,
-            last_viewed_at = NOW(), updated_at = NOW()
-        WHERE id = $1`, pageID,
-	)
-	return err
-}
+//
+// DELETED, NOT MOVED. `RecordView` and `RecordViewInWorkspaces` lived here with their own copy
+// of the view bump, and the copy DIVERGED: it also set `updated_at = NOW()`, which
+// GetStalePages (below) keys on, so recording a view reset the page's freshness clock —
+// measured on real Postgres, a page 30 days past a 7-day window dropped off the stale list
+// after one view, while the live path left it on.
+//
+// It was unreachable: internal/analytics owns POST /spaces/{s}/pages/{p}/view (handler.go:32),
+// handler.go:53-59 in this package records that this package's registration was shadowed dead
+// code, and a whole-tree census at 35ce495 found ZERO callers of RecordViewInWorkspaces and
+// only the wrapper itself calling RecordView.
+//
+// The one remaining writer is pinned by viewbump_one_owner_test.go; that a recorded view does
+// not touch updated_at is pinned by
+// analytics.TestRecordedView_DoesNotResetTheStalenessClock_RealPG.
 
 // ─── Verify ────────────────────────────────────────────────
 
@@ -704,13 +702,9 @@ func (s *Store) RestoreVersionInWorkspaces(ctx context.Context, pageID string, v
 	return s.RestoreVersion(ctx, pageID, version)
 }
 
-// RecordViewInWorkspaces records a view only if the page lives in one of the caller's workspaces.
-func (s *Store) RecordViewInWorkspaces(ctx context.Context, pageID, viewerID string, wsIDs []string) error {
-	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
-		return err
-	}
-	return s.RecordView(ctx, pageID, viewerID)
-}
+// RecordViewInWorkspaces was here. It had ZERO callers — no route, no other package, no test —
+// and its only job was to gate the RecordView above, which is deleted for the reason given
+// there. analytics.Store.RecordViewInWorkspaces is the live SEC-4 L2 gate for a view.
 
 // VerifyInWorkspaces stamps verification only if the page lives in one of the caller's workspaces.
 func (s *Store) VerifyInWorkspaces(ctx context.Context, pageID, verifierID string, wsIDs []string) error {
