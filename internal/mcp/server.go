@@ -583,15 +583,34 @@ func (s *Server) toolSearchDocs(ctx context.Context, args map[string]any) (any, 
 }
 
 type pageOut struct {
-	ID              string  `json:"id"`
-	Title           string  `json:"title"`
-	ContentText     string  `json:"content_text"`
-	SpaceName       string  `json:"space_name"`
-	URL             string  `json:"url"`
-	FreshnessStatus string  `json:"freshness_status"`
-	AICostUSD       float64 `json:"ai_cost_usd"`
-	LastUpdated     string  `json:"last_updated"`
-	VerifiedBy      string  `json:"verified_by,omitempty"`
+	ID              string `json:"id"`
+	Title           string `json:"title"`
+	ContentText     string `json:"content_text"`
+	SpaceName       string `json:"space_name"`
+	URL             string `json:"url"`
+	FreshnessStatus string `json:"freshness_status"`
+
+	// A page has TWO independent costs and a derived sum (migration 0018), and this payload used
+	// to carry the first one alone — the same half `8b3e1be` removed from the REST search
+	// projection. It is the Track half, so a document funded entirely by AI work ON it reported
+	// `ai_cost_usd: 0`, byte-identical to a document that genuinely cost nothing, to the agent
+	// reading it. And unlike search there is no omitempty here, so it was a concrete numeral zero
+	// rather than a gap: a positive assertion, not silence.
+	//
+	// ⚠ BARE FLOATS, DELIBERATELY, AND NOT BY COPYING THE SEARCH ROW — which uses *float64 because
+	// a semantic-only hit has no `pages` row and 0.0 there would be a fabricated zero. pageOut is
+	// built at exactly one site from a nil-checked page read through page.scan, which fills all
+	// three. There is no "not reported" state here to express.
+	//
+	// AICostUSD is the cost of the Track ISSUES linked to this page; OwnAICostUSD the cost of AI
+	// operations performed ON the document (a LOWER BOUND — see model.Page); TotalAICostUSD their
+	// sum, derived once in page.withDerivedTotal so no caller adds them itself.
+	AICostUSD      float64 `json:"ai_cost_usd"`
+	OwnAICostUSD   float64 `json:"own_ai_cost_usd"`
+	TotalAICostUSD float64 `json:"total_ai_cost_usd"`
+
+	LastUpdated string `json:"last_updated"`
+	VerifiedBy  string `json:"verified_by,omitempty"`
 }
 
 func (s *Server) toolGetPage(ctx context.Context, args map[string]any) (any, error) {
@@ -642,6 +661,8 @@ func (s *Server) toolGetPage(ctx context.Context, args map[string]any) (any, err
 		URL:             pageURL(p.SpaceID, p.ID),
 		FreshnessStatus: deriveFreshness(p),
 		AICostUSD:       p.AICostUSD,
+		OwnAICostUSD:    p.OwnAICostUSD,
+		TotalAICostUSD:  p.TotalAICostUSD,
 		LastUpdated:     p.UpdatedAt.UTC().Format(time.RFC3339),
 		VerifiedBy:      verifiedBy,
 	}
