@@ -149,11 +149,11 @@ func TestRevoke_DeletesByResourceAndSubject(t *testing.T) {
 func TestRevokeByID_ScopedToWorkspaces_Deletes(t *testing.T) {
 	store, pool := newMockStore(t)
 
-	pool.ExpectExec(`DELETE FROM permissions WHERE id = \$1 AND workspace_id = ANY\(\$2\)`).
-		WithArgs("p-1", []string{"ws-1"}).
+	pool.ExpectExec(`DELETE FROM permissions\s+WHERE id = \$1 AND resource_type = \$2 AND resource_id = \$3 AND workspace_id = ANY\(\$4\)`).
+		WithArgs("p-1", "space", "sp-1", []string{"ws-1"}).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 
-	if err := store.RevokeByID(context.Background(), "p-1", []string{"ws-1"}); err != nil {
+	if err := store.RevokeByID(context.Background(), "p-1", ResourceSpace, "sp-1", []string{"ws-1"}); err != nil {
 		t.Fatalf("RevokeByID: %v", err)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -165,11 +165,11 @@ func TestRevokeByID_ForeignWorkspace_ReturnsErrNotFound(t *testing.T) {
 	store, pool := newMockStore(t)
 
 	// 0 rows affected — the grant is outside the caller's workspaces.
-	pool.ExpectExec(`DELETE FROM permissions WHERE id = \$1 AND workspace_id = ANY\(\$2\)`).
-		WithArgs("p-foreign", []string{"ws-1"}).
+	pool.ExpectExec(`DELETE FROM permissions\s+WHERE id = \$1 AND resource_type = \$2 AND resource_id = \$3 AND workspace_id = ANY\(\$4\)`).
+		WithArgs("p-foreign", "space", "sp-1", []string{"ws-1"}).
 		WillReturnResult(pgxmock.NewResult("DELETE", 0))
 
-	if err := store.RevokeByID(context.Background(), "p-foreign", []string{"ws-1"}); err != ErrNotFound {
+	if err := store.RevokeByID(context.Background(), "p-foreign", ResourceSpace, "sp-1", []string{"ws-1"}); err != ErrNotFound {
 		t.Fatalf("want ErrNotFound for a grant outside the caller's workspaces, got %v", err)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {

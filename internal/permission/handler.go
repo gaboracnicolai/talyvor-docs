@@ -32,11 +32,11 @@ func (h *Handler) Mount(r chi.Router) {
 	// every permission-management route is gated at Admin on the relevant resource's enforcer.
 	r.With(h.spaceEnf.Require(AccessAdmin)).Method(http.MethodGet, "/spaces/{spaceID}/permissions", http.HandlerFunc(h.listSpace))
 	r.With(h.spaceEnf.Require(AccessAdmin)).Method(http.MethodPost, "/spaces/{spaceID}/permissions", http.HandlerFunc(h.grantSpace))
-	r.With(h.spaceEnf.Require(AccessAdmin)).Method(http.MethodDelete, "/spaces/{spaceID}/permissions/{permID}", http.HandlerFunc(h.delete))
+	r.With(h.spaceEnf.Require(AccessAdmin)).Method(http.MethodDelete, "/spaces/{spaceID}/permissions/{permID}", http.HandlerFunc(h.deleteSpace))
 
 	r.With(h.pageEnf.Require(AccessAdmin)).Method(http.MethodGet, "/spaces/{spaceID}/pages/{pageID}/permissions", http.HandlerFunc(h.listPage))
 	r.With(h.pageEnf.Require(AccessAdmin)).Method(http.MethodPost, "/spaces/{spaceID}/pages/{pageID}/permissions", http.HandlerFunc(h.grantPage))
-	r.With(h.pageEnf.Require(AccessAdmin)).Method(http.MethodDelete, "/spaces/{spaceID}/pages/{pageID}/permissions/{permID}", http.HandlerFunc(h.delete))
+	r.With(h.pageEnf.Require(AccessAdmin)).Method(http.MethodDelete, "/spaces/{spaceID}/pages/{pageID}/permissions/{permID}", http.HandlerFunc(h.deletePage))
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -126,9 +126,20 @@ func (h *Handler) grant(w http.ResponseWriter, r *http.Request, resType Resource
 	writeJSON(w, http.StatusCreated, p)
 }
 
-func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
+// deleteSpace/deletePage mirror grantSpace/grantPage exactly, and the split is the fix rather than
+// tidying: `delete` was the ONLY handler in this file mounted twice, and the only one that did not
+// name the resource its route's enforcer had just authorized. One handler cannot know which of the
+// two gates ran; two can.
+func (h *Handler) deleteSpace(w http.ResponseWriter, r *http.Request) {
+	h.revoke(w, r, ResourceSpace, chi.URLParam(r, "spaceID"))
+}
+func (h *Handler) deletePage(w http.ResponseWriter, r *http.Request) {
+	h.revoke(w, r, ResourcePage, chi.URLParam(r, "pageID"))
+}
+
+func (h *Handler) revoke(w http.ResponseWriter, r *http.Request, resType ResourceType, resID string) {
 	wsIDs := authz.WorkspaceIDs(r.Context())
-	err := h.store.RevokeByID(r.Context(), chi.URLParam(r, "permID"), wsIDs)
+	err := h.store.RevokeByID(r.Context(), chi.URLParam(r, "permID"), resType, resID, wsIDs)
 	if errors.Is(err, ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
