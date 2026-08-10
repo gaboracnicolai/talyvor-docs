@@ -18,6 +18,34 @@ func newMockStore(t *testing.T) (*Store, pgxmock.PgxPoolIface) {
 		t.Fatalf("pgxmock.NewPool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// EVERY EXPECTATION IN THIS PACKAGE IS VERIFIED, NOT JUST THE ONES SOMEBODY REMEMBERED.
+	//
+	// pgxmock only reports an expectation that was never called, or one whose WithArgs did not
+	// match, if you ASK it. Nothing here asked, and measurement (scripts/w31-mock-expectation-
+	// controls.py, both families) showed what that cost:
+	//
+	//   · A WRONG ARGUMENT was invisible wherever the production caller DISCARDS the Exec error
+	//     — `_, _ = s.pool.Exec(...)` in Create's version-1 snapshot (store.go:314). At the four
+	//     callers that CHECK the error the mismatch already surfaced through the caller, so a
+	//     check here is redundant for THAT question. That is the whole of what #60 scoped.
+	//   · THE WRITE DISAPPEARING was invisible at FOUR of the six ExpectExec sites, INCLUDING
+	//     the three whose callers check the error — there is no error to return when there is no
+	//     call. Deleting the `DELETE FROM pages` statement from Store.Delete, the v1 snapshot
+	//     INSERT from Create, or the view_count UPDATE from RecordView left `go test ./...` —
+	//     the WHOLE repo, real Postgres — completely GREEN. Delete could stop deleting.
+	//
+	// So the check is NOT redundant, and the redundancy argument only ever applied to the
+	// argument-mismatch half. It lives on the shared constructor rather than in the four tests
+	// that happen to need it today, because the next mock test to be written needs it too and
+	// the failure mode is silence.
+	//
+	// Registered AFTER pool.Close so it runs BEFORE it (t.Cleanup is LIFO). t.Errorf, not
+	// t.Fatalf: a cleanup must not Goexit out of another cleanup.
+	t.Cleanup(func() {
+		if err := pool.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet or mismatched pgxmock expectations: %v", err)
+		}
+	})
 	return newStore(pool), pool
 }
 
@@ -213,15 +241,11 @@ func TestUpdate_AppendsNewVersionOnContentChange(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
-	// WITHOUT THIS, THE WithArgs ABOVE CANNOT FAIL. Update writes the snapshot with
-	// `_, _ = s.pool.Exec(...)` — it discards the Exec error — so a pgxmock argument mismatch
-	// is swallowed by the production code and the test still exits 0. Measured: control V4 in
-	// scripts/w31-version-title-controls.py fills the snapshot title from the wrong column and
-	// this test stayed GREEN until this check was added. internal/page had 6 ExpectExec
-	// expectations and ZERO ExpectationsWereMet calls; the rest of the repo calls it 31 times.
-	if err := pool.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet or mismatched pgxmock expectations: %v", err)
-	}
+	// The WithArgs above still cannot fail on its own — Update discards the Exec error — and
+	// what makes it fail is now on newMockStore, so EVERY expectation in this package is
+	// verified rather than only this one. #60 added the check here; it is not deleted, it is
+	// MOVED, and controls C6/D6 in scripts/w31-mock-expectation-controls.py are kept pointed at
+	// this test precisely to prove the coverage did not shrink in the move.
 }
 
 // ─── 6. Delete reparents children ──────────────────────────
