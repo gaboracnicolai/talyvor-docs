@@ -12,7 +12,25 @@ export interface SearchResult {
   similarity?: number;
   source: SearchSource;
   url: string;
+
+  // THE THREE COST FIELDS ARE THE WIRE'S THREE, NOT A CHOSEN ONE OF THEM. A page has two
+  // costs and migration 0018 exists because conflating them was the defect: ai_cost_usd is
+  // the cost of the Track ISSUES linked to the page, own_ai_cost_usd is the cost of AI
+  // operations performed ON the document, total_ai_cost_usd is their sum, derived server-side
+  // so a caller does not add the two itself and get it subtly wrong.
+  //
+  // ⚠ ALL THREE ARE OPTIONAL BECAUSE THE WIRE GENUINELY OMITS THEM, not to be lenient.
+  // `internal/search/handler.go` declares them `*float64` with `omitempty` (`8b3e1be`): a
+  // SEMANTIC-ONLY row is built from a vector hit with no `pages` row read, so no cost is
+  // KNOWN for it and all three keys are absent. undefined means NOT REPORTED; 0 means
+  // measured and zero. A renderer that reads `?? 0` collapses those two facts back together.
+  //
+  // This type declared `ai_cost_usd` alone until `SearchModal.cost.test.tsx` was written: the
+  // other two arrived on every full-text hit and were dropped HERE, at the type boundary,
+  // which is why nothing in the frontend was red while the list showed the wrong half.
   ai_cost_usd?: number;
+  own_ai_cost_usd?: number;
+  total_ai_cost_usd?: number;
 }
 
 export interface SearchResponse {

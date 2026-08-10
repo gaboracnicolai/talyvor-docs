@@ -33,6 +33,66 @@ function sanitiseHeadline(html: string): string {
     .replace(/&lt;\/mark&gt;/g, "</mark>");
 }
 
+// CostBadge renders what a search hit ACTUALLY cost, which is the TOTAL of a page's two
+// independent costs — not either half.
+//
+// A page carries `ai_cost_usd` (the cost of the Track ISSUES linked to it) and
+// `own_ai_cost_usd` (the cost of AI operations performed ON the document); `total_ai_cost_usd`
+// is their sum, derived server-side. This row used to read `r.ai_cost_usd` — the Track half —
+// for BOTH the gate and the number, which was measured on this component as:
+//
+//   own 12.34 / track 0     -> NO BADGE, byte-identical to a genuinely free document
+//   own 12.34 / track 1.50  -> "$1.50", the SMALLER half, off by $12.34
+//
+// Two rows sit side by side in one list, so that is a wrong ORDERING between two documents on
+// screen at once, not just a wrong absolute number.
+//
+// ⚠ THREE STATES, NOT TWO, AND THE THIRD IS WHY THIS IS A COMPONENT AND NOT AN EXPRESSION.
+// `internal/search/handler.go` emits the costs as `*float64` with `omitempty`: a SEMANTIC-ONLY
+// hit is built from a vector match with NO `pages` row read, so all three are absent. That is
+// "not reported", which is a different fact from "measured and zero" — the pointers on the
+// wire exist to keep them apart. `?? 0` here would render "$0.00" for a document nobody
+// looked at: a fabricated zero, and the exact failure a renderer written by analogy to
+// PageView produces. Absent renders as an em-dash marker instead.
+//
+// ⚠ NO FALLBACK TO `ai_cost_usd` WHEN THE TOTAL IS ABSENT, DELIBERATELY. The server sets all
+// three or none (merge()), so a total-less-but-track-ful row is a shape it never produces —
+// and a fallback to the Track half is precisely the defect above, reintroduced in a branch no
+// test could reach. Absent total ⇒ not reported, one rule. (The page screen DOES degrade that
+// way, because `api/client.ts` serves page GETs back out of IndexedDB and a record cached
+// before 0018 really does have that shape. Search is NOT cached — readCached/writeCache match
+// only `/v1/spaces/...` paths — so inheriting that fallback here would be inheriting evidence
+// gathered for a different surface.)
+function CostBadge({ r }: { r: SearchResult }) {
+  const total = r.total_ai_cost_usd;
+  if (total === undefined || total === null) {
+    return (
+      <span
+        data-testid="search-cost-unknown"
+        title="AI cost not reported for this match — it was found by meaning, and its page row was not read"
+        aria-label="AI cost not reported"
+        className="text-muted"
+      >
+        —
+      </span>
+    );
+  }
+  if (total <= 0) return null;
+  const own = r.own_ai_cost_usd;
+  const track = r.ai_cost_usd;
+  // The number claims to be a sum. The breakdown makes that claim checkable on the row itself
+  // rather than something the reader has to take on trust.
+  const title =
+    own !== undefined && own !== null && track !== undefined && track !== null
+      ? `AI cost $${total.toFixed(2)} = $${own.toFixed(2)} writing this document + $${track.toFixed(2)} linked Track issues`
+      : `AI cost $${total.toFixed(2)}`;
+  return (
+    <span data-testid="search-cost" title={title} className="flex items-center gap-0.5 text-accent">
+      <Sparkles size={9} />${total.toFixed(2)}
+    </span>
+  );
+}
+
 export function SearchModal({ workspaceId, open, onClose, onOpenPage }: SearchModalProps) {
   const { query, setQuery, debounced, data, isLoading } = useSearch(workspaceId);
   const [selected, setSelected] = useState(0);
@@ -203,11 +263,7 @@ export function SearchModal({ workspaceId, open, onClose, onOpenPage }: SearchMo
                   <span className="text-muted">{r.space_name}</span>
                   <span className="text-muted">·</span>
                   <span className="flex-1 truncate text-text">{r.page_title}</span>
-                  {r.ai_cost_usd && r.ai_cost_usd > 0 ? (
-                    <span className="flex items-center gap-0.5 text-accent">
-                      <Sparkles size={9} />${r.ai_cost_usd.toFixed(2)}
-                    </span>
-                  ) : null}
+                  <CostBadge r={r} />
                 </div>
                 <div
                   className="mt-1 line-clamp-2 text-muted [&_mark]:bg-accent/30 [&_mark]:text-text"
