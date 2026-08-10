@@ -310,7 +310,11 @@ func TestGetStalePages_Returns(t *testing.T) {
 			{ID: "pg-1", Title: "Old doc", SpaceID: "sp-1", StaleAfterDays: 30, UpdatedAt: time.Now().Add(-90 * 24 * time.Hour)},
 		},
 	}
-	fresh := freshness.New(pages, nil, nil)
+	// An EXPLICIT allow-all read gate: freshness.GetStaleReport is request-scoped and refuses
+	// without one. This test is about the tool's OUTPUT SHAPE, not about access — the private-
+	// space behaviour of this exact tool is measured on real Postgres in
+	// internal/freshness/privatespace_realpg_test.go, which drives HandleRPC directly.
+	fresh := freshness.New(pages, nil, nil).WithPageRead(allowAllStalePages{})
 	srv := newTestServer(t, pages, &fakeSpaces{}, &fakeAnalytics{}, &fakeAI{}, fresh)
 	res := callTool(t, srv, "get_stale_pages", map[string]any{
 		"workspace_id": "ws-1",
@@ -416,3 +420,9 @@ func mustItemRaw(t *testing.T, result map[string]any) any {
 	}
 	return parsed
 }
+
+// allowAllStalePages is the explicit allow-all page-read gate for the freshness engine this
+// package's stale-tool test builds. See the note at its construction site.
+type allowAllStalePages struct{}
+
+func (allowAllStalePages) AuthorizePageRead(context.Context, string) (bool, bool) { return true, true }
