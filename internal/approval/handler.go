@@ -189,7 +189,7 @@ func (h *Handler) Pending(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if out == nil {
-		out = []ApprovalRequest{}
+		out = []PendingItem{}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
