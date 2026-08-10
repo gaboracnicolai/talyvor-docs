@@ -186,13 +186,23 @@ func (s *SemanticSearch) IndexPage(ctx context.Context, pageID, workspaceID, tex
 // every other option, which is the same half-honoured shape one layer up; it is latent for the
 // same reason and is NOT changed here.)
 //
-// ⚠ MEASURED, NOT FIXED HERE: `ORDER BY pe.embedding <=> $1` is not a TOTAL order. Six pages with
-// IDENTICAL embeddings on one database returned [one two three four five six] under a seq scan and
-// [one three four five six two] under the ivfflat index scan — the same rows, a different order,
-// from the same query. Paging is only well defined over a total order, so two requests the planner
-// treats differently can repeat one row and skip another. `ORDER BY rank DESC` in SearchWithRank
-// has the identical exposure. Closing it means a tiebreaker on both halves, and no test in this
-// repo can drive the planner per request — it wants its own measurement and its own merge.
+// ⚠ `, pe.page_id` IS THE WHOLE OF THE PAGING CONTRACT, AND IT IS NOT DECORATION. A distance is
+// not a key: two pages with the same text embed to the same vector and sit at the same distance,
+// and rows at an equal distance have NO defined relative order. `LIMIT/OFFSET` over an undefined
+// order is a question the query cannot answer, so Postgres answers it differently per page.
+//
+// MEASURED THROUGH THIS FUNCTION, 40 equidistant rows, ONE connection, ONE plan, nothing written
+// between the requests: paging 5 at a time served page 0 at offsets 0, 5 AND 10 while pages 5 and
+// 10 were never served at all. It is not a race and not the planner — a bounded sort is a TOP-N
+// HEAPSORT whose N is `limit + offset`, so every page runs a DIFFERENT sort and a different N
+// permutes an all-equal input differently. Paging is the thing that changes N.
+//
+// The planner is a SECOND way to get the same wrong answer (six identical embeddings ordered
+// [one two three four five six] under a seq scan and [one four two three five six] under a
+// pages_pkey index scan), and `page_id` — the table's primary key — closes both by construction:
+// a total order is a total order under every plan. The full-text half carries the same fix
+// (`, p.id` in page.SearchWithRank). Guarded by semanticpaging_realpg_test.go, which asserts the
+// product property — every row served exactly once — and never pins a plan.
 func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, spaceID *string, limit, offset int) ([]SemanticResult, error) {
 	if !s.IsEnabled() {
 		return []SemanticResult{}, nil
@@ -229,7 +239,7 @@ func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, 
         JOIN pages p ON p.id = pe.page_id
         WHERE p.workspace_id = $2 AND p.is_template = false
           AND ($4::text IS NULL OR p.space_id = $4)
-        ORDER BY pe.embedding <=> $1::vector
+        ORDER BY pe.embedding <=> $1::vector, pe.page_id
         LIMIT $3 OFFSET $5`,
 		encoded, workspaceID, limit, spaceID, offset,
 	)
