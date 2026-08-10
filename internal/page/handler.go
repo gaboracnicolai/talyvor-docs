@@ -1,6 +1,7 @@
 package page
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -23,6 +24,9 @@ type Handler struct {
 	store    *Store
 	pageEnf  *permission.Enforcer // A3: by-page access (view/edit)
 	spaceEnf *permission.Enforcer // A3: by-space access for the space-scoped create/list routes
+	// access gates the two workspace-scoped list routes (search / stale), whose target is a
+	// query rather than an id. nil FAILS CLOSED — see WithPageRead.
+	access pageReader
 }
 
 func NewHandler(store *Store, _ *pgxpool.Pool) *Handler {
@@ -36,6 +40,58 @@ func NewHandler(store *Store, _ *pgxpool.Pool) *Handler {
 func (h *Handler) WithAccess(pageEnf, spaceEnf *permission.Enforcer) *Handler {
 	h.pageEnf, h.spaceEnf = pageEnf, spaceEnf
 	return h
+}
+
+// pageReader authorizes a READ of ONE page for the verified caller. *spaceauth.Authorizer
+// satisfies it — the same shipped primitive internal/search uses, so this package introduces NO
+// new access model.
+//
+// THE TWO ROUTES IT EXISTS FOR ARE THE ONES NO ENFORCER CAN REACH. Both /workspaces/{wsID}/pages/
+// search and /stale name a QUERY or a PREDICATE, not an id, so no chi URL-param resolver
+// (permission.RequireAccess) can gate them — exactly the reason internal/search needed the same
+// primitive. Before this they authorized the WORKSPACE and stopped, and each selects the full
+// column list, so a workspace member with no grant on a PRIVATE space received that space's pages
+// WHOLE: title, space id, author, and `content` — the entire ProseMirror document. See
+// privatespace_realpg_test.go for the measurement.
+type pageReader interface {
+	AuthorizePageRead(ctx context.Context, pageID string) (found, canView bool)
+}
+
+// WithPageRead attaches the per-page read gate used by the two workspace-scoped list routes.
+//
+// ⚠ NIL FAILS CLOSED — visibleTo returns NOTHING — AND THAT DELIBERATELY DIFFERS FROM
+// internal/search, WHOSE nil MEANS UNFILTERED. That convention is why its whole fix hangs on one
+// main.go line, and a route that looks gated but is not is the defect this method exists to close.
+// It mirrors permission.Enforcer.Require's nil receiver, this repo's established direction for a
+// missing gate, and it is why no mainwiring tripwire is needed here: an unwired gate is an empty
+// endpoint, which a test asserting rows already fails on.
+//
+// ⚠ AND THAT LAST CLAIM IS A MEASUREMENT, NOT A HOPE — IT FALSIFIED MY FIRST ONE. I chose
+// fail-closed after grepping for tests that assert rows on these routes and concluding there were
+// none. There was one: TestSEC4_WorkspaceRoutes_SearchAndStale_CrossTenant, whose ANCHOR reads
+// Bob's own page back before asserting the cross-tenant denials. It went red immediately, on its
+// own premise assertion, and newV1Chain now wires the gate. A grep for callers is a census of what
+// a name is SPELLED in, not of what a route is ASSERTED about.
+func (h *Handler) WithPageRead(a pageReader) *Handler {
+	h.access = a
+	return h
+}
+
+// visibleTo drops every row the caller may not VIEW, asking the same engine the by-id page routes
+// ask. Callers are already workspace-authorized; this is the SPACE/PAGE tier they never consulted.
+func (h *Handler) visibleTo(ctx context.Context, rows []model.Page) []model.Page {
+	if h.access == nil {
+		return nil // fail closed — see WithPageRead
+	}
+	out := make([]model.Page, 0, len(rows))
+	for _, p := range rows {
+		found, canView := h.access.AuthorizePageRead(ctx, p.ID)
+		if !found || !canView {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // Mount registers every page-scoped route under /v1. Comments,
@@ -337,16 +393,43 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	out, err := h.store.Search(r.Context(), wsID, q, limit)
+	// OVER-FETCH, BECAUSE THE ROWS THE CALLER MAY NOT READ ARE DROPPED AFTER THE SQL LIMIT.
+	// Measured: with limit=1 and one hidden page sorting above a readable one, the store returns
+	// the hidden row alone, visibleTo drops it, and the caller is told NOTHING MATCHED for a
+	// document they may open. It is a mitigation, not a guarantee — a run of more than
+	// (searchFetchFactor-1)×limit consecutive hidden rows still under-fills — and the response has
+	// always been a bare list with no total, so nothing here newly misreports a count.
+	fetchLimit := limit
+	if h.access != nil {
+		fetchLimit = limit * searchFetchFactor
+		if fetchLimit > searchMaxFetchRows {
+			fetchLimit = searchMaxFetchRows
+		}
+	}
+	rows, err := h.store.Search(r.Context(), wsID, q, fetchLimit)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "SEARCH_FAILED", err.Error())
 		return
+	}
+	// Drop rows the caller may not VIEW *before* truncating to `limit` — a page they cannot read
+	// must not consume one of their result slots.
+	out := h.visibleTo(r.Context(), rows)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	if out == nil {
 		out = []model.Page{}
 	}
 	writeJSON(w, http.StatusOK, out)
 }
+
+// searchFetchFactor / searchMaxFetchRows size the window Store.Search is asked for when the access
+// gate is wired. searchMaxFetchRows is the store's OWN ceiling (Search clamps limit to 100), named
+// here so the two numbers cannot silently disagree.
+const (
+	searchFetchFactor  = 4
+	searchMaxFetchRows = 100
+)
 
 func (h *Handler) Stale(w http.ResponseWriter, r *http.Request) {
 	// SEC-4: same deceptive shape as Search above — {wsID} is attacker-controlled, so
@@ -356,11 +439,14 @@ func (h *Handler) Stale(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "FORBIDDEN", "not a member of this workspace")
 		return
 	}
-	out, err := h.store.GetStalePages(r.Context(), wsID)
+	rows, err := h.store.GetStalePages(r.Context(), wsID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "STALE_FAILED", err.Error())
 		return
 	}
+	// GetStalePages has no LIMIT, so unlike Search there is no truncation to race and the filter
+	// is complete rather than a mitigation.
+	out := h.visibleTo(r.Context(), rows)
 	if out == nil {
 		out = []model.Page{}
 	}
