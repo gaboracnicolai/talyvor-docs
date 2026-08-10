@@ -17,6 +17,24 @@ func newMockStore(t *testing.T) (*Store, pgxmock.PgxPoolIface) {
 		t.Fatalf("pgxmock.NewPool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// EVERY EXPECTATION IN THIS PACKAGE IS VERIFIED, NOT JUST THE ONES SOMEBODY REMEMBERED.
+	//
+	// pgxmock reports an expectation that was never called only if you ASK it. Nothing in this
+	// package asked — 5 expectations, zero `ExpectationsWereMet` — and measurement
+	// (scripts/w31-cross-package-write-controls.py, family D) showed what that cost HERE:
+	// deleting the `DELETE FROM spaces` statement out of `Store.Delete` left `go test ./...`
+	// GREEN ACROSS THE WHOLE REPO, real Postgres included, with TestDelete_RemovesSpace passing.
+	// This is `9c00a99`'s finding one container up — a SPACE the owner believes is gone is still
+	// on disk — and the SEC4 workspace-route tests do not cover it: they assert status codes on
+	// list/get/update, never that a deleted space stopped existing.
+	//
+	// Registered AFTER pool.Close so it runs BEFORE it (t.Cleanup is LIFO). t.Errorf, not
+	// t.Fatalf: a cleanup must not Goexit out of another cleanup.
+	t.Cleanup(func() {
+		if err := pool.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet or mismatched pgxmock expectations: %v", err)
+		}
+	})
 	return newStore(pool), pool
 }
 
