@@ -278,7 +278,24 @@ func (s *Store) CreateRow(ctx context.Context, r Row, wsIDs []string) (*Row, err
 // do the merge in Go (read-modify-write) because pgx's `||` JSONB
 // operator silently overwrites entire object keys and we want a
 // per-cell semantics — patch{c-2: doing} should keep c-1 intact.
-func (s *Store) UpdateRow(ctx context.Context, id string, patch map[string]any, wsIDs []string) (*Row, error) {
+//
+// databaseID IS THE DATABASE THE ROUTE'S ENFORCER AUTHORIZED, and both statements below are
+// scoped to it. The route is `.With(dbEnf.Require(AccessEdit))` on {dbID}, so the gate answers
+// about THAT database; passing only the row id left the gate and the statement talking about two
+// different objects, with the workspace ring — which both are already inside — the only thing
+// between them. A member with a page of their own could then rewrite, and read back, any row in
+// any database in the workspace, including one on a private page they cannot open.
+//
+// BOTH STATEMENTS CARRY THE PREDICATE, AND NEITHER IS INDIVIDUALLY NECESSARY — measured, not
+// assumed. This is a read-modify-write that RETURNS the merged row, so the disclosure and the
+// tamper travel together: the merged row only ever reaches the caller through the UPDATE's
+// RETURNING, so scoping EITHER statement alone already answers 404 and lets nothing out
+// (scripts/w31-database-crossdb-controls.py C2 and C3 are both silent at the product level; C4,
+// which removes both, is what earns this). They are both scoped anyway, because the shape that
+// makes one sufficient is a fact about today's code — replace the Go-side merge with a JSONB `||`
+// and the SELECT disappears; move the read behind a helper and the UPDATE's scope is all that is
+// left. Each statement stating its own object costs nothing and survives either refactor.
+func (s *Store) UpdateRow(ctx context.Context, databaseID, id string, patch map[string]any, wsIDs []string) (*Row, error) {
 	if s.pool == nil {
 		return nil, errors.New("database: no pool")
 	}
@@ -287,8 +304,8 @@ func (s *Store) UpdateRow(ctx context.Context, id string, patch map[string]any, 
 	}
 	var existing []byte
 	if err := s.pool.QueryRow(ctx,
-		`SELECT values FROM database_rows WHERE id = $1
-        AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($2))`, id, wsIDs,
+		`SELECT values FROM database_rows WHERE id = $1 AND database_id = $2
+        AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($3))`, id, databaseID, wsIDs,
 	).Scan(&existing); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -304,9 +321,9 @@ func (s *Store) UpdateRow(ctx context.Context, id string, patch map[string]any, 
 	}
 	encoded, _ := json.Marshal(merged)
 	row := s.pool.QueryRow(ctx,
-		`UPDATE database_rows SET values = $1, updated_at = NOW() WHERE id = $2
-        AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($3)) RETURNING `+rowCols,
-		encoded, id, wsIDs,
+		`UPDATE database_rows SET values = $1, updated_at = NOW() WHERE id = $2 AND database_id = $3
+        AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($4)) RETURNING `+rowCols,
+		encoded, id, databaseID, wsIDs,
 	)
 	r, err := scanRow(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -315,13 +332,15 @@ func (s *Store) UpdateRow(ctx context.Context, id string, patch map[string]any, 
 	return r, err
 }
 
-func (s *Store) DeleteRow(ctx context.Context, id string, wsIDs []string) error {
+// DeleteRow removes one row of databaseID — the database the route's enforcer authorized. See
+// UpdateRow for why the database id is a parameter and not just the workspace set.
+func (s *Store) DeleteRow(ctx context.Context, databaseID, id string, wsIDs []string) error {
 	if s.pool == nil {
 		return errors.New("database: no pool")
 	}
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM database_rows WHERE id = $1
-        AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($2))`, id, wsIDs)
+		`DELETE FROM database_rows WHERE id = $1 AND database_id = $2
+        AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($3))`, id, databaseID, wsIDs)
 	if err != nil {
 		return err
 	}
@@ -589,7 +608,11 @@ func (s *Store) ListViews(ctx context.Context, databaseID string, wsIDs []string
 // UpdateView accepts a partial map of fields to change. We
 // allow-list the keys so callers can't smuggle in arbitrary SQL
 // fragments via column names.
-func (s *Store) UpdateView(ctx context.Context, id string, updates map[string]any, wsIDs []string) (*DatabaseView, error) {
+//
+// databaseID IS THE DATABASE THE ROUTE'S ENFORCER AUTHORIZED — see UpdateRow. The statement
+// RETURNS the merged view, so this is a disclosure as well as a tamper: group_by, sort_by and
+// hidden_cols name COLUMNS of a schema the caller may have no right to read.
+func (s *Store) UpdateView(ctx context.Context, databaseID, id string, updates map[string]any, wsIDs []string) (*DatabaseView, error) {
 	if s.pool == nil {
 		return nil, errors.New("database: no pool")
 	}
@@ -622,11 +645,14 @@ func (s *Store) UpdateView(ctx context.Context, id string, updates map[string]an
 	args = append(args, id)
 	idPos := idx
 	idx++
+	args = append(args, databaseID)
+	dbPos := idx
+	idx++
 	args = append(args, wsIDs)
 	row := s.pool.QueryRow(ctx,
-		fmt.Sprintf(`UPDATE database_views SET %s WHERE id = $%d
+		fmt.Sprintf(`UPDATE database_views SET %s WHERE id = $%d AND database_id = $%d
         AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($%d)) RETURNING %s`,
-			strings.Join(setParts, ", "), idPos, idx, viewSelectCols),
+			strings.Join(setParts, ", "), idPos, dbPos, idx, viewSelectCols),
 		args...,
 	)
 	v, err := scanView(row)

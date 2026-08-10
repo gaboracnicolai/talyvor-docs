@@ -147,7 +147,10 @@ func (h *Handler) UpdateRow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wsIDs := authz.WorkspaceIDs(r.Context())
-	row, err := h.store.UpdateRow(r.Context(), chi.URLParam(r, "rowID"), in.Values, wsIDs)
+	// {dbID} is the object dbEnf authorized — pass it to the store so the statement is scoped to
+	// the same database the gate cleared. A {rowID} from another database answers 404, not 403:
+	// 403 would confirm the id exists somewhere the caller cannot reach.
+	row, err := h.store.UpdateRow(r.Context(), chi.URLParam(r, "dbID"), chi.URLParam(r, "rowID"), in.Values, wsIDs)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "row not found")
@@ -161,7 +164,7 @@ func (h *Handler) UpdateRow(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) DeleteRow(w http.ResponseWriter, r *http.Request) {
 	wsIDs := authz.WorkspaceIDs(r.Context())
-	if err := h.store.DeleteRow(r.Context(), chi.URLParam(r, "rowID"), wsIDs); err != nil {
+	if err := h.store.DeleteRow(r.Context(), chi.URLParam(r, "dbID"), chi.URLParam(r, "rowID"), wsIDs); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "row not found")
 			return
@@ -241,7 +244,7 @@ func (h *Handler) UpdateView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wsIDs := authz.WorkspaceIDs(r.Context())
-	v, err := h.store.UpdateView(r.Context(), chi.URLParam(r, "viewID"), updates, wsIDs)
+	v, err := h.store.UpdateView(r.Context(), chi.URLParam(r, "dbID"), chi.URLParam(r, "viewID"), updates, wsIDs)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "view not found")
