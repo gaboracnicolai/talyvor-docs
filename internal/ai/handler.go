@@ -86,6 +86,60 @@ func (h *Handler) limited(next http.HandlerFunc) http.HandlerFunc {
 	return wrapped.ServeHTTP
 }
 
+// attributable authorizes the BODY-NAMED page an operation's cost will be bound to, and reports
+// whether the request may proceed. It writes the refusal itself.
+//
+// ⚠ THE OBJECT COMES FROM THE BODY, WHICH IS WHY NO ROUTE-SHAPED GATE REACHES IT. These five
+// routes are `/workspaces/{wsID}/ai/…`: the only id in the path is the workspace, so
+// permission.RequireAccess has nothing to resolve and internal/routeguard's class — a gated route
+// whose handler must read its enforcer's param — does not describe them at all. The page arrives
+// as a JSON field, and `page_id` is not decoration: Engine.run binds it to Lens's request id and
+// page.Store.PriceAISpend later does `UPDATE pages SET own_ai_cost_usd = … WHERE p.id =
+// priced.page_id` — by bare id, with no workspace predicate on that path. Unchecked, a member of
+// one workspace could name a page in ANOTHER and land real money on a document they have never
+// been able to open. Measured through these routes on real Postgres in
+// bodypage_attribution_realpg_test.go: $49.36 across a tenant boundary, $31.08 onto a private
+// space in the caller's own workspace.
+//
+// This is the same gate, in the same shape and with the same status codes, that
+// templatelib.FromPage applies to ITS body-named page_id, and it is the same primitive — the
+// handler already holds it for Ask's grounding filter. Unresolvable or foreign → 404 (no
+// existence oracle); resolvable but under View → 403.
+//
+// IT RUNS BEFORE THE COMPLETION. Refusing after the Lens call would turn misattributed spend into
+// unattributed spend that the workspace still pays for; refusing before it costs nothing.
+//
+// AN EMPTY page_id IS ALLOWED AND GATED BY NOTHING, deliberately. Engine.run documents the two
+// operations that always pass it empty (ask, search) and SuggestTitle passes it empty before a
+// page's first save; there is no object to authorize and nothing will be bound.
+//
+// A NIL GATE REFUSES, matching Ask. main.go always wires it, so this is a report rather than the
+// only thing standing between an unwired deployment and the leak — but binding blind is exactly
+// the defect this closes, and omission must not restore it.
+func (h *Handler) attributable(w http.ResponseWriter, r *http.Request, pageID string) bool {
+	if pageID == "" {
+		return true
+	}
+	if h.access == nil {
+		slog.Error("ai: no page-read gate wired — refusing a page_id-carrying request rather " +
+			"than binding its cost blind (cmd/docs/main.go must call aiHandler.WithPageRead)")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "attribution unavailable"})
+		return false
+	}
+	found, canView := h.access.AuthorizePageRead(r.Context(), pageID)
+	if !found {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return false
+	}
+	if !canView {
+		writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "insufficient access: attributing an AI operation requires view access to page_id",
+		})
+		return false
+	}
+	return true
+}
+
 func (h *Handler) Mount(r chi.Router) {
 	// Every one of these reaches Lens. All five are rate-limited per verified workspace.
 	r.Post("/workspaces/{wsID}/ai/write", h.limited(h.Write))
@@ -144,6 +198,9 @@ func (h *Handler) Write(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt required"})
 		return
 	}
+	if !h.attributable(w, r, in.PageID) {
+		return
+	}
 	out, err := h.engine.WriteWithAI(r.Context(), wsID, in.Prompt, in.Context, in.PageID)
 	if err != nil {
 		writeAIErr(w, err)
@@ -167,6 +224,9 @@ func (h *Handler) Transform(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
+		return
+	}
+	if !h.attributable(w, r, in.PageID) {
 		return
 	}
 	var (
@@ -210,6 +270,9 @@ func (h *Handler) Translate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
+		return
+	}
+	if !h.attributable(w, r, in.PageID) {
 		return
 	}
 	out, err := h.engine.Translate(r.Context(), wsID, in.Text, in.Language, in.PageID)
@@ -361,6 +424,9 @@ func (h *Handler) SuggestTitle(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
+		return
+	}
+	if !h.attributable(w, r, in.PageID) {
 		return
 	}
 	title, err := h.engine.SuggestTitle(r.Context(), wsID, in.Content, in.PageID)
