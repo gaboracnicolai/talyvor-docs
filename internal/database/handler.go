@@ -20,7 +20,10 @@ func NewHandler(store *Store) *Handler { return &Handler{store: store} }
 
 // WithAccess wires the A3 access enforcers: pageEnf gates the page-scoped create route, dbEnf gates
 // every /databases/{dbID}/* route (its resolver reads dbID from the URL and inherits the owning page's
-// access). Without them the routes mount unguarded (tests). A nil enforcer FAILS CLOSED (404).
+// access). Without them those routes FAIL CLOSED:
+// Enforcer.Require on a NIL receiver denies with 404 and never reaches the handler, so a
+// test that skips WithAccess sees 404s, not an open door
+// (permission.TestEnforcer_NilReceiver_FailsClosed).
 func (h *Handler) WithAccess(pageEnf, dbEnf *permission.Enforcer) *Handler {
 	h.pageEnf = pageEnf
 	h.dbEnf = dbEnf

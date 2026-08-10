@@ -31,7 +31,10 @@ type Handler struct {
 
 func NewHandler(exp *Exporter) *Handler { return &Handler{exp: exp} }
 
-// WithAccess wires the A3 access enforcer. Without it the routes mount unguarded (tests).
+// WithAccess wires the A3 access enforcer. Without it those routes FAIL CLOSED:
+// Enforcer.Require on a NIL receiver denies with 404 and never reaches the handler, so a
+// test that skips WithAccess sees 404s, not an open door
+// (permission.TestEnforcer_NilReceiver_FailsClosed).
 func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
 	h.pageEnf = pageEnf
 	return h

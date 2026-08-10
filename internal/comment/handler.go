@@ -13,12 +13,15 @@ import (
 
 type Handler struct {
 	store   *Store
-	pageEnf *permission.Enforcer // A3: comment routes gate on the parent page's access (nil = unguarded)
+	pageEnf *permission.Enforcer // A3: comment routes gate on the parent page's access (nil => 404, fail-closed)
 }
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
 
-// WithAccess wires the A3 page access enforcer. Without it the routes mount unguarded (tests).
+// WithAccess wires the A3 page access enforcer. Without it those routes FAIL CLOSED:
+// Enforcer.Require on a NIL receiver denies with 404 and never reaches the handler, so a
+// test that skips WithAccess sees 404s, not an open door
+// (permission.TestEnforcer_NilReceiver_FailsClosed).
 func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
 	h.pageEnf = pageEnf
 	return h
