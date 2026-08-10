@@ -234,7 +234,27 @@ func (s *Store) RequestApproval(ctx context.Context, pageID, workspaceID, reques
 // passes, the subsequent bare-id statements (page lookup, request +
 // page flips) are safe: the request is confirmed in-workspace and its
 // page_id is owned by the same request.
-func (s *Store) Decide(ctx context.Context, requestID, reviewerID, decision, comment string, wsIDs []string) error {
+//
+// ⚠⚠ AND THE PARAGRAPH ABOVE REASONS ABOUT THE OUTER RING ONLY — WHICH IS HOW THE INNER ONE STAYED
+// OPEN. pageID is the page the ROUTE'S ENFORCER AUTHORIZED, and it is required for the same reason
+// wsIDs is. `POST /spaces/{spaceID}/pages/{pageID}/approval/{requestID}/decide` is
+// `.With(pageEnf.Require(AccessView))`, so the gate answers about {pageID}; this statement used to
+// name only {requestID}, with the WORKSPACE — a ring both are already inside — the only thing
+// between them. MEASURED through the real routes on real Postgres (crosspage_realpg_test.go): a
+// named reviewer who is REFUSED at the request's own address, because he has no grant on the
+// private space the page lives in, recorded his decision by naming a page of his own in the URL —
+// and since he was the only reviewer it was final, so the request AND the private page both
+// flipped to `approved`. The product's own position is that he may not act on that page; the
+// borrowed address overrode it.
+//
+// Its sibling `PublishApproved` on the next handler down has always taken the page id from the
+// URL. `Decide` was the outlier — the same shape as changelog (#82), permission (#83) and
+// database rows/views (#84), and the first of the four found by a guard rather than by reading:
+// internal/routeguard asserts that a handler gated on {P} reads {P}.
+//
+// page_id is NOT NULL with an FK to pages (migrations/0009), so scoping by it makes no request
+// unreachable; every SPA caller already builds the URL from the page whose request it is showing.
+func (s *Store) Decide(ctx context.Context, requestID, pageID, reviewerID, decision, comment string, wsIDs []string) error {
 	if s.pool == nil {
 		return errors.New("approval: no pool")
 	}
@@ -242,12 +262,14 @@ func (s *Store) Decide(ctx context.Context, requestID, reviewerID, decision, com
 		return fmt.Errorf("approval: invalid decision %q", decision)
 	}
 
-	// Scope gate: the request must live in one of the caller's
-	// workspaces before we touch any decision row.
+	// Scope gate: the request must be ON THE PAGE THE ROUTE AUTHORIZED, and in one of the
+	// caller's workspaces, before we touch any decision row. A mismatched (page, request) pair
+	// answers 404 and not 403: 403 would confirm the id exists somewhere the caller cannot reach.
 	var inWorkspace bool
 	if err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM approval_requests WHERE id = $1 AND workspace_id = ANY($2))`,
-		requestID, wsIDs,
+		`SELECT EXISTS(SELECT 1 FROM approval_requests
+          WHERE id = $1 AND page_id = $2 AND workspace_id = ANY($3))`,
+		requestID, pageID, wsIDs,
 	).Scan(&inWorkspace); err != nil {
 		return fmt.Errorf("approval: scope check: %w", err)
 	}
@@ -273,13 +295,14 @@ func (s *Store) Decide(ctx context.Context, requestID, reviewerID, decision, com
 	}
 
 	// Final state — flip the request + the page in lockstep.
-	var pageID string
-	if err := s.pool.QueryRow(ctx,
-		`SELECT page_id FROM approval_requests WHERE id = $1`, requestID,
-	).Scan(&pageID); err != nil {
-		return fmt.Errorf("approval: lookup page: %w", err)
-	}
-	// nosemgrep: docs-by-id-write-requires-workspace-scope -- SCOPE-GATED upstream in Decide: the request is confirmed in the caller's workspace (SELECT ... approval_requests WHERE id AND workspace_id = ANY(wsIDs) → ErrNotFound) BEFORE any write; requestID is that in-workspace request.
+	//
+	// ⚠ THE `SELECT page_id FROM approval_requests WHERE id = $1` THAT USED TO STAND HERE IS
+	// DELETED, and it is the scope gate above that earns the deletion, not tidiness: that gate now
+	// returns ErrNotFound unless the request's page_id IS pageID, so the lookup could only ever
+	// return the value already in hand. Control C6 removes the `page_id = $2` predicate and the
+	// page-flip assertion reddens, which is the record that this deletion rests on the predicate
+	// rather than on the parameter's name.
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- SCOPE-GATED upstream in Decide: the request is confirmed to be ON pageID and in the caller's workspace (SELECT ... WHERE id AND page_id AND workspace_id = ANY(wsIDs) → ErrNotFound) BEFORE any write; requestID is that request.
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE approval_requests SET status = $1, updated_at = NOW() WHERE id = $2`,
 		string(agg), requestID,
@@ -292,7 +315,7 @@ func (s *Store) Decide(ctx context.Context, requestID, reviewerID, decision, com
 	} else {
 		nextDoc = DocRejected
 	}
-	// nosemgrep: docs-by-id-write-requires-workspace-scope -- SCOPE-GATED upstream in Decide (see above): pageID is read from the in-workspace request's own page_id, so this page belongs to the same authorized workspace.
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- SCOPE-GATED upstream in Decide (see above): pageID is the page the ROUTE'S ENFORCER authorized, and the gate confirmed THIS request is on it and in the caller's workspace.
 	if _, err := s.pool.Exec(ctx,
 		`UPDATE pages SET doc_status = $1 WHERE id = $2`,
 		string(nextDoc), pageID,
