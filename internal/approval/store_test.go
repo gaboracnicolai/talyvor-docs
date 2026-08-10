@@ -122,8 +122,8 @@ func TestDecide_AllApproved_FlipsRequestAndPageToApproved(t *testing.T) {
 	wsIDs := []string{"ws-1"}
 
 	// SEC-4 L2: scope gate — request must be in the caller's workspaces.
-	pool.ExpectQuery(`SELECT EXISTS.*FROM approval_requests WHERE id.*workspace_id = ANY`).
-		WithArgs("req-1", wsIDs).
+	pool.ExpectQuery(`SELECT EXISTS.*FROM approval_requests\s+WHERE id = \$1 AND page_id = \$2 AND workspace_id = ANY`).
+		WithArgs("req-1", "pg-1", wsIDs).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 
 	// Update this reviewer's decision.
@@ -138,10 +138,9 @@ func TestDecide_AllApproved_FlipsRequestAndPageToApproved(t *testing.T) {
 			AddRow("approved").
 			AddRow("approved"))
 
-	// Update the request status + flip the page.
-	pool.ExpectQuery(`SELECT page_id FROM approval_requests WHERE id`).
-		WithArgs("req-1").
-		WillReturnRows(pgxmock.NewRows([]string{"page_id"}).AddRow("pg-1"))
+	// Update the request status + flip the page. The `SELECT page_id FROM
+	// approval_requests` that stood here is gone: the scope gate above now asserts
+	// page_id = $2, so the lookup could only return the id already in hand.
 	pool.ExpectExec(`UPDATE approval_requests SET status`).
 		WithArgs("approved", "req-1").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -149,7 +148,7 @@ func TestDecide_AllApproved_FlipsRequestAndPageToApproved(t *testing.T) {
 		WithArgs("approved", "pg-1").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	if err := store.Decide(context.Background(), "req-1", "u-alice", "approved", "lgtm", wsIDs); err != nil {
+	if err := store.Decide(context.Background(), "req-1", "pg-1", "u-alice", "approved", "lgtm", wsIDs); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -162,8 +161,8 @@ func TestDecide_AnyRejected_FlipsToRejected(t *testing.T) {
 	wsIDs := []string{"ws-1"}
 
 	// SEC-4 L2: scope gate.
-	pool.ExpectQuery(`SELECT EXISTS.*FROM approval_requests WHERE id.*workspace_id = ANY`).
-		WithArgs("req-1", wsIDs).
+	pool.ExpectQuery(`SELECT EXISTS.*FROM approval_requests\s+WHERE id = \$1 AND page_id = \$2 AND workspace_id = ANY`).
+		WithArgs("req-1", "pg-1", wsIDs).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 
 	pool.ExpectExec(`UPDATE review_decisions SET decision`).
@@ -177,9 +176,8 @@ func TestDecide_AnyRejected_FlipsToRejected(t *testing.T) {
 			AddRow("approved").
 			AddRow("rejected"))
 
-	pool.ExpectQuery(`SELECT page_id FROM approval_requests WHERE id`).
-		WithArgs("req-1").
-		WillReturnRows(pgxmock.NewRows([]string{"page_id"}).AddRow("pg-1"))
+	// The `SELECT page_id FROM approval_requests` that stood here is gone: the scope gate above
+	// now asserts page_id = $2, so the lookup could only return the id already in hand.
 	pool.ExpectExec(`UPDATE approval_requests SET status`).
 		WithArgs("rejected", "req-1").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
@@ -187,7 +185,7 @@ func TestDecide_AnyRejected_FlipsToRejected(t *testing.T) {
 		WithArgs("rejected", "pg-1").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
-	if err := store.Decide(context.Background(), "req-1", "u-bob", "rejected", "missing edge case", wsIDs); err != nil {
+	if err := store.Decide(context.Background(), "req-1", "pg-1", "u-bob", "rejected", "missing edge case", wsIDs); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -200,8 +198,8 @@ func TestDecide_StillPending_LeavesRequestStatusAlone(t *testing.T) {
 	wsIDs := []string{"ws-1"}
 
 	// SEC-4 L2: scope gate.
-	pool.ExpectQuery(`SELECT EXISTS.*FROM approval_requests WHERE id.*workspace_id = ANY`).
-		WithArgs("req-1", wsIDs).
+	pool.ExpectQuery(`SELECT EXISTS.*FROM approval_requests\s+WHERE id = \$1 AND page_id = \$2 AND workspace_id = ANY`).
+		WithArgs("req-1", "pg-1", wsIDs).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(true))
 
 	pool.ExpectExec(`UPDATE review_decisions SET decision`).
@@ -217,7 +215,7 @@ func TestDecide_StillPending_LeavesRequestStatusAlone(t *testing.T) {
 	// NOTE: no UPDATE on approval_requests or pages — the second
 	// reviewer hasn't decided yet.
 
-	if err := store.Decide(context.Background(), "req-1", "u-alice", "approved", "", wsIDs); err != nil {
+	if err := store.Decide(context.Background(), "req-1", "pg-1", "u-alice", "approved", "", wsIDs); err != nil {
 		t.Fatalf("Decide: %v", err)
 	}
 	if err := pool.ExpectationsWereMet(); err != nil {
@@ -227,7 +225,7 @@ func TestDecide_StillPending_LeavesRequestStatusAlone(t *testing.T) {
 
 func TestDecide_RejectsUnknownDecisionValue(t *testing.T) {
 	store, _ := newMockStore(t)
-	if err := store.Decide(context.Background(), "req-1", "u-a", "maybe", "", []string{"ws-1"}); err == nil {
+	if err := store.Decide(context.Background(), "req-1", "pg-1", "u-a", "maybe", "", []string{"ws-1"}); err == nil {
 		t.Fatal("expected error on invalid decision")
 	}
 }
@@ -237,11 +235,11 @@ func TestDecide_RejectsRequestOutsideWorkspaces(t *testing.T) {
 	wsIDs := []string{"ws-other"}
 
 	// Scope gate returns false → ErrNotFound, no decision write.
-	pool.ExpectQuery(`SELECT EXISTS.*FROM approval_requests WHERE id.*workspace_id = ANY`).
-		WithArgs("req-1", wsIDs).
+	pool.ExpectQuery(`SELECT EXISTS.*FROM approval_requests\s+WHERE id = \$1 AND page_id = \$2 AND workspace_id = ANY`).
+		WithArgs("req-1", "pg-1", wsIDs).
 		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
 
-	err := store.Decide(context.Background(), "req-1", "u-alice", "approved", "lgtm", wsIDs)
+	err := store.Decide(context.Background(), "req-1", "pg-1", "u-alice", "approved", "lgtm", wsIDs)
 	if err != ErrNotFound {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}

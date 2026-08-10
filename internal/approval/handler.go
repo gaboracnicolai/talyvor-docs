@@ -142,7 +142,12 @@ func (h *Handler) Decide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wsIDs := authz.WorkspaceIDs(r.Context())
-	if err := h.store.Decide(r.Context(), requestID, reviewerID, in.Decision, in.Comment, wsIDs); err != nil {
+	// {pageID} is the object pageEnf.Require just authorized — pass it so the statement acts on the
+	// same page the gate answered about. Without it a {requestID} is answered by whatever page the
+	// caller names, and a reviewer refused at the request's own address decides through his own
+	// (crosspage_realpg_test.go).
+	if err := h.store.Decide(r.Context(), requestID, chi.URLParam(r, "pageID"), reviewerID,
+		in.Decision, in.Comment, wsIDs); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			writeErr(w, http.StatusNotFound, err.Error())
 			return
