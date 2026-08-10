@@ -223,6 +223,22 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
     return <div className="p-8 text-sm text-muted">Loading page…</div>;
   }
 
+  // WHAT THIS DOCUMENT COST, resolved once so the panel and the Page-info line cannot drift apart.
+  //
+  // A page has TWO independent costs and a derived sum (migration 0018): `ai_cost_usd` is the cost
+  // of the Track ISSUES linked to it, `own_ai_cost_usd` the cost of AI operations performed ON the
+  // document, `total_ai_cost_usd` their sum — derived server-side precisely so a caller does not
+  // add them itself and get it subtly wrong (model.Page).
+  //
+  // ⚠ THE `??` IS NOT DEFENSIVE PADDING. api/client.ts persists page GETs to IndexedDB and serves
+  // them back when fetch REJECTS, so a record cached before these fields shipped is a real value
+  // this component is handed on the offline path. Reading `.toFixed()` off it crashes the entire
+  // page view. Falling back to the sum of what IS present degrades such a record to exactly what
+  // the old UI showed for it, rather than to a blank screen.
+  const trackCost = page.ai_cost_usd;
+  const ownCost = page.own_ai_cost_usd ?? 0;
+  const totalCost = page.total_ai_cost_usd ?? ownCost + trackCost;
+
   // Specialised page types render their own surface — the editor is
   // hidden behind a typed branch so we can introduce more page
   // types (templates-as-pages, dashboards, etc.) the same way.
@@ -386,9 +402,9 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
                 <Eye size={10} />
                 {page.view_count} views
               </div>
-              <div className="flex items-center gap-1">
+              <div className="flex items-center gap-1" data-testid="page-info-ai-cost">
                 <Sparkles size={10} className="text-accent" />
-                ${page.ai_cost_usd.toFixed(2)} AI cost
+                ${totalCost.toFixed(2)} AI cost
               </div>
               <div className="flex items-center gap-1">
                 <FileText size={10} />
@@ -430,13 +446,34 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
           </PanelSection>
 
           <LinkedIssuesSection pageID={page.id} workspaceID={page.workspace_id} />
-          {page.ai_cost_usd > 0 ? (
+          {/* A page has TWO independent costs and a derived sum (migration 0018): ai_cost_usd is
+              the cost of the Track ISSUES linked to it, own_ai_cost_usd the cost of AI operations
+              performed ON the document, total_ai_cost_usd their sum.
+
+              This panel used to gate on — and print — `ai_cost_usd` ALONE, under the sentence
+              "Includes Lens writing + Track implementation spend", which is the definition of the
+              TOTAL. The prose stated the sum and the value was one addend, and "AI WRITING cost"
+              is the name of the OTHER addend.
+
+              ⚠ AND THE GATE INVERTED IT. Conditioned on the Track half, a document funded entirely
+              by its own AI writing rendered NO PANEL AT ALL — the panel titled "AI writing cost"
+              was hidden from exactly the document that had one. Measured before this was changed:
+              own 12.34 / track 0 rendered no panel and the string "12.34" appeared NOWHERE on the
+              screen, while own 0 / track 1.50 rendered "$1.50".
+
+              The breakdown is not decoration: the sentence claims a composition, and printing both
+              addends is what makes that claim checkable by the person reading it. */}
+          {totalCost > 0 ? (
             <PanelSection title="AI cost">
-              <div className="flex items-center gap-1 text-accent">
-                <Sparkles size={10} />✨ AI writing cost: ${page.ai_cost_usd.toFixed(2)}
+              <div data-testid="ai-cost-panel" />
+              <div className="flex items-center gap-1 text-accent" data-testid="ai-cost-total">
+                <Sparkles size={10} />✨ Total AI cost: ${totalCost.toFixed(2)}
               </div>
-              <div className="mt-0.5 text-muted">
-                Includes Lens writing + Track implementation spend.
+              <div className="mt-0.5 text-muted" data-testid="ai-cost-own">
+                Lens writing on this document: ${ownCost.toFixed(2)}
+              </div>
+              <div className="text-muted" data-testid="ai-cost-track">
+                Linked Track implementation: ${trackCost.toFixed(2)}
               </div>
             </PanelSection>
           ) : null}
