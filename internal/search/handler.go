@@ -66,8 +66,28 @@ type Result struct {
 	Similarity float64 `json:"similarity,omitempty"`
 	Source     string  `json:"source"` // "fulltext" | "semantic" | "both"
 	URL        string  `json:"url"`
-	AICostUSD  float64 `json:"ai_cost_usd,omitempty"`
+
+	// THE THREE COST FIELDS ARE THE PAGE JSON'S THREE, NOT A CHOSEN ONE OF THEM. A page has two
+	// costs and migration 0018 exists because conflating them was the defect: ai_cost_usd is the
+	// cost of the Track ISSUES linked to the page (overwritten by a sweep), own_ai_cost_usd is the
+	// cost of AI operations performed ON the document (accumulated), and the total is their sum.
+	// This row used to carry ai_cost_usd alone — precisely the half 0018 was written because it
+	// was missing — so a document whose entire spend was its own AI work reported nothing.
+	//
+	// ⚠ POINTERS, AND NOT AS A STYLE CHOICE. A row has three possible states and a bare float can
+	// only express two. `omitempty` on a float64 deletes the field when the value is 0, so
+	// "this page cost nothing" and "this surface did not report a cost" were the same bytes. They
+	// are different facts: a SEMANTIC-ONLY row is built from a vector hit with no pages row read,
+	// so no cost is KNOWN for it and emitting 0.0 would be a fabricated zero. nil means not
+	// reported; 0 means measured and zero. `omitempty` on a pointer omits only nil.
+	AICostUSD      *float64 `json:"ai_cost_usd,omitempty"`
+	OwnAICostUSD   *float64 `json:"own_ai_cost_usd,omitempty"`
+	TotalAICostUSD *float64 `json:"total_ai_cost_usd,omitempty"`
 }
+
+// ptr returns a pointer to v. Used only for the cost fields, whose nil/zero distinction is
+// load-bearing — see the note on Result.
+func ptr(v float64) *float64 { return &v }
 
 type response struct {
 	Results []Result `json:"results"`
@@ -210,7 +230,11 @@ func merge(ft []page.SearchResult, sem []SemanticResult) []Result {
 				Similarity: simScore,
 				Source:     src,
 				URL:        pageURL(f.Page.SpaceID, pageID),
-				AICostUSD:  f.Page.AICostUSD,
+				// A pages row WAS read for this hit, so all three costs are known — including
+				// when they are zero. See the note on Result for why they are pointers.
+				AICostUSD:      ptr(f.Page.AICostUSD),
+				OwnAICostUSD:   ptr(f.Page.OwnAICostUSD),
+				TotalAICostUSD: ptr(f.Page.TotalAICostUSD),
 			},
 			score: score,
 		})
