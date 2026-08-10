@@ -33,7 +33,21 @@ export interface Page {
   created_by: string;
   updated_by: string;
   linked_issues?: string[];
+  // THREE COST FIELDS, AND THE API HAS SENT ALL THREE SINCE MIGRATION 0018. Only the first was
+  // declared here, so the other two arrived on every page response and were dropped at this type
+  // boundary — which is why a renderer showing one addend under a sentence naming the sum could
+  // not be red anywhere in the frontend. `ai_cost_usd` is the Track half ALONE; prefer
+  // `total_ai_cost_usd` for "what did this document cost".
+  //
+  // ⚠ OPTIONAL, AND NOT AS CAUTION — A `Page` IN THIS APP GENUINELY MAY LACK THEM. api/client.ts
+  // persists successful page GETs to IndexedDB and serves them back when fetch REJECTS, so an
+  // entry cached before these fields shipped is a real Page value this code will be handed. Typed
+  // required, `page.total_ai_cost_usd.toFixed(2)` crashes the whole page view on the offline path
+  // — measured, not feared: it is what broke PageView.editsession.test.tsx's fixture, which is
+  // exactly the shape of a pre-0018 cached record.
   ai_cost_usd: number;
+  own_ai_cost_usd?: number;
+  total_ai_cost_usd?: number;
   view_count: number;
   last_viewed_at?: string;
   last_verified_at?: string;
