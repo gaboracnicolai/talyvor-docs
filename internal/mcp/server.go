@@ -151,6 +151,27 @@ var writeTools = map[string]bool{
 	"verify_page": true,
 }
 
+// gatedReadTools are the READ tools whose object is named by a client arg — one page, one space,
+// chosen by the caller. There is no honest partial answer to "give me THIS object", so these DENY
+// at the VIEW tier, which is what the REST by-id doors do via Enforcer.Require(AccessView).
+//
+// ⚠ THE THREE READ TOOLS THAT ARE NOT HERE ARE NOT UNGATED — THEY ARE GATED IN A DIFFERENT SHAPE,
+// AND CONFUSING THE TWO IS HOW THIS SET GOES STALE:
+//
+//   - search_docs and get_space_tree return a MIXED set the caller did not enumerate. Denying the
+//     call would take the readable rows away with the unreadable ones, so they FILTER per row
+//     inside the tool (over an over-fetched window, so a hidden row cannot eat a result slot).
+//   - get_page gates INSIDE the tool because its object does not exist until the lookup has run:
+//     the slug arm carries only (space_id, slug), so a gate here would have to resolve the same
+//     row a second time, on the other side of the decision it is making.
+//
+// authorizeRead's switch DENIES an unmapped member of this set, so adding a name here without a
+// rule is a loud total denial rather than a silent hole.
+var gatedReadTools = map[string]bool{
+	"list_pages":         true,
+	"get_page_analytics": true,
+}
+
 func writeRPC(w http.ResponseWriter, resp rpcResponse) {
 	resp.JSONRPC = "2.0"
 	w.Header().Set("Content-Type", "application/json")
@@ -413,6 +434,16 @@ func (s *Server) callTool(ctx context.Context, name string, args map[string]any)
 		}
 	}
 
+	// SEC-4 within-workspace VIEW gate, the read half of the same idea. The chokepoint above
+	// authorized the WORKSPACE; a member with no grant on a private space is a member of that
+	// workspace, so membership alone let every read tool through. Fail-closed.
+	if gatedReadTools[name] {
+		allowed, err := s.authorizeRead(ctx, name, args, m.MemberID)
+		if err != nil || !allowed {
+			return nil, &rpcError{Code: errUnauthorized, Message: "not authorized: this action requires view access"}
+		}
+	}
+
 	switch name {
 	case "search_docs":
 		return s.toolSearchDocs(ctx, args)
@@ -454,6 +485,50 @@ func (s *Server) authorizeWrite(ctx context.Context, name string, args map[strin
 		return s.access.CanEditPage(ctx, stringArg(args, "page_id", ""), memberID)
 	}
 	return false, nil // an unmapped write tool denies (fail-closed)
+}
+
+// authorizeRead enforces the AccessView tier a gatedReadTools entry needs, on the object its args
+// name. Same engine, same lookers, same fail-closed nil as authorizeWrite — the only difference is
+// the tier, because reading is not editing.
+func (s *Server) authorizeRead(ctx context.Context, name string, args map[string]any, memberID string) (bool, error) {
+	if s.access == nil {
+		return false, nil
+	}
+	switch name {
+	case "list_pages":
+		return s.access.CanViewSpace(ctx, stringArg(args, "space_id", ""), memberID)
+	case "get_page_analytics":
+		return s.access.CanViewPage(ctx, stringArg(args, "page_id", ""), memberID)
+	}
+	return false, nil // an unmapped read tool denies (fail-closed)
+}
+
+// canViewPage / canViewSpace are the in-tool form of the same question, for the three tools that
+// cannot be answered by a yes/no at dispatch. They read the actor the chokepoint already resolved
+// from the VERIFIED identity (never a client arg) and swallow the error into a DENIAL: a tier that
+// could not be resolved is not a tier that was granted.
+func (s *Server) canViewPage(ctx context.Context, pageID string) bool {
+	if s.access == nil || pageID == "" {
+		return false
+	}
+	actor, ok := authz.AuthorizedMember(ctx)
+	if !ok || actor == "" {
+		return false
+	}
+	allowed, err := s.access.CanViewPage(ctx, pageID, actor)
+	return err == nil && allowed
+}
+
+func (s *Server) canViewSpace(ctx context.Context, spaceID string) bool {
+	if s.access == nil || spaceID == "" {
+		return false
+	}
+	actor, ok := authz.AuthorizedMember(ctx)
+	if !ok || actor == "" {
+		return false
+	}
+	allowed, err := s.access.CanViewSpace(ctx, spaceID, actor)
+	return err == nil && allowed
 }
 
 // toolWorkspace resolves the workspace a tool call acts on, for the authz chokepoint. Direct
@@ -565,12 +640,33 @@ func (s *Server) toolSearchDocs(ctx context.Context, args map[string]any) (any, 
 		spaceID = &v
 	}
 	limit := intArg(args, "limit", 5)
-	results, err := s.deps.pages.SearchWithRank(ctx, wsID, q, spaceID, limit, 0)
+	// OVER-FETCH, BECAUSE THE ROWS THE CALLER MAY NOT READ ARE DROPPED AFTER THE SQL LIMIT.
+	// Measured on the REST twin (#78): with limit=1 and one hidden page ranking above a readable
+	// one, the store returns the hidden row alone, the filter drops it, and the caller is told
+	// NOTHING MATCHED for a document they may open. It is a mitigation, not a guarantee — a run of
+	// more than (searchFetchFactor-1)×limit consecutive hidden rows still under-fills — and this
+	// payload has always been a bare list with no total, so nothing here newly misreports a count.
+	fetchLimit := limit
+	if s.access != nil {
+		fetchLimit = limit * searchFetchFactor
+		if fetchLimit > searchMaxFetchRows {
+			fetchLimit = searchMaxFetchRows
+		}
+	}
+	results, err := s.deps.pages.SearchWithRank(ctx, wsID, q, spaceID, fetchLimit, 0)
 	if err != nil {
 		return nil, err
 	}
 	hits := make([]searchHit, 0, len(results))
 	for _, r := range results {
+		// The VIEW tier, per row, BEFORE truncation. A workspace-scoped search is the one shape
+		// where denying the whole call would be wrong: the readable rows are the answer.
+		if !s.canViewPage(ctx, r.Page.ID) {
+			continue
+		}
+		if limit > 0 && len(hits) >= limit {
+			break
+		}
 		hits = append(hits, searchHit{
 			PageID:    r.Page.ID,
 			Title:     r.Page.Title,
@@ -582,6 +678,18 @@ func (s *Server) toolSearchDocs(ctx context.Context, args map[string]any) (any, 
 	}
 	return toolContent(hits)
 }
+
+// searchFetchFactor / searchMaxFetchRows size the window SearchWithRank is asked for when the access
+// gate is wired. searchMaxFetchRows is the STORE's own ceiling (SearchWithRank clamps limit to 50),
+// named here so the two numbers cannot silently disagree — the REST twin's ceiling is 100 because
+// Store.Search clamps at 100, and copying that number across would over-ask by 2×.
+const (
+	searchFetchFactor  = 4
+	searchMaxFetchRows = 50
+	// askContextPages is the grounding window ask_docs builds its prompt from — the "top-3" its
+	// own comment names, given a name so the over-fetch and the truncation cannot drift apart.
+	askContextPages = 3
+)
 
 type pageOut struct {
 	ID              string `json:"id"`
@@ -636,6 +744,14 @@ func (s *Server) toolGetPage(ctx context.Context, args map[string]any) (any, err
 	}
 	if p == nil {
 		return nil, &rpcError{Code: errInvalidParams, Message: "page not found"}
+	}
+	// SEC-4 VIEW tier, on the page the id or the SLUG actually resolved to. Gated HERE and not in
+	// the dispatch switch because the object does not exist until this lookup has run — the slug
+	// arm carries only (space_id, slug), so a gate at dispatch would have to read the same row a
+	// second time, on the other side of the decision it is making. This is the largest payload of
+	// any read tool: content_text is the whole document.
+	if !s.canViewPage(ctx, p.ID) {
+		return nil, &rpcError{Code: errUnauthorized, Message: "not authorized: this action requires view access"}
 	}
 	spaceName := ""
 	if s.deps.spaces != nil {
@@ -811,11 +927,36 @@ func (s *Server) toolAskDocs(ctx context.Context, args map[string]any) (any, err
 	//
 	// The message is fixed and the cause is logged, not returned: the store's error carries
 	// SQLSTATE text and relation names, and the caller here is an MCP client.
-	hits, err := s.deps.pages.SearchWithRank(ctx, wsID, question, nil, 3, 0)
+	// ⚠⚠ THE GROUNDING CORPUS IS GATED HERE AND #79 DID NOT REACH IT. #79 closed the same leak on
+	// internal/ai/handler.go's REST /ask — and THIS TOOL NEVER CALLS THAT HANDLER: it runs its own
+	// SearchWithRank and hands the rows to the model itself. A sweep by ROUTE finds the REST half
+	// and misses this one. Measured: a member with no grant on a private space received its body
+	// inside the prompt, under a system message telling the model to use ONLY what it was given,
+	// and the page cited back in `sources` with a working deep link.
+	//
+	// OVER-FETCHED FOR THE SAME REASON search_docs IS, and here it matters more: the window is
+	// THREE, so a single hidden row costs a third of the caller's grounding and three hidden rows
+	// leave them grounded in NOTHING — which is exactly the ungrounded-answer state the rest of
+	// this function exists to refuse.
+	askFetch := askContextPages
+	if s.access != nil {
+		askFetch = askContextPages * searchFetchFactor
+	}
+	found, err := s.deps.pages.SearchWithRank(ctx, wsID, question, nil, askFetch, 0)
 	if err != nil {
 		slog.Error("mcp: ask_docs search failed — reporting the failure rather than answering ungrounded",
 			slog.String("workspace_id", wsID), slog.Any("err", err))
 		return nil, &rpcError{Code: errInternal, Message: "search failed"}
+	}
+	hits := make([]page.SearchResult, 0, len(found))
+	for _, h := range found {
+		if !s.canViewPage(ctx, h.Page.ID) {
+			continue
+		}
+		if len(hits) >= askContextPages {
+			break
+		}
+		hits = append(hits, h)
 	}
 	pages := make([]ai.PageContext, 0, len(hits))
 	sources := make([]askSource, 0, len(hits))
@@ -966,6 +1107,17 @@ func (s *Server) toolGetSpaceTree(ctx context.Context, args map[string]any) (any
 	out := make([]spaceTreeOut, 0, len(spaces))
 	for _, sp := range spaces {
 		if scopeSpaceID != "" && sp.ID != scopeSpaceID {
+			continue
+		}
+		// The VIEW tier, per SPACE. This tool is workspace-keyed, so it ENUMERATES — no id has to
+		// be guessed — and a private space's name is itself a disclosure.
+		//
+		// ⚠ FILTERED BY SPACE AND NOT ALSO BY PAGE, AND THAT IS THE RULE ENGINE'S PROPERTY RATHER
+		// THAN A SHORTCUT: resolveAccess has no DENY — a grant only ever RAISES the level — and
+		// CheckPage builds its resourceContext from the SPACE's privacy and creator. A page inside
+		// a space the caller may view is therefore viewable by construction, so a per-page pass
+		// here could only ever agree with the answer already given.
+		if !s.canViewSpace(ctx, sp.ID) {
 			continue
 		}
 		pages, _ := s.deps.pages.List(ctx, page.PageFilter{SpaceID: sp.ID, Limit: 200})
