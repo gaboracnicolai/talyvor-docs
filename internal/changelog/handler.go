@@ -105,7 +105,10 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 	wsIDs := authz.WorkspaceIDs(r.Context())
-	e, err := h.store.GetEntry(r.Context(), chi.URLParam(r, "id"), wsIDs)
+	// {pageID} is the object pageEnf.Require just authorized — pass it so the statement acts on
+	// the same object the gate answered about. Without it an id is answered by whatever page the
+	// caller names (crosspage_realpg_test.go).
+	e, err := h.store.GetEntry(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "pageID"), wsIDs)
 	if errors.Is(err, ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
@@ -124,7 +127,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	wsIDs := authz.WorkspaceIDs(r.Context())
-	e, err := h.store.UpdateEntry(r.Context(), chi.URLParam(r, "id"), updates, wsIDs)
+	e, err := h.store.UpdateEntry(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "pageID"), updates, wsIDs)
 	if errors.Is(err, ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
@@ -138,7 +141,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	wsIDs := authz.WorkspaceIDs(r.Context())
-	err := h.store.DeleteEntry(r.Context(), chi.URLParam(r, "id"), wsIDs)
+	err := h.store.DeleteEntry(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "pageID"), wsIDs)
 	if errors.Is(err, ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
@@ -152,7 +155,7 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Publish(w http.ResponseWriter, r *http.Request) {
 	wsIDs := authz.WorkspaceIDs(r.Context())
-	e, err := h.store.PublishEntry(r.Context(), chi.URLParam(r, "id"), wsIDs)
+	e, err := h.store.PublishEntry(r.Context(), chi.URLParam(r, "id"), chi.URLParam(r, "pageID"), wsIDs)
 	if errors.Is(err, ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not found")
 		return

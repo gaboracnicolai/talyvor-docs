@@ -93,7 +93,7 @@ func TestDeleteEntry_ActuallyRemovesTheRow_RealPG(t *testing.T) {
 			"the assertion below could not fail")
 	}
 
-	if err := s.DeleteEntry(ctx, id, []string{ws}); err != nil {
+	if err := s.DeleteEntry(ctx, id, page, []string{ws}); err != nil {
 		t.Fatalf("DeleteEntry: %v", err)
 	}
 
@@ -134,7 +134,7 @@ func TestDeleteEntry_DeletesOnlyThatEntry_RealPG(t *testing.T) {
 		}
 	}
 
-	if err := s.DeleteEntry(ctx, target, []string{ws}); err != nil {
+	if err := s.DeleteEntry(ctx, target, page, []string{ws}); err != nil {
 		t.Fatalf("DeleteEntry: %v", err)
 	}
 
@@ -176,7 +176,7 @@ func TestDeleteEntry_RefusesAnotherWorkspacesEntryAndLeavesIt_RealPG(t *testing.
 	}
 
 	// Alice's verified workspace set is {A}. B's entry is not in it.
-	err := s.DeleteEntry(ctx, entB, []string{wsA})
+	err := s.DeleteEntry(ctx, entB, pageB, []string{wsA})
 	if !errors.Is(err, changelog.ErrNotFound) {
 		t.Errorf("DeleteEntry across tenants returned %v, want ErrNotFound — the store's own "+
 			"workspace scope did not refuse", err)
