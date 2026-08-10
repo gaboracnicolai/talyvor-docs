@@ -28,10 +28,23 @@ import (
 // Membership, never on the client-supplied workspace_id arg — the same discipline as the
 // REST middleware and #23.
 
-// mcpLimitChain mirrors newMCPChain but wires a limiter.
+// mcpLimitChain mirrors newMCPChain but wires a limiter — AND A WORKING AI ENGINE, which it
+// did not before `ask_errors_realpg_test.go`'s merge.
+//
+// ⚠ THE ENGINE IS NOT COSMETIC: THIS TEST'S POSITIVE HALF WAS VACUOUS WITHOUT IT. The engine
+// argument used to be nil, and a nil *ai.Engine assigned into the aiDeps INTERFACE is a
+// non-nil interface holding a nil pointer (see ai.Engine.IsAvailable's own note), so ask_docs
+// reached AskDocs, got ai.ErrUnavailable — and DISCARDED it, reporting success. The two
+// in-burst calls below asserted `code == 0` and got it from a call that had entirely failed to
+// reach Lens. A completely dead AI satisfied "the burst is available" byte for byte.
+//
+// Now that the tool propagates that error, `code == 0` means the call really did complete, so
+// the burst half measures what it says. The throttled call is still rejected before dispatch by
+// the limiter, so the negative half is unchanged.
 func mcpLimitChain(t *testing.T, d *testutil.DB, l *ratelimit.Limiter) http.Handler {
 	t.Helper()
-	srv := mcp.New(page.NewStore(d.Pool), space.NewStore(d.Pool), nil, nil, nil, "test").WithRateLimit(l)
+	srv := mcp.New(page.NewStore(d.Pool), space.NewStore(d.Pool), nil,
+		askEngine(t, "Run make deploy."), nil, "test").WithRateLimit(l)
 	r := chi.NewRouter()
 	r.Group(func(r chi.Router) {
 		exempt := func(string) bool { return false }

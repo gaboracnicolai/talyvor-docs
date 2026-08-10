@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -796,9 +797,26 @@ func (s *Server) toolAskDocs(ctx context.Context, args map[string]any) (any, err
 	}
 	question := stringArg(args, "question", "")
 	wsID := stringArg(args, "workspace_id", "")
-	// Gather top-3 context pages via the full-text rank query — the
-	// same approach the REST /ask endpoint uses.
-	hits, _ := s.deps.pages.SearchWithRank(ctx, wsID, question, nil, 3, 0)
+	// Gather top-3 context pages via the full-text rank query — the same approach the REST
+	// /ask endpoint uses, INCLUDING what it does when the query fails (handler.go:223-227
+	// returns 500 "search failed"). This used to be `hits, _ :=`, and the sentence above
+	// claimed parity it did not have in the only respect that matters when something breaks.
+	//
+	// A DROPPED ERROR HERE IS NOT A MISSING NUMBER, IT IS AN UNGROUNDED ANSWER. askSystem
+	// tells the model to use ONLY the provided documentation; with the search dead, `pages`
+	// is empty and the model answers from nothing, and the payload is byte-identical to the
+	// one a genuinely empty corpus produces. The caller is an AI agent: it cannot tell "your
+	// docs do not cover this" from "the search index is down", and neither can the human
+	// reading its answer. Measured both ways in ask_errors_realpg_test.go.
+	//
+	// The message is fixed and the cause is logged, not returned: the store's error carries
+	// SQLSTATE text and relation names, and the caller here is an MCP client.
+	hits, err := s.deps.pages.SearchWithRank(ctx, wsID, question, nil, 3, 0)
+	if err != nil {
+		slog.Error("mcp: ask_docs search failed — reporting the failure rather than answering ungrounded",
+			slog.String("workspace_id", wsID), slog.Any("err", err))
+		return nil, &rpcError{Code: errInternal, Message: "search failed"}
+	}
 	pages := make([]ai.PageContext, 0, len(hits))
 	sources := make([]askSource, 0, len(hits))
 	for _, h := range hits {
@@ -810,12 +828,32 @@ func (s *Server) toolAskDocs(ctx context.Context, args map[string]any) (any, err
 		})
 		sources = append(sources, askSource{Title: h.Page.Title, URL: url, PageID: h.Page.ID})
 	}
+	// A FAILED AI CALL REPORTED `"answer": ""` WITH THE SOURCES STILL ATTACHED — which reads
+	// as "I read these documents and they say nothing", a claim about the documents, rather
+	// than "I could not ask". The REST sibling returns 503 AI_UNAVAILABLE / 502 AI_FAILED
+	// (writeAIErr, ai/handler.go:78-93); this is the JSON-RPC shape of the same two.
+	//
+	// ⚠ THE nil CHECK BELOW IS KEPT BUT IT IS NOT THE GUARD IT LOOKS LIKE, AND MEASURING THAT
+	// IS WHY THIS COMMENT EXISTS. deps.ai is an INTERFACE and New takes a *ai.Engine, so a nil
+	// engine arrives here as a NON-NIL interface holding a nil pointer — the footgun
+	// ai.Engine.IsAvailable documents. `s.deps.ai != nil` is therefore TRUE for a server built
+	// by New with no engine; the call proceeds on the nil receiver, IsAvailable returns false,
+	// and run() returns ai.ErrUnavailable. Before this change that error was swallowed too, so
+	// "Lens is down", "Lens is unconfigured" and "no engine wired at all" were one empty
+	// string. All three are errors now. The check still catches a genuinely nil interface,
+	// which only newServer (the fake path) can produce.
 	answer := ""
 	if s.deps.ai != nil {
 		ans, err := s.deps.ai.AskDocs(ctx, wsID, question, pages)
-		if err == nil {
-			answer = ans
+		if err != nil {
+			slog.Error("mcp: ask_docs AI call failed — reporting the failure rather than an empty answer",
+				slog.String("workspace_id", wsID), slog.Any("err", err))
+			if errors.Is(err, ai.ErrUnavailable) {
+				return nil, &rpcError{Code: errInternal, Message: "the AI service is not available"}
+			}
+			return nil, &rpcError{Code: errInternal, Message: "the AI service failed to answer"}
 		}
+		answer = ans
 	}
 	return toolContent(askOut{Answer: answer, Sources: sources})
 }
