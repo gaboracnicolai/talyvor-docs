@@ -9,6 +9,13 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 )
 
+// THE FOUR `pool.ExpectationsWereMet()` CALLS THAT USED TO END EVERY TEST IN THIS FILE ARE NOW
+// ON `newMockStore` — MOVED, NOT DROPPED. Read the comment there for why; the short version is
+// that this file asked the question per test and store_test.go's nine expectations never asked at
+// all, which is exactly the split that lets the next test written be uncovered. The claim each
+// call carried is unchanged and still holds for these four: that `Create` refuses BEFORE it
+// reaches the COUNT and the INSERT (an unconsumed expectation is what says so), and that a nil
+// space performs no space lookup.
 func nowT() time.Time { return time.Now().UTC() }
 
 func expectSpaceLookup(pool pgxmock.PgxPoolIface, wsID string, private bool) {
@@ -46,10 +53,6 @@ func TestCreate_RefusesForeignWorkspaceSpace(t *testing.T) {
 	if !strings.Contains(err.Error(), "space") {
 		t.Errorf("error should name the space as the problem, got %v", err)
 	}
-	// It must refuse BEFORE the INSERT — an unfulfilled INSERT expectation is the proof.
-	if err := pool.ExpectationsWereMet(); err != nil {
-		t.Errorf("unmet expectations (a query ran that should not have, or vice versa): %v", err)
-	}
 }
 
 func TestCreate_RefusesPrivateSpace(t *testing.T) {
@@ -64,9 +67,6 @@ func TestCreate_RefusesPrivateSpace(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "private") {
 		t.Errorf("error should say the space is private so the operator can act on it, got %v", err)
-	}
-	if err := pool.ExpectationsWereMet(); err != nil {
-		t.Errorf("unmet expectations: %v", err)
 	}
 }
 
@@ -91,9 +91,6 @@ func TestCreate_AllowsPublicSpaceInOwnWorkspace(t *testing.T) {
 	if cd == nil || cd.SpaceID == nil || *cd.SpaceID != "sp-public" {
 		t.Errorf("expected the mapping to be created for sp-public, got %+v", cd)
 	}
-	if err := pool.ExpectationsWereMet(); err != nil {
-		t.Errorf("unmet expectations: %v", err)
-	}
 }
 
 // POSITIVE CONTROL 2: a domain with NO space mapping is still allowed — it renders the
@@ -111,8 +108,5 @@ func TestCreate_AllowsNilSpace(t *testing.T) {
 
 	if _, err := st.Create(context.Background(), "ws-1", "docs.example.com", "m-1", nil); err != nil {
 		t.Fatalf("a domain with no space mapping must still be creatable: %v", err)
-	}
-	if err := pool.ExpectationsWereMet(); err != nil {
-		t.Errorf("nil space must not trigger a space lookup: %v", err)
 	}
 }

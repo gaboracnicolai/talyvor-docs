@@ -17,6 +17,29 @@ func newMockStore(t *testing.T, txt TXTResolver) (*Store, pgxmock.PgxPoolIface) 
 		t.Fatalf("pgxmock.NewPool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// EVERY EXPECTATION IN THIS PACKAGE IS VERIFIED, NOT JUST THE ONES SOMEBODY REMEMBERED.
+	//
+	// pgxmock reports an expectation that was never called only if you ASK it. store_test.go's
+	// 9 expectations never asked; space_mapping_test.go's 5 asked in four places, per test, by
+	// hand — which is the shape that leaves the next test written uncovered. Those four calls
+	// are MOVED here, not dropped: an invariant enforced twice cannot be breached by any
+	// one-line control, so keeping both copies would make every control aimed at it read
+	// NOT CAUGHT for the wrong reason.
+	//
+	// Measurement (scripts/w31-cross-package-write-controls.py, family D) showed what the
+	// missing check cost HERE: the `UPDATE custom_domains SET verified = true` inside `Verify`
+	// and the `DELETE FROM custom_domains` inside `Delete` can EACH be removed from store.go
+	// and `go test ./...` stays GREEN ACROSS THE WHOLE REPO, real Postgres included. Note what
+	// that means for the second one — a custom domain the operator deleted still resolves in
+	// middleware.go, and no test in this repo would notice.
+	//
+	// Registered AFTER pool.Close so it runs BEFORE it (t.Cleanup is LIFO). t.Errorf, not
+	// t.Fatalf: a cleanup must not Goexit out of another cleanup.
+	t.Cleanup(func() {
+		if err := pool.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet or mismatched pgxmock expectations: %v", err)
+		}
+	})
 	return newStore(pool, txt), pool
 }
 

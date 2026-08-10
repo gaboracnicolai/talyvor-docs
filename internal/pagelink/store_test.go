@@ -15,6 +15,32 @@ func newMockStore(t *testing.T) (*Store, pgxmock.PgxPoolIface) {
 		t.Fatalf("pgxmock.NewPool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// EVERY EXPECTATION IN THIS PACKAGE IS VERIFIED, NOT JUST THE ONES SOMEBODY REMEMBERED.
+	//
+	// pgxmock reports an expectation that was never called only if you ASK it. Nothing in this
+	// package asked — 8 expectations, zero `ExpectationsWereMet` — and measurement
+	// (scripts/w31-cross-package-write-controls.py, family D) showed what that cost HERE, in the
+	// most misleading way of the six packages: BOTH writes vanishing DO redden something, and
+	// NEITHER is caught by the test that names it.
+	//
+	//   · Delete Upsert's INSERT and TestSyncLinks_AddsAndRemovesEmbeds reds — because the
+	//     surviving DELETE call is then matched against the INSERT expectation and mismatches on
+	//     the query text. That is an ORDERING ACCIDENT of an ordered mock, not verification;
+	//     TestUpsert_InsertsLink itself stays green.
+	//   · Delete `Store.Delete`'s DELETE and the accident does not happen (the INSERT is
+	//     consumed correctly and the DELETE expectation is simply left unfulfilled). What speaks
+	//     instead is a test in ANOTHER PACKAGE — internal/trackintegration's
+	//     TestSyncPageCosts_APageWithNoLinksIsWrittenAsZero, which reads the money back.
+	//
+	// So a green run here has never meant these writes happened.
+	//
+	// Registered AFTER pool.Close so it runs BEFORE it (t.Cleanup is LIFO). t.Errorf, not
+	// t.Fatalf: a cleanup must not Goexit out of another cleanup.
+	t.Cleanup(func() {
+		if err := pool.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet or mismatched pgxmock expectations: %v", err)
+		}
+	})
 	return newStore(pool), pool
 }
 

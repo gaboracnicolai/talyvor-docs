@@ -17,6 +17,27 @@ func newMockStore(t *testing.T) (*Store, pgxmock.PgxPoolIface) {
 		t.Fatalf("pgxmock.NewPool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// EVERY EXPECTATION IN THIS PACKAGE IS VERIFIED, NOT JUST THE ONES SOMEBODY REMEMBERED.
+	//
+	// pgxmock reports an expectation that was never called only if you ASK it. Nothing in this
+	// package asked — 3 expectations, zero `ExpectationsWereMet`. Measurement
+	// (scripts/w31-cross-package-write-controls.py, family D) makes this package the useful
+	// CONTRAST of the six: deleting the `DELETE FROM blocks` statement out of `Store.Delete`
+	// DOES redden the repo — but not here. It reddens failclosed_gate_test.go, which reads the
+	// row back after an owner delete. TestDelete_RemovesBlock, whose ExpectExec names that exact
+	// statement, stayed green through it.
+	//
+	// A guard that is green because a different file is doing the work is worth knowing about:
+	// it is the only one of the ten writes measured that a product-level test already held, and
+	// the mock test still could not tell.
+	//
+	// Registered AFTER pool.Close so it runs BEFORE it (t.Cleanup is LIFO). t.Errorf, not
+	// t.Fatalf: a cleanup must not Goexit out of another cleanup.
+	t.Cleanup(func() {
+		if err := pool.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet or mismatched pgxmock expectations: %v", err)
+		}
+	})
 	return newStore(pool), pool
 }
 

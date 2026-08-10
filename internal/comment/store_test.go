@@ -16,6 +16,27 @@ func newMockStore(t *testing.T) (*Store, pgxmock.PgxPoolIface) {
 		t.Fatalf("pgxmock.NewPool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// EVERY EXPECTATION IN THIS PACKAGE IS VERIFIED, NOT JUST THE ONES SOMEBODY REMEMBERED.
+	//
+	// pgxmock reports an expectation that was never called only if you ASK it. Nothing in this
+	// package asked — 11 expectations, zero `ExpectationsWereMet` — and measurement
+	// (scripts/w31-cross-package-write-controls.py, family D) showed what that cost HERE, three
+	// times over: `Resolve`'s UPDATE, `Unresolve`'s UPDATE and `Delete`'s
+	// `DELETE FROM page_comments` can EACH be removed from store.go and `go test ./...` stays
+	// GREEN ACROSS THE WHOLE REPO, real Postgres included — including the three tests whose
+	// ExpectExec names the very statement that vanished.
+	//
+	// "The caller checks the Exec error" does not cover this: there is no error to return when
+	// there is no call. The sec_root_actor and sec_crosspage suites assert the STATUS CODE of
+	// the delete route, and that does not change when the delete stops deleting.
+	//
+	// Registered AFTER pool.Close so it runs BEFORE it (t.Cleanup is LIFO). t.Errorf, not
+	// t.Fatalf: a cleanup must not Goexit out of another cleanup.
+	t.Cleanup(func() {
+		if err := pool.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet or mismatched pgxmock expectations: %v", err)
+		}
+	})
 	return newStore(pool), pool
 }
 
