@@ -30,6 +30,18 @@ func (f *fakePages) Search(_ context.Context, _ /*workspaceID*/, q string, _ int
 	return f.results, nil
 }
 
+// allowAllPages is an EXPLICIT allow-all read gate for the bare-handler tests in this package.
+//
+// /ask now REFUSES rather than answering when no gate is wired (Handler.WithPageRead), so these
+// tests have to state which pages the caller may read instead of inheriting an unfiltered corpus
+// by omission. Allow-all is the right answer for them — none of them is about access, they drive
+// a `fakePages` with no database behind it, and the access decision is now visible in the fixture
+// rather than implied. What the gate actually DECIDES is measured against real Postgres and the
+// real permission engine in privatespace_realpg_test.go.
+type allowAllPages struct{}
+
+func (allowAllPages) AuthorizePageRead(context.Context, string) (bool, bool) { return true, true }
+
 func newRouter(e *Engine, pages PageSearcher) http.Handler {
 	r := chi.NewRouter()
 	// Mirror production: the authz middleware stamps verified memberships before handlers run. Tests
@@ -41,7 +53,7 @@ func newRouter(e *Engine, pages PageSearcher) http.Handler {
 		})
 	})
 	r.Route("/v1", func(r chi.Router) {
-		NewHandler(e, pages).Mount(r)
+		NewHandler(e, pages).WithPageRead(allowAllPages{}).Mount(r)
 	})
 	return r
 }
@@ -140,6 +152,70 @@ func TestAskEndpoint_GathersPageContext(t *testing.T) {
 	}
 	if len(pages.searched) == 0 {
 		t.Fatal("expected the search to be invoked for ask")
+	}
+}
+
+// AN UNWIRED READ GATE MUST REFUSE, NOT ANSWER — the behaviour WithPageRead's header argues for,
+// asserted rather than described.
+//
+// This is the one thing privatespace_realpg_test.go cannot see: it always wires a gate, because
+// what it measures is what the gate DECIDES. The two alternatives to refusing are both silent —
+// answering from every page in the workspace (the leak that guard exists for) or answering from
+// none, which produces a confident reply from zero grounding that reads exactly like "your
+// documentation does not cover this". /ask's four siblings take their text from the caller and
+// read no corpus, so they are unaffected and that is asserted here too: a fix that gated the whole
+// handler would break four working routes.
+func TestAskEndpoint_RefusesWhenNoPageReadGateIsWired(t *testing.T) {
+	srv := newAIFake(t, `{"content":[{"type":"text","text":"Run make deploy."}]}`)
+	defer srv.Close()
+	pages := &fakePages{
+		results: []model.Page{
+			{ID: "p-1", Title: "Deploy guide", ContentText: "Run make deploy.", Slug: "deploy", SpaceID: "s-1"},
+		},
+	}
+
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx := authz.WithMemberships(req.Context(), "u@ws1.com",
+				[]authz.Membership{{WorkspaceID: "ws-1", MemberID: "m"}})
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	})
+	// Deliberately NO WithPageRead — this is the production misconfiguration under test.
+	r.Route("/v1", func(r chi.Router) { NewHandler(New(meteredLensClient(srv.URL)), pages).Mount(r) })
+
+	do := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		return rr
+	}
+
+	rr := do("/v1/workspaces/ws-1/ai/ask", `{"question":"How do I deploy?"}`)
+	if rr.Code != http.StatusInternalServerError {
+		t.Errorf("[B-NILGATE] /ask with no read gate = %d, want 500. It answered instead of "+
+			"refusing: %s", rr.Code, rr.Body.String())
+	}
+	if len(pages.searched) != 0 {
+		t.Errorf("[B-NILSTORE] /ask with no read gate still ran the corpus search (%v) — the "+
+			"refusal must come BEFORE the store op, or an unfiltered result set exists in "+
+			"process whether or not it is returned", pages.searched)
+	}
+
+	// THE OTHER FOUR ROUTES READ NO CORPUS AND MUST BE UNTOUCHED.
+	for _, c := range []struct{ path, body string }{
+		{"/v1/workspaces/ws-1/ai/write", `{"prompt":"draft"}`},
+		{"/v1/workspaces/ws-1/ai/transform", `{"action":"summarize","text":"hello"}`},
+		{"/v1/workspaces/ws-1/ai/translate", `{"text":"hello","target_language":"French"}`},
+		{"/v1/workspaces/ws-1/ai/suggest-title", `{"content":"body"}`},
+	} {
+		if rr := do(c.path, c.body); rr.Code != http.StatusOK {
+			t.Errorf("[B-SIBLING] %s with no read gate = %d, want 200 — it takes its text from "+
+				"the caller and reads no corpus, so the gate is none of its business: %s",
+				c.path, rr.Code, rr.Body.String())
+		}
 	}
 }
 

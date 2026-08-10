@@ -469,6 +469,13 @@ func main() {
 	// stopped, and they select the FULL column list, so the leak there returned the whole document
 	// rather than an excerpt. Measured in internal/page/privatespace_realpg_test.go.
 	pageHandler.WithPageRead(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
+	// AND THE SEAM'S THIRD COPY, WHICH ANSWERS IN PROSE. /workspaces/{wsID}/ai/ask calls the same
+	// page.Store.Search, pastes each hit's content_text into the prompt it sends to Lens, and
+	// cites the hits back to the caller. A workspace member with no grant on a private space had
+	// its documents quoted to a third-party model on their request and got an answer grounded in
+	// them. Measured in internal/ai/privatespace_realpg_test.go; internal/ai/mainwiring_test.go
+	// is the tripwire on this line.
+	aiHandler.WithPageRead(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
 
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
