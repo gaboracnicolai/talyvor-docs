@@ -126,7 +126,48 @@ CONTROLS = [
     ),
 ]
 
-TESTS = [G_PRIVATE, G_SEMANTIC, G_WIRING]
+SEMANTIC_GO = "internal/search/semantic.go"
+G_SPACE = "TestSearch_SpaceFilter_AppliesToSemanticHalf_RealPG"
+
+SPACE_PREDICATE = "          AND ($4::text IS NULL OR p.space_id = $4)"
+
+# FAMILY S — the space filter on the semantic half. Separate family because it has a separate
+# guard and a separate defect; scoring them together would let one family's catches vouch for the
+# other's. Every S control names G_SPACE and declares the family-A guards must-stay-green, which is
+# what says the two fixes are independent rather than one change tested twice.
+CONTROLS_SPACE = [
+    (
+        "S1",
+        "the space predicate is a tautology (the parameter is bound but decides nothing)",
+        [(SEMANTIC_GO, SPACE_PREDICATE, "          AND ($4::text IS NULL OR TRUE)")],
+        [G_SPACE],
+        [G_PRIVATE, G_SEMANTIC, G_WIRING],
+    ),
+    (
+        "S2",
+        "the space predicate is INVERTED (<> instead of =)",
+        [(SEMANTIC_GO, SPACE_PREDICATE, "          AND ($4::text IS NULL OR p.space_id <> $4)")],
+        [G_SPACE],
+        [G_PRIVATE, G_SEMANTIC, G_WIRING],
+    ),
+    (
+        "S3",
+        "THE CALL SITE, not the query: the handler passes nil where it has a space_id",
+        [(HANDLER, "h.semantic.Search(ctx, wsID, q, spaceID, fetchLimit)",
+          "h.semantic.Search(ctx, wsID, q, nil, fetchLimit)")],
+        [G_SPACE],
+        [G_PRIVATE, G_SEMANTIC, G_WIRING],
+    ),
+    (
+        "S4",
+        "the IS NULL arm is dropped, so an unscoped search scopes to nothing",
+        [(SEMANTIC_GO, SPACE_PREDICATE, "          AND p.space_id = $4")],
+        [G_SPACE],
+        [G_PRIVATE, G_SEMANTIC, G_WIRING],
+    ),
+]
+
+TESTS = [G_PRIVATE, G_SEMANTIC, G_WIRING, G_SPACE]
 RUN_RE = "|".join(TESTS)
 
 
@@ -163,7 +204,7 @@ def main():
         print("DOCS_TEST_DATABASE_URL must be set — these controls need the real-PG guard to RUN.")
         return 2
 
-    before = {p: sha(p) for p in (HANDLER, STORE, MAIN)}
+    before = {p: sha(p) for p in (HANDLER, STORE, MAIN, SEMANTIC_GO)}
 
     ok, failing, out = run_suite()
     if not ok or failing:
@@ -173,7 +214,7 @@ def main():
     print(f"baseline: build ok, 0 failures across {len(TESTS)} guards\n")
 
     results = []
-    for cid, desc, edits, predicted, stay_green in CONTROLS:
+    for cid, desc, edits, predicted, stay_green in CONTROLS + CONTROLS_SPACE:
         originals = {}
         try:
             applied = 0
@@ -209,7 +250,7 @@ def main():
             for path, body in originals.items():
                 write(path, body)
 
-    after = {p: sha(p) for p in (HANDLER, STORE, MAIN)}
+    after = {p: sha(p) for p in (HANDLER, STORE, MAIN, SEMANTIC_GO)}
     restored = after == before
 
     print("=" * 100)

@@ -147,10 +147,10 @@ func TestSearch_ReturnsResultsAboveThreshold(t *testing.T) {
 		AddRow("pg-2", float64(0.81)).
 		AddRow("pg-3", float64(0.50))
 	pool.ExpectQuery(`page_embeddings.*<=>`).
-		WithArgs(pgxmock.AnyArg(), "ws-1", 10).
+		WithArgs(pgxmock.AnyArg(), "ws-1", 10, (*string)(nil)).
 		WillReturnRows(rows)
 
-	out, err := s.Search(context.Background(), "ws-1", "auth", 10)
+	out, err := s.Search(context.Background(), "ws-1", "auth", nil, 10)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestSearch_ReturnsResultsAboveThreshold(t *testing.T) {
 
 func TestSearch_ReturnsEmptyWhenLensUnconfigured(t *testing.T) {
 	s, pool := newSemantic(t, "")
-	out, err := s.Search(context.Background(), "ws-1", "x", 10)
+	out, err := s.Search(context.Background(), "ws-1", "x", nil, 10)
 	if err != nil {
 		t.Fatalf("Search no-lens: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestSearch_GracefulWhenLensDown(t *testing.T) {
 	defer srv.Close()
 	s, pool := newSemantic(t, srv.URL)
 
-	out, err := s.Search(context.Background(), "ws-1", "x", 10)
+	out, err := s.Search(context.Background(), "ws-1", "x", nil, 10)
 	if err != nil {
 		t.Fatalf("Search must degrade gracefully: %v", err)
 	}
