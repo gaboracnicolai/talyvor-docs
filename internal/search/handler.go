@@ -216,7 +216,10 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 			// doesn't keep the whole request hanging.
 			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 			defer cancel()
-			sem, semEr = h.semantic.Search(ctx, wsID, q, spaceID, fetchLimit)
+			// fetchLimit AND offset, the same pair the full-text half receives above. The
+			// semantic query took no offset at all, so every page of a semantic search was
+			// page 1 — see the note on SemanticSearch.Search.
+			sem, semEr = h.semantic.Search(ctx, wsID, q, spaceID, fetchLimit, offset)
 		}()
 	}
 	wg.Wait()
