@@ -52,6 +52,18 @@ type ApprovalRequest struct {
 	UpdatedAt   time.Time      `json:"updated_at"`
 }
 
+// PendingItem is an inbox row: the request plus the space its page
+// lives in. The space is NOT on approval_requests — it is joined from
+// pages — so it belongs to the one query that needs it rather than to
+// ApprovalRequest, where every other producer would leave it blank.
+//
+// The embedded struct is flattened by encoding/json, so the wire shape
+// is the ApprovalRequest one plus "space_id".
+type PendingItem struct {
+	ApprovalRequest
+	SpaceID string `json:"space_id"`
+}
+
 type ReviewDecision struct {
 	ID         string    `json:"id"`
 	RequestID  string    `json:"request_id"`
@@ -99,6 +111,24 @@ func scanRequest(s interface{ Scan(...any) error }) (*ApprovalRequest, error) {
 		return nil, err
 	}
 	return &r, nil
+}
+
+// scanPendingItem reads requestCols followed by p.space_id — the
+// SELECT list in ListPending, in that order. It is written out rather
+// than layered on scanRequest because a Scan takes its destinations
+// positionally: any drift between the two lists is a scan-count or
+// type error on the first real row, which
+// TestPending_CarriesTheSpaceThePageLivesIn_RealPG executes.
+func scanPendingItem(s interface{ Scan(...any) error }) (*PendingItem, error) {
+	var it PendingItem
+	if err := s.Scan(
+		&it.ID, &it.PageID, &it.WorkspaceID, &it.RequestedBy, &it.Reviewers,
+		&it.Message, &it.DueDate, &it.Status, &it.CreatedAt, &it.UpdatedAt,
+		&it.SpaceID,
+	); err != nil {
+		return nil, err
+	}
+	return &it, nil
 }
 
 func scanDecision(s interface{ Scan(...any) error }) (*ReviewDecision, error) {
@@ -416,14 +446,27 @@ func (s *Store) ListByPage(ctx context.Context, pageID string, wsIDs []string) (
 // (chi.URLParam "wsID") — a deceptive shape that let a caller name a
 // workspace they don't belong to. Now the scope is ANY($2) over the
 // caller's membership set, so a foreign workspace simply yields no rows.
-func (s *Store) ListPending(ctx context.Context, reviewerID string, wsIDs []string) ([]ApprovalRequest, error) {
+//
+// It returns PendingItem, not ApprovalRequest: an inbox row has to be
+// able to ADDRESS its page, and a page's address in this product is
+// /spaces/{spaceID}/pages/{pageID}. The request row carries only
+// page_id, so the space came back empty and the SPA's "Open" button
+// navigated to a URL its own route table sends to Not found. The JOIN
+// below is the whole fix (inbox_space_realpg_test.go).
+func (s *Store) ListPending(ctx context.Context, reviewerID string, wsIDs []string) ([]PendingItem, error) {
 	if s.pool == nil {
 		return nil, nil
 	}
+	// The pages JOIN can neither drop a row nor invent one:
+	// approval_requests.page_id is NOT NULL REFERENCES pages(id) ON
+	// DELETE CASCADE (0009), and pages.space_id is NOT NULL REFERENCES
+	// spaces(id) (0002). It is not a second tenancy gate either — the
+	// scope is still a.workspace_id = ANY($2), unchanged.
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+prefixed("a", requestCols)+`
+		`SELECT `+prefixed("a", requestCols)+`, p.space_id
         FROM approval_requests a
         JOIN review_decisions d ON d.request_id = a.id
+        JOIN pages p ON p.id = a.page_id
         WHERE d.reviewer_id = $1 AND d.decision = 'pending'
           AND a.workspace_id = ANY($2) AND a.status = 'pending'
         ORDER BY a.created_at DESC`,
@@ -433,13 +476,13 @@ func (s *Store) ListPending(ctx context.Context, reviewerID string, wsIDs []stri
 		return nil, fmt.Errorf("approval: list pending: %w", err)
 	}
 	defer rows.Close()
-	var out []ApprovalRequest
+	var out []PendingItem
 	for rows.Next() {
-		r, err := scanRequest(rows)
+		it, err := scanPendingItem(rows)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, *r)
+		out = append(out, *it)
 	}
 	return out, rows.Err()
 }

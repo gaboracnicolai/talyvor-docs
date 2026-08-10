@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, X } from "lucide-react";
-import { approvalApi, type ApprovalRequest } from "~/api/approval";
+import { approvalApi, type PendingApproval } from "~/api/approval";
 
 interface InboxProps {
   workspaceID: string;
@@ -46,7 +46,7 @@ export function ApprovalInboxPage({ workspaceID, onOpenPage }: InboxProps) {
               req={req}
               reviewerID={reviewerID}
               workspaceID={workspaceID}
-              onOpen={() => onOpenPage("", req.page_id)}
+              onOpen={() => onOpenPage(req.space_id, req.page_id)}
               onDecided={() =>
                 qc.invalidateQueries({
                   queryKey: ["approvals-pending", workspaceID, reviewerID],
@@ -66,17 +66,28 @@ function PendingRow({
   onOpen,
   onDecided,
 }: {
-  req: ApprovalRequest;
+  req: PendingApproval;
   reviewerID: string;
   workspaceID: string;
   onOpen: () => void;
   onDecided: () => void;
 }) {
-  // We don't have the page's space_id in the response, so we use
-  // an empty space prefix — the server's decide endpoint doesn't
-  // actually need the spaceID (it's URL-decorative). The page
-  // route is reconstructed by PageView once the user navigates in.
-  const spaceID = "";
+  // This was `const spaceID = ""`, justified by two claims. One was true and one was not,
+  // and both were MEASURED rather than re-argued:
+  //
+  //   · "the decide endpoint doesn't actually need the spaceID (it's URL-decorative)" — TRUE.
+  //     chi matches an empty {spaceID} segment and the route's enforcer resolves the page from
+  //     {pageID}, so `POST /v1/spaces//pages/{p}/approval/{r}/decide` answered 200 and recorded
+  //     the decision (internal/approval/inbox_space_realpg_test.go). Approve/Reject worked.
+  //   · "the page route is reconstructed by PageView once the user navigates in" — FALSE.
+  //     PageView never mounted: `paths.page("", id)` builds `/spaces//pages/{id}`, which
+  //     react-router normalises to `/spaces/pages/{id}`, and the app's route table resolves
+  //     BOTH to its catch-all. Open landed on Not found, every time.
+  //
+  // The response now carries the space (server-side JOIN to pages), so the URL is the real
+  // one in both places — decide included, which stops it depending on a router's tolerance
+  // for an empty path segment.
+  const spaceID = req.space_id;
 
   const decide = useMutation({
     mutationFn: (decision: "approved" | "rejected") =>

@@ -22,6 +22,15 @@ export interface ApprovalRequest {
   updated_at: string;
 }
 
+// An inbox row is an ApprovalRequest plus the space its page lives in. The space is not a
+// column on approval_requests — the server JOINs it from `pages` for this one query — so it
+// is a distinct type rather than an optional field on ApprovalRequest, where every other
+// producer would leave it undefined. Without it the inbox cannot build the page's address
+// (`/spaces/{spaceID}/pages/{pageID}`) and its Open button lands on Not found.
+export interface PendingApproval extends ApprovalRequest {
+  space_id: string;
+}
+
 export interface ReviewDecision {
   id: string;
   request_id: string;
@@ -75,7 +84,7 @@ export const approvalApi = {
     );
   },
   pending(workspaceID: string, reviewerID?: string) {
-    return apiRequest<ApprovalRequest[]>(
+    return apiRequest<PendingApproval[]>(
       `/v1/workspaces/${workspaceID}/approvals/pending${qs({ reviewer_id: reviewerID })}`,
     );
   },

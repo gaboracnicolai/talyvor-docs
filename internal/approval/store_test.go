@@ -256,11 +256,16 @@ func TestListPending_FiltersByReviewerWithPendingDecisions(t *testing.T) {
 	store, pool := newMockStore(t)
 	now := time.Now().UTC()
 
-	pool.ExpectQuery(`FROM approval_requests.*JOIN review_decisions.*reviewer_id.*workspace_id = ANY`).
+	// The statement must JOIN pages: an inbox row has to carry the space its page lives in,
+	// or the SPA cannot build the page's address. pgxmock never executes SQL, so this holds
+	// the statement TEXT and the column set — the real-Postgres pair
+	// (TestPending_CarriesTheSpaceThePageLivesIn_RealPG,
+	// TestPending_ReportsEachRowsOwnSpace_RealPG) is what holds the VALUE.
+	pool.ExpectQuery(`FROM approval_requests.*JOIN review_decisions.*JOIN pages.*reviewer_id.*workspace_id = ANY`).
 		WithArgs("u-alice", []string{"ws-1"}).
-		WillReturnRows(pgxmock.NewRows(testRequestCols()).
+		WillReturnRows(pgxmock.NewRows(append(testRequestCols(), "space_id")).
 			AddRow("req-1", "pg-1", "ws-1", "u-author", []string{"u-alice"},
-				"please look", (*time.Time)(nil), "pending", now, now))
+				"please look", (*time.Time)(nil), "pending", now, now, "sp-1"))
 
 	out, err := store.ListPending(context.Background(), "u-alice", []string{"ws-1"})
 	if err != nil {
@@ -268,6 +273,9 @@ func TestListPending_FiltersByReviewerWithPendingDecisions(t *testing.T) {
 	}
 	if len(out) != 1 || out[0].ID != "req-1" {
 		t.Fatalf("unexpected: %+v", out)
+	}
+	if out[0].SpaceID != "sp-1" {
+		t.Fatalf("SpaceID = %q, want %q", out[0].SpaceID, "sp-1")
 	}
 }
 
