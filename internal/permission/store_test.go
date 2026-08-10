@@ -15,6 +15,24 @@ func newMockStore(t *testing.T) (*Store, pgxmock.PgxPoolIface) {
 		t.Fatalf("pgxmock.NewPool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// EVERY EXPECTATION IN THIS PACKAGE IS VERIFIED, NOT JUST THE ONES SOMEBODY REMEMBERED.
+	//
+	// 3 of this package's 7 expectations were unverified. Control E3 deleted Grant's
+	// INSERT and reddened EIGHTEEN tests in TEN packages — this is the authorization spine, and
+	// the blast radius is the reason the check belongs on the constructor rather than in the
+	// three tests that happen to have it.
+	//
+	// pgxmock ignores an expectation that was never called unless you ASK it, and this package
+	// asked PER TEST, where somebody remembered — which is the shape that leaves the next test
+	// written uncovered. Measured by scripts/w31-partial-coverage-write-controls.py, family E.
+	//
+	// Registered AFTER pool.Close so it runs BEFORE it (t.Cleanup is LIFO). t.Errorf, not
+	// t.Fatalf: a cleanup must not Goexit out of another cleanup.
+	t.Cleanup(func() {
+		if err := pool.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet or mismatched pgxmock expectations: %v", err)
+		}
+	})
 	return newStore(pool), pool
 }
 
@@ -63,10 +81,18 @@ func TestGrant_RejectsTeamSubjectType(t *testing.T) {
 	// tells an admin they shared when they didn't. Reject it at write time so the failure is loud.
 	// The ExpectExec is allowed so the ONLY source of a non-nil err is the write-time validation we
 	// add — not an unexpected-call mock error (RED without it: team reaches the INSERT and succeeds).
+	//
+	// `.Maybe()` IS LOAD-BEARING AND IS WHY THIS TEST IS THE ONE THAT PUSHED BACK. Every expectation
+	// in this package is now verified on the constructor, and this is the single place in the repo
+	// that registers one it EXPECTS NOT TO BE CONSUMED. Without Maybe the check reds this test for
+	// the opposite of its meaning: "the INSERT never happened" is the result it exists to prove.
+	// Deleting the expectation instead would be worse — a team grant reaching the INSERT would then
+	// produce an unexpected-call error, err would be non-nil, and the assertion below would pass for
+	// exactly the wrong reason.
 	store, pool := newMockStore(t)
 	pool.ExpectExec(`INSERT INTO permissions`).
 		WithArgs("space", "sp-1", "team", "t-eng", "view", "ws-1", "u-admin").
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		WillReturnResult(pgxmock.NewResult("INSERT", 1)).Maybe()
 	err := store.Grant(context.Background(), Permission{
 		ResourceType: ResourceSpace, ResourceID: "sp-1",
 		SubjectType: "team", SubjectID: "t-eng",

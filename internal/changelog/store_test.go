@@ -18,6 +18,24 @@ func newMockStore(t *testing.T, track issueLookup) (*Store, pgxmock.PgxPoolIface
 		t.Fatalf("pgxmock.NewPool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// EVERY EXPECTATION IN THIS PACKAGE IS VERIFIED, NOT JUST THE ONES SOMEBODY REMEMBERED.
+	//
+	// 8 of this package's 9 expectations were unverified. Control E6 deleted
+	// DeleteEntry's `DELETE FROM changelog_entries` and NOTHING IN THE REPO SPOKE — not even
+	// SEC4_L2, which names this route: its cross-tenant 404 comes from the permission enforcer
+	// upstream, not from this store's own scoping. A published entry could survive its delete.
+	//
+	// pgxmock ignores an expectation that was never called unless you ASK it, and this package
+	// asked PER TEST, where somebody remembered — which is the shape that leaves the next test
+	// written uncovered. Measured by scripts/w31-partial-coverage-write-controls.py, family E.
+	//
+	// Registered AFTER pool.Close so it runs BEFORE it (t.Cleanup is LIFO). t.Errorf, not
+	// t.Fatalf: a cleanup must not Goexit out of another cleanup.
+	t.Cleanup(func() {
+		if err := pool.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet or mismatched pgxmock expectations: %v", err)
+		}
+	})
 	return newStore(pool, track), pool
 }
 
