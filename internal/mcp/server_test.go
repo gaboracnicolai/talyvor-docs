@@ -119,6 +119,8 @@ type fakeAccess struct{ allow bool }
 
 func (f fakeAccess) CanEditPage(_ context.Context, _, _ string) (bool, error)  { return f.allow, nil }
 func (f fakeAccess) CanEditSpace(_ context.Context, _, _ string) (bool, error) { return f.allow, nil }
+func (f fakeAccess) CanViewPage(_ context.Context, _, _ string) (bool, error)  { return f.allow, nil }
+func (f fakeAccess) CanViewSpace(_ context.Context, _, _ string) (bool, error) { return f.allow, nil }
 
 func newTestServer(t *testing.T, pages pageDeps, spaces spaceDeps, analyticsDep analyticsDeps, aiDep aiDeps, freshDep freshDeps) *Server {
 	t.Helper()

@@ -43,8 +43,14 @@ import (
 // the limiter, so the negative half is unchanged.
 func mcpLimitChain(t *testing.T, d *testutil.DB, l *ratelimit.Limiter) http.Handler {
 	t.Helper()
+	// ⚠ WithAccess WAS ABSENT HERE UNTIL THE READ TOOLS WERE GATED, and its absence was invisible
+	// while the controller was a WRITE gate: this chain drives ask_docs and get_page, neither of
+	// which asked it anything. Fail-closed reads turned that into a -32001 on get_page and this
+	// test's own anchor said so — the same way #78's cross-tenant test caught its fail-closed
+	// choice. Wired now, so the burst half runs through the production shape rather than a subset.
 	srv := mcp.New(page.NewStore(d.Pool), space.NewStore(d.Pool), nil,
-		askEngine(t, "Run make deploy."), nil, "test").WithRateLimit(l)
+		askEngine(t, "Run make deploy."), nil, "test").
+		WithRateLimit(l).WithAccess(mcpAccess(d))
 	r := chi.NewRouter()
 	r.Group(func(r chi.Router) {
 		exempt := func(string) bool { return false }

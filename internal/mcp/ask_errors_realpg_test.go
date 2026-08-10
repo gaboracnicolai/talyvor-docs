@@ -187,8 +187,13 @@ func TestMCPAskDocsReportsFailureRatherThanAnsweringUngrounded_RealPG(t *testing
 		t.Fatalf("PREMISE: the healthy engine did not answer (%q, %v)", a, err)
 	}
 
+	// ⚠ WithAccess WAS ABSENT HERE UNTIL ask_docs's GROUNDING CORPUS WAS GATED, and its absence was
+	// invisible while the controller was a WRITE gate — this test drives one read tool, which asked
+	// it nothing. Fail-closed reads emptied `sources` and the healthy case's own anchor said so.
+	// Wired to the MIGRATED database on purpose: the file's rule is that only the page store under
+	// test is swapped, so a case never fails at the door for the reason it is trying to measure past.
 	newSrv := func(pages *page.Store, engine *ai.Engine) *mcp.Server {
-		return mcp.New(pages, space.NewStore(d.Pool), nil, engine, nil, "test")
+		return mcp.New(pages, space.NewStore(d.Pool), nil, engine, nil, "test").WithAccess(mcpAccess(d))
 	}
 	good := askEngine(t, "Run make deploy.")
 
