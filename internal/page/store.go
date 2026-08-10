@@ -177,16 +177,47 @@ func walkContent(node any, b *strings.Builder) {
 
 // ─── columns / scanner ─────────────────────────────────────
 
-const columns = `id, space_id, workspace_id, parent_id, title, slug,
-    content, content_text, icon, cover_url,
-    position, depth, is_template, created_by, updated_by,
-    linked_issues, ai_cost_usd, own_ai_cost_usd,
-    view_count, last_viewed_at,
-    last_verified_at, verified_by, stale_after_days,
-    doc_status,
-    locked, locked_by, locked_at,
-    COALESCE(page_type, 'document') AS page_type,
-    created_at, updated_at`
+// columnExprs is THE ordered projection of a pages row, written once as a function of the table
+// alias. Its order is the argument order of scan/scanPlus and nothing else may reorder it.
+//
+// ⚠ IT IS A FUNCTION RATHER THAN A STRING BECAUSE DERIVING THE ALIASED FORM BY EDITING THE
+// UNALIASED ONE IS WHAT BROKE. prefixedColumns used to `strings.Split(columns, ", ")` and glue
+// "p." onto each part. Two things were wrong with that and both were live in production:
+//
+//   - `columns` was a multi-line raw string, so its separator is ",\n    " and not ", ". The
+//     first column on every continuation line was therefore never qualified — including
+//     `created_at`, which `spaces` also has, so the JOIN in SearchWithRank made it AMBIGUOUS
+//     (SQLSTATE 42702).
+//   - a column can be an EXPRESSION. `COALESCE(page_type, 'document')` split into two parts and
+//     the qualifier landed on the literal: `COALESCE(page_type, p.'document')`, a syntax error
+//     (SQLSTATE 42601).
+//
+// Neither could be seen by the tests that existed: every SearchWithRank test drove pgxmock, which
+// regex-matches the query text and never asks Postgres to compile it. The guards that can see it
+// are internal/page/searchrank_realpg_test.go and internal/search/search_realpg_test.go, and they
+// execute the SQL. A future column that is an expression must be written here, once, in both
+// forms at once — which is the whole point of the alias being a parameter.
+func columnExprs(alias string) []string {
+	p := ""
+	if alias != "" {
+		p = alias + "."
+	}
+	return []string{
+		p + "id", p + "space_id", p + "workspace_id", p + "parent_id", p + "title", p + "slug",
+		p + "content", p + "content_text", p + "icon", p + "cover_url",
+		p + "position", p + "depth", p + "is_template", p + "created_by", p + "updated_by",
+		p + "linked_issues", p + "ai_cost_usd", p + "own_ai_cost_usd",
+		p + "view_count", p + "last_viewed_at",
+		p + "last_verified_at", p + "verified_by", p + "stale_after_days",
+		p + "doc_status",
+		p + "locked", p + "locked_by", p + "locked_at",
+		"COALESCE(" + p + "page_type, 'document') AS page_type",
+		p + "created_at", p + "updated_at",
+	}
+}
+
+// columns is the unaliased projection — the form every single-table read uses.
+var columns = strings.Join(columnExprs(""), ", ")
 
 func scan(s interface{ Scan(...any) error }) (*model.Page, error) {
 	var p model.Page
@@ -836,12 +867,10 @@ func scanPlus(s interface{ Scan(...any) error }, extras ...any) (*model.Page, er
 	return withDerivedTotal(&p), nil
 }
 
+// prefixedColumns is the same projection qualified with a table alias, for reads that JOIN.
+// See columnExprs for why it is built from the list rather than from `columns`.
 func prefixedColumns(alias string) string {
-	parts := strings.Split(columns, ", ")
-	for i, p := range parts {
-		parts[i] = alias + "." + p
-	}
-	return strings.Join(parts, ", ")
+	return strings.Join(columnExprs(alias), ", ")
 }
 
 // Search runs Postgres full-text search backed by the GIN index on
