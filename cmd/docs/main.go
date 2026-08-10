@@ -463,6 +463,12 @@ func main() {
 	// titles and a ts_headline excerpt of the body. Same engine, same page-meta looker, no new access
 	// model. Deleting this line reopens that leak; internal/search/mainwiring_test.go is the tripwire.
 	searchHandler.WithAccess(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
+	// AND THE SAME SEAM'S SECOND COPY. page.Handler mounts two more query-shaped reads —
+	// /workspaces/{wsID}/pages/search and /pages/stale — outside the /spaces/{spaceID}/pages
+	// sub-router and therefore outside every pageEnf gate on it. They authorized the workspace and
+	// stopped, and they select the FULL column list, so the leak there returned the whole document
+	// rather than an excerpt. Measured in internal/page/privatespace_realpg_test.go.
+	pageHandler.WithPageRead(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
 
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles

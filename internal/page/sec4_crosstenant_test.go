@@ -14,6 +14,7 @@ import (
 	"github.com/talyvor/docs/internal/page"
 	"github.com/talyvor/docs/internal/permission"
 	"github.com/talyvor/docs/internal/space"
+	"github.com/talyvor/docs/internal/spaceauth"
 	"github.com/talyvor/docs/internal/testutil"
 )
 
@@ -65,7 +66,13 @@ func newV1Chain(t *testing.T, d *testutil.DB) http.Handler {
 	// Real enforcers wired (Require is now fail-closed on nil): the page-access gates run for real,
 	// same as main.go, so a legit member reaches their own page (200) and the cross-tenant denials
 	// below are the workspace boundary — not the nil-enforcer deny.
-	pageHandler := page.NewHandler(pageStore, d.Pool).WithAccess(pageEnf, spaceEnf)
+	// WithPageRead is the gate for the two WORKSPACE-scoped routes (/pages/search, /pages/stale),
+	// which no enforcer reaches — their target is a query, not an id. It is nil-fails-closed, so
+	// without this line those two routes return [] and this file's own ANCHOR assertions fail. That
+	// is how it should read: an unwired gate is an empty endpoint, not a silent leak.
+	pageHandler := page.NewHandler(pageStore, d.Pool).
+		WithAccess(pageEnf, spaceEnf).
+		WithPageRead(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
 	r := chi.NewRouter()
 	r.Route("/v1", func(r chi.Router) {
 		exempt := func(p string) bool { return strings.HasPrefix(p, "/v1/public/") }
