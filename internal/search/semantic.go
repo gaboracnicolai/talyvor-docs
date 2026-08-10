@@ -164,7 +164,13 @@ func (s *SemanticSearch) IndexPage(ctx context.Context, pageID, workspaceID, tex
 // the similarity threshold. Degrades to an empty result on any
 // upstream failure so callers can render "no semantic results"
 // instead of an error.
-func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, limit int) ([]SemanticResult, error) {
+//
+// spaceID SCOPES THE SEARCH TO ONE SPACE, and it is a parameter rather than a caller-side filter
+// because this half had no way to express it at all: the handler took one `space_id`, handed it to
+// page.SearchWithRank, and ran this query without it — so "search inside this space" answered with
+// pages from every other space in the workspace, on a row shape that carries no space_name to say
+// so. nil means the whole workspace, matching SearchWithRank's `$3::text IS NULL` arm.
+func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, spaceID *string, limit int) ([]SemanticResult, error) {
 	if !s.IsEnabled() {
 		return []SemanticResult{}, nil
 	}
@@ -196,9 +202,10 @@ func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, 
         FROM page_embeddings pe
         JOIN pages p ON p.id = pe.page_id
         WHERE p.workspace_id = $2 AND p.is_template = false
+          AND ($4::text IS NULL OR p.space_id = $4)
         ORDER BY pe.embedding <=> $1::vector
         LIMIT $3`,
-		encoded, workspaceID, limit,
+		encoded, workspaceID, limit, spaceID,
 	)
 	if err != nil {
 		slog.Warn("search: pgvector query", slog.String("err", err.Error()))

@@ -216,7 +216,7 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 			// doesn't keep the whole request hanging.
 			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 			defer cancel()
-			sem, semEr = h.semantic.Search(ctx, wsID, q, fetchLimit)
+			sem, semEr = h.semantic.Search(ctx, wsID, q, spaceID, fetchLimit)
 		}()
 	}
 	wg.Wait()

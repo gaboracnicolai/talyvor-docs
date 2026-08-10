@@ -194,10 +194,10 @@ func TestSearchEmbed_CarriesPerWorkspaceJWT_NotGlobalKey(t *testing.T) {
 
 	rows := pgxmock.NewRows([]string{"page_id", "similarity"}).AddRow("pg-1", float64(0.93))
 	pool.ExpectQuery(`page_embeddings.*<=>`).
-		WithArgs(pgxmock.AnyArg(), "wsB", 10).
+		WithArgs(pgxmock.AnyArg(), "wsB", 10, (*string)(nil)).
 		WillReturnRows(rows)
 
-	if _, err := s.Search(context.Background(), "wsB", "auth", 10); err != nil {
+	if _, err := s.Search(context.Background(), "wsB", "auth", nil, 10); err != nil {
 		t.Fatalf("Search: %v", err)
 	}
 
@@ -219,7 +219,7 @@ func TestSearch_FailsClosedOnMintFailure(t *testing.T) {
 	defer f.Close()
 	s, _ := meteredSemantic(t, f.URL) // no pgvector query expected — embed bails before the DB
 
-	out, err := s.Search(context.Background(), "wsA", "auth", 10)
+	out, err := s.Search(context.Background(), "wsA", "auth", nil, 10)
 	if !errors.Is(err, ErrTokenUnavailable) {
 		t.Fatalf("Search returned err=%v out=%v, want ErrTokenUnavailable (fail-closed)", err, out)
 	}
@@ -267,23 +267,23 @@ func TestTwoTenants_DecisiveEndToEndIsolation(t *testing.T) {
 	// pgxmock enforces expectation order — declare them in the real call sequence: wsA index
 	// (upsert), wsA search (pgvector query scoped to wsA), then the same pair for wsB.
 	pool.ExpectExec(`INSERT INTO page_embeddings`).WithArgs("pgA", pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	pool.ExpectQuery(`page_embeddings.*<=>`).WithArgs(pgxmock.AnyArg(), "wsA", 10).
+	pool.ExpectQuery(`page_embeddings.*<=>`).WithArgs(pgxmock.AnyArg(), "wsA", 10, (*string)(nil)).
 		WillReturnRows(pgxmock.NewRows([]string{"page_id", "similarity"}).AddRow("pgA", float64(0.9)))
 	pool.ExpectExec(`INSERT INTO page_embeddings`).WithArgs("pgB", pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	pool.ExpectQuery(`page_embeddings.*<=>`).WithArgs(pgxmock.AnyArg(), "wsB", 10).
+	pool.ExpectQuery(`page_embeddings.*<=>`).WithArgs(pgxmock.AnyArg(), "wsB", 10, (*string)(nil)).
 		WillReturnRows(pgxmock.NewRows([]string{"page_id", "similarity"}).AddRow("pgB", float64(0.9)))
 
 	ctx := context.Background()
 	if err := s.IndexPage(ctx, "pgA", "wsA", "alpha body"); err != nil {
 		t.Fatalf("wsA index: %v", err)
 	}
-	if _, err := s.Search(ctx, "wsA", "alpha", 10); err != nil {
+	if _, err := s.Search(ctx, "wsA", "alpha", nil, 10); err != nil {
 		t.Fatalf("wsA search: %v", err)
 	}
 	if err := s.IndexPage(ctx, "pgB", "wsB", "beta body"); err != nil {
 		t.Fatalf("wsB index: %v", err)
 	}
-	if _, err := s.Search(ctx, "wsB", "beta", 10); err != nil {
+	if _, err := s.Search(ctx, "wsB", "beta", nil, 10); err != nil {
 		t.Fatalf("wsB search: %v", err)
 	}
 
