@@ -1071,7 +1071,7 @@ fresh volume → `migrations applied count=14 versions=0001..0014` → `schema_m
 | SEC-4 cross-tenant (workspace routes) | **Closed this run** — page search/stale, space list/create |
 | Client-supplied authority | **CLOSED (Run 2).** Root + all 8 instances + a residual sweep; `ActorOrEmpty`/`WorkspaceOrEmpty` now banned by semgrep. One documented residual: `collab` (not an authority hole) |
 | Migration runner (bar A) | **Built.** Subcommand + `schema_migrations` + 5 fail-closed guards + boot apply |
-| Boot / quick start | **Works.** `docker compose up -d` → healthy |
+| Boot / quick start | **Works, after two generated secrets.** `POSTGRES_PASSWORD` and `GATEWAY_AUTH_SECRET` are `${VAR:?}` in compose and blank in `.env.example`, so `cp .env.example .env && docker compose up -d` exits 1 with zero containers; supply them and it boots healthy |
 | LLM cost control | **Rate-limited per verified workspace** on 7 of 8 surfaces (Run 3). Bounds RATE, not cost — Docs still has no budget cap, and the async page-save indexer is uncovered. See §0 |
 | Request body caps | **Capped** — 4MB `/v1`+`/mcp`, 200MB imports (Run 3). Was: unbounded everywhere |
 | DB-outage behaviour | **Clean 503 + `/readyz`** (Run 3). Was: a 500 from authz's lookup, no readiness signal at all |
@@ -1244,11 +1244,17 @@ go vet ./... && go test -timeout 300s -race -count=1 ./...
 semgrep --config .semgrep/ --error          # the tenancy class-guard CI runs
 cd frontend && npm ci && npm run typecheck && npm run build
 
-cp .env.example .env && docker compose up -d   # boots; /healthz → {"ok":true}
+cp .env.example .env                           # then generate POSTGRES_PASSWORD and
+                                               # GATEWAY_AUTH_SECRET into it — both are
+                                               # `${VAR:?}` in compose and BLANK in the
+                                               # template, so `up -d` exits 1 with zero
+                                               # containers until you do. See the README
+                                               # quick start for the two lines.
+docker compose up -d                           # then: /healthz → {"ok":true}
 docs migrate                                   # apply schema standalone
 ```
 
 **Adding a migration:** drop `00NN_name.sql` in `migrations/`. It is embedded, applied on
 boot in `NNNN` order, and recorded in `schema_migrations`. Never edit an applied migration
 — the checksum guard will fail the boot, by design. Docs numbering is independent of the
-sibling repos; current high-water is **0014**.
+sibling repos; current high-water is **0018**.

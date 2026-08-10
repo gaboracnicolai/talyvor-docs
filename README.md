@@ -24,12 +24,25 @@ surface for customer-facing docs.
 | MCP integration          | ❌               | ❌             | ✅                 |
 | Self-hosted              | ✅ (paid)        | ❌             | ✅ (free)          |
 
-## Quick start (2 commands)
+## Quick start
+
+`.env.example` ships `POSTGRES_PASSWORD` and `GATEWAY_AUTH_SECRET`
+**blank on purpose** — a template carrying a working secret publishes
+it — and `docker-compose.yaml` declares both `${VAR:?}`. So copying the
+template is not enough: generate the two values first, or compose
+refuses to start, by name, before any container exists.
 
 ```bash
 cp .env.example .env
+printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 16)" >> .env
+printf 'GATEWAY_AUTH_SECRET=%s\n' "$(openssl rand -hex 32)" >> .env
 docker compose up -d
 ```
+
+(A later assignment in `.env` wins, so appending overrides the blank.
+`GATEWAY_AUTH_SECRET` must match the value the edge gateway signs —
+the same one Track uses — so on a real deployment set it, don't
+generate it.)
 
 - Docs UI: <http://localhost:4001>
 - API: <http://localhost:4000>
@@ -37,19 +50,27 @@ docker compose up -d
 
 The Postgres service is `pgvector/pgvector:pg16` so the semantic
 search index works out of the box. Schema migrations under
-`migrations/` are mounted into the container's init-db hook and run
-in order on first boot.
+`migrations/` are embedded in the API binary and applied by the docs
+service **on every boot**, in order, recorded in `schema_migrations`
+(`internal/migrate`) — a fresh volume and an existing one both
+converge to the current schema.
 
 ## Local development
 
+Nothing in the Go tree reads a `.env` file — `cmd/docs` takes its
+configuration from the process environment — so export the variables
+rather than copying the template:
+
 ```bash
-cp .env.example .env
+export DOCS_DATABASE_URL="postgres://docs:PASSWORD@localhost:5432/talyvor_docs?sslmode=disable"
+export GATEWAY_AUTH_SECRET="$(openssl rand -hex 32)"
+
 go run ./cmd/docs           # API on :4000
-cd frontend && npm run dev  # Vite on :5173
+cd frontend && npm run dev  # Vite on :5174
 ```
 
-The Vite dev server proxies API requests to :4000. You'll need a
-Postgres reachable via `DOCS_DATABASE_URL`.
+The Vite dev server proxies `/v1` to :4000. You'll need a Postgres
+reachable via `DOCS_DATABASE_URL`.
 
 ## Importing from Confluence / Notion
 
