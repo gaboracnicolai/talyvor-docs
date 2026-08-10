@@ -257,6 +257,7 @@ NOOPS = [
             "200. The check converts a silent no-op into a visible error.",
         old='''AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($2))`, id, wsIDs)''',
         new='''AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($2)) AND FALSE`, id, wsIDs)''',
+        fixed_tests=['TestSEC4_L2_SecondaryCrossTenant'],
     ),
     dict(
         name="P2  comment.Resolve           WHERE … AND FALSE",
@@ -266,6 +267,7 @@ NOOPS = [
 		resolvedBy, commentID,''',
         new='''        WHERE thread_id = (SELECT thread_id FROM page_comments WHERE id = $2) AND FALSE`,
 		resolvedBy, commentID,''',
+        fixed_tests=['TestResolve_ActuallyMarksTheRowResolved_RealPG', 'TestUnresolve_ActuallyClearsTheRow_RealPG'],
     ),
     dict(
         name="P3  comment.Unresolve         WHERE … AND FALSE",
@@ -275,6 +277,7 @@ NOOPS = [
 		commentID,''',
         new='''        WHERE thread_id = (SELECT thread_id FROM page_comments WHERE id = $1) AND FALSE`,
 		commentID,''',
+        fixed_tests=['TestUnresolve_ActuallyClearsTheRow_RealPG'],
     ),
     dict(
         name="P4  comment.Delete            WHERE … AND FALSE",
@@ -282,6 +285,7 @@ NOOPS = [
         why="the delete route answers 200 either way; no test reads the comment back.",
         old='''	_, err := s.pool.Exec(ctx, `DELETE FROM page_comments WHERE id = $1`, commentID)''',
         new='''	_, err := s.pool.Exec(ctx, `DELETE FROM page_comments WHERE id = $1 AND FALSE`, commentID)''',
+        fixed_tests=['TestDelete_ActuallyRemovesTheComment_RealPG'],
     ),
     dict(
         name="P5  customdomain.Verify       WHERE … AND FALSE",
@@ -293,6 +297,7 @@ NOOPS = [
 				id, wsIDs,''',
         new='''                WHERE id = $1 AND workspace_id = ANY($2) AND FALSE`,
 				id, wsIDs,''',
+        fixed_tests=['TestVerify_ActuallyPersistsTheVerifiedFlag_RealPG'],
     ),
     dict(
         name="P6  customdomain.Delete       WHERE … AND FALSE",
@@ -302,6 +307,7 @@ NOOPS = [
 		id, wsIDs,''',
         new='''		`DELETE FROM custom_domains WHERE id = $1 AND workspace_id = ANY($2) AND FALSE`,
 		id, wsIDs,''',
+        fixed_tests=['TestDelete_ActuallyRemovesTheDomain_RealPG', 'TestDelete_TheDeletedDomainNoLongerResolves_RealPG'],
     ),
     dict(
         name="P7  pagelink.Delete           WHERE … AND FALSE",
@@ -309,6 +315,7 @@ NOOPS = [
         why="`return err` with zero rows is nil; SyncLinks' own test is a mock.",
         old='''		`DELETE FROM page_links WHERE page_id = $1 AND issue_id = $2`,''',
         new='''		`DELETE FROM page_links WHERE page_id = $1 AND issue_id = $2 AND FALSE`,''',
+        fixed_tests=['TestSyncPageCosts_APageWithNoLinksIsWrittenAsZero'],
     ),
     dict(
         name="P8  space.Delete              WHERE … AND FALSE",
@@ -316,6 +323,24 @@ NOOPS = [
         why="same as D9 — nothing reads a deleted space back.",
         old='''	_, err := s.pool.Exec(ctx, `DELETE FROM spaces WHERE id = $1`, id)''',
         new='''	_, err := s.pool.Exec(ctx, `DELETE FROM spaces WHERE id = $1 AND FALSE`, id)''',
+        fixed_tests=['TestDelete_ActuallyRemovesTheSpace_RealPG', 'TestDelete_TheDeletedSpaceIsNoLongerListed_RealPG'],
+    ),
+    dict(
+        name="P10 customdomain.Verify       SET verified = false (row IS matched)",
+        file=CD, pkg="internal/customdomain", predict_any=False,
+        why="P5's ` AND FALSE` is caught through the RowsAffected⇒ErrNotFound branch, so it "
+            "never reaches the assertion that READS the flag back. This one matches the row, "
+            "returns RowsAffected 1 and no error, and does not set verified — so it DOES reach "
+            "that assertion. ⚠ IT IS CAUGHT TWICE AND THEREFORE JUSTIFIES NEITHER CATCHER ON ITS "
+            "OWN: the mock's expectation regex requires the literal `SET verified = true`, and "
+            "every mutation that stops setting the flag must delete that literal. The honest "
+            "reading is that the mock holds WHAT THE STATEMENT SAYS and only P5 — caught by this "
+            "merge's test alone — holds WHETHER POSTGRES DID IT. Kept because separating those "
+            "two is the point, and because it shows the query-text assertion is live.",
+        old="                SET verified = true, ssl_status = 'active', updated_at = NOW()",
+        new="                SET verified = false, ssl_status = 'active', updated_at = NOW()",
+        fixed_tests=["TestVerify_ActuallyPersistsTheVerifiedFlag_RealPG",
+                     "TestVerify_TxtMatch_FlipsVerifiedAndSSL"],
     ),
     dict(
         name="P9  block.Delete              WHERE … AND FALSE",
@@ -325,6 +350,7 @@ NOOPS = [
             "is a fact about the repo rather than about this harness.",
         old='''	_, err := s.pool.Exec(ctx, `DELETE FROM blocks WHERE id = $1`, id)''',
         new='''	_, err := s.pool.Exec(ctx, `DELETE FROM blocks WHERE id = $1 AND FALSE`, id)''',
+        fixed_tests=['TestBlock_InWorkspaces_CrossTenant_GateHoldsWithoutEnforcer_RealPG'],
     ),
 ]
 
@@ -490,13 +516,16 @@ def main():
         applied, ok, fails, pkgs, out, broken = apply_and_run(p, saved, "old", "new")
         by_any = (not broken) and len(fails) > 0
         agree = "as predicted" if by_any == p["predict_any"] else "⚠ PREDICTION WRONG"
+        exact = fails == sorted(p["fixed_tests"])
         head = ("BROKEN BUILD" if broken else
                 "SOMETHING SEES IT" if by_any else "NOTHING SEES IT")
         pres.append(dict(c=p, by_any=by_any, fails=fails, broken=broken, applied=applied,
-                         agree=agree))
+                         agree=agree, exact=exact))
         print(f"{head:<19} {p['name']}   ({agree})")
         print(f"      applied-on-disk={applied}  failing={fails or '{}'}  pkgs={pkgs or '{}'}")
         print(f"      predicted any={p['predict_any']} — {p['why']}")
+        print(f"      after the product-half merge, EXACTLY: {sorted(p['fixed_tests'])} — "
+              f"match={exact}")
         for t, lines in messages(out, set(fails)).items():
             print(f"      ↳ {t}: {' | '.join(lines)[:220]}")
         print()
@@ -554,16 +583,31 @@ def main():
         # The red→green half. The fix in this merge is the MOCK check, so it is FAMILY D that must
         # become fully visible; FAMILY P is a real-Postgres question a mock cannot answer and its
         # escapes are REPORTED, not asserted away.
+        # W31_FIXED now means BOTH merges are applied: `3c8fbb2`'s mock check (family D and M)
+        # and the product-level real-PG assertions (family P). Before the second merge every
+        # `fixed_tests` list below was empty in practice and this block failed — that is the
+        # red-first record for the product half.
         escaped = [r["c"]["name"] for r in dres if not r["by_target"]]
-        if escaped:
-            print(f"\nW31_FIXED: {len(escaped)} FAMILY-D CONTROL(S) STILL ESCAPE THEIR OWN MOCK "
-                  f"TEST — the fix is incomplete:")
-            for e in escaped:
-                print(f"    · {e}")
+        drifted = [f'{r["c"]["name"]}  got {r["fails"]} want {sorted(r["c"]["fixed_tests"])}'
+                   for r in pres if not r["exact"]]
+        if escaped or drifted:
+            if escaped:
+                print(f"\nW31_FIXED: {len(escaped)} FAMILY-D CONTROL(S) STILL ESCAPE THEIR OWN "
+                      f"MOCK TEST — the mock half is incomplete:")
+                for e in escaped:
+                    print(f"    · {e}")
+            if drifted:
+                print(f"\nW31_FIXED: {len(drifted)} FAMILY-P CONTROL(S) DID NOT PRODUCE THE "
+                      f"PREDICTED FAILING SET — a catch by the wrong test is not this merge's "
+                      f"claim:")
+                for e in drifted:
+                    print(f"    · {e}")
             return 1
-        print(f"\nW31_FIXED: all {len(dres)} FAMILY-D controls are now caught by the very mock "
-              f"test whose expectation names the write. Every D prediction above is falsified, "
-              f"which is the point. FAMILY P is unchanged by design — see the summary.")
+        print(f"\nW31_FIXED: all {len(dres)} FAMILY-D controls are caught by the very mock test "
+              f"whose expectation names the write, and all {len(pres)} FAMILY-P controls produce "
+              f"EXACTLY the failing set predicted for them. Every D and P prediction recorded "
+              f"above describes the tree BEFORE these merges and is now falsified, which is the "
+              f"point.")
     return 0 if clean else 1
 
 
