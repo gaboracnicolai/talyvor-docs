@@ -182,19 +182,21 @@ type driverValue = any
 
 func TestUpdate_AppendsNewVersionOnContentChange(t *testing.T) {
 	store, pool := newMockStore(t)
-	// Re-fetch existing page so the store can compare content.
-	pool.ExpectQuery(`SELECT .* FROM pages WHERE id = \$1`).
-		WithArgs("pg-1").
-		WillReturnRows(pageRow("pg-1", "Old", "old", 0, nil))
-	// Updated page returned from UPDATE. The SET clause includes
-	// content, content_text, updated_by, updated_at, plus the WHERE
-	// id arg — five total.
+	// Updated page returned from UPDATE ... RETURNING. The SET clause includes
+	// content, content_text, updated_by, updated_at, plus the WHERE id arg — five total.
+	//
+	// THE RETURNED TITLE IS DELIBERATELY "New": the snapshot's title and its content must
+	// BOTH come from this row. There used to be a pre-update `SELECT ... FROM pages` here
+	// supplying the title, and both rows in this test were titled "Old" — so the mock could
+	// not tell the two sources apart, and neither could any other test in the repo (zero of
+	// them ever saved a title). No pre-update read is expected now; if one is reintroduced,
+	// the ordered expectations below fail on the unexpected query.
 	pool.ExpectQuery(`UPDATE pages SET`).
 		WithArgs(
 			pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
 			pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
-		WillReturnRows(pageRow("pg-1", "Old", "old", 0, nil))
+		WillReturnRows(pageRow("pg-1", "New", "old", 0, nil))
 	// Lookup max version.
 	pool.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM page_versions`).
 		WithArgs("pg-1").
@@ -202,7 +204,7 @@ func TestUpdate_AppendsNewVersionOnContentChange(t *testing.T) {
 	// Insert version 4 — now carries workspace_id (from the updated page). History is
 	// append-only: NO prune DELETE follows (removed; see TestVersions_AppendOnly_*_RealPG).
 	pool.ExpectExec(`INSERT INTO page_versions \(page_id, workspace_id, version`).
-		WithArgs("pg-1", "ws-1", 4, "Old", "{}", "editor").
+		WithArgs("pg-1", "ws-1", 4, "New", "{}", "editor").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if _, err := store.Update(context.Background(), "pg-1", map[string]any{
@@ -210,6 +212,15 @@ func TestUpdate_AppendsNewVersionOnContentChange(t *testing.T) {
 		"updated_by": "editor",
 	}); err != nil {
 		t.Fatalf("Update: %v", err)
+	}
+	// WITHOUT THIS, THE WithArgs ABOVE CANNOT FAIL. Update writes the snapshot with
+	// `_, _ = s.pool.Exec(...)` — it discards the Exec error — so a pgxmock argument mismatch
+	// is swallowed by the production code and the test still exits 0. Measured: control V4 in
+	// scripts/w31-version-title-controls.py fills the snapshot title from the wrong column and
+	// this test stayed GREEN until this check was added. internal/page had 6 ExpectExec
+	// expectations and ZERO ExpectationsWereMet calls; the rest of the repo calls it 31 times.
+	if err := pool.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet or mismatched pgxmock expectations: %v", err)
 	}
 }
 

@@ -437,19 +437,6 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 		}
 	}
 
-	// Read the pre-update title so the new version snapshot lines up
-	// with what was just saved (we don't expose a separate "title at
-	// version N" UI; the version's title is the canonical name at
-	// snapshot time).
-	var existing *model.Page
-	if contentChanged {
-		got, err := s.GetByID(ctx, id)
-		if err != nil {
-			return nil, fmt.Errorf("page: pre-update read: %w", err)
-		}
-		existing = got
-	}
-
 	// The closed set is enforced on BOTH write paths — an allowlist entry only says the column
 	// may be written, never that any string may go in it.
 	if v, ok := updates["page_type"]; ok {
@@ -519,10 +506,18 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 		nextVer++
 
 		updatedBy, _ := updates["updated_by"].(string)
+		// BOTH columns come from `out` — the row returned by the UPDATE above — so the
+		// snapshot is a state the page was ACTUALLY IN. The title used to be read from a
+		// separate pre-update SELECT while the content came from `out`, which paired a title
+		// from before the save with content from after it: a save changing both recorded a
+		// combination that never existed, and RestoreVersion wrote that combination back —
+		// restoring the NEWEST version silently renamed the live page to its previous title.
+		// The two sources agree on any save that touches only one of the fields, which is why
+		// a suite with zero title-changing saves was green over it for the column's whole life.
 		_, _ = s.pool.Exec(ctx,
 			`INSERT INTO page_versions (page_id, workspace_id, version, title, content, created_by)
             VALUES ($1, $2, $3, $4, $5, $6)`,
-			id, out.WorkspaceID, nextVer, existing.Title, out.Content, updatedBy,
+			id, out.WorkspaceID, nextVer, out.Title, out.Content, updatedBy,
 		)
 		// Reconcile page_links → Track issue embeds. Best-effort:
 		// a sync failure shouldn't fail the page save. The next
