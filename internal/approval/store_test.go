@@ -17,6 +17,24 @@ func newMockStore(t *testing.T) (*Store, pgxmock.PgxPoolIface) {
 		t.Fatalf("pgxmock.NewPool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// EVERY EXPECTATION IN THIS PACKAGE IS VERIFIED, NOT JUST THE ONES SOMEBODY REMEMBERED.
+	//
+	// 7 of this package's 27 expectations were unverified. Control E1 deleted the
+	// `UPDATE pages SET doc_status` out of PublishApproved and `go test ./...` stayed GREEN
+	// ACROSS THE WHOLE REPO on real Postgres — a page could be published without its status
+	// ever changing and nothing anywhere said so.
+	//
+	// pgxmock ignores an expectation that was never called unless you ASK it, and this package
+	// asked PER TEST, where somebody remembered — which is the shape that leaves the next test
+	// written uncovered. Measured by scripts/w31-partial-coverage-write-controls.py, family E.
+	//
+	// Registered AFTER pool.Close so it runs BEFORE it (t.Cleanup is LIFO). t.Errorf, not
+	// t.Fatalf: a cleanup must not Goexit out of another cleanup.
+	t.Cleanup(func() {
+		if err := pool.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet or mismatched pgxmock expectations: %v", err)
+		}
+	})
 	return newStore(pool), pool
 }
 

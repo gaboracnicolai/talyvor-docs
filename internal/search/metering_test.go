@@ -125,6 +125,24 @@ func meteredSemantic(t *testing.T, lensURL string) (*SemanticSearch, pgxmock.Pgx
 		t.Fatalf("pgxmock.NewPool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// EVERY EXPECTATION IN THIS PACKAGE IS VERIFIED, NOT JUST THE ONES SOMEBODY REMEMBERED.
+	//
+	// 4 of this package's 10 expectations were unverified. Control E8 deleted the
+	// embedding upsert out of IndexPage; the test that names it stayed green and three siblings
+	// that DO call the check spoke instead — the clearest evidence in the family that the check
+	// is what does the work, since all three reported an expectation that was never matched.
+	//
+	// pgxmock ignores an expectation that was never called unless you ASK it, and this package
+	// asked PER TEST, where somebody remembered — which is the shape that leaves the next test
+	// written uncovered. Measured by scripts/w31-partial-coverage-write-controls.py, family E.
+	//
+	// Registered AFTER pool.Close so it runs BEFORE it (t.Cleanup is LIFO). t.Errorf, not
+	// t.Fatalf: a cleanup must not Goexit out of another cleanup.
+	t.Cleanup(func() {
+		if err := pool.ExpectationsWereMet(); err != nil {
+			t.Errorf("unmet or mismatched pgxmock expectations: %v", err)
+		}
+	})
 	client := lensintegration.New(lensURL, "GLOBAL-ADMIN-KEY")
 	prov := lenscreds.New(lensURL, "GLOBAL-ADMIN-KEY", lenscreds.Options{})
 	s := newSemanticSearch(client, pool).WithLensURL(lensURL).WithTokenProvider(prov)
