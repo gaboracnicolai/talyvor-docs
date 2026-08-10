@@ -55,7 +55,7 @@ func TestSearch_SemanticOnlyRow_RespectsPageAccess(t *testing.T) {
 	// that the SEMANTIC half over-fetches too. (The Lens embed is one call either way — the window
 	// is a pgvector LIMIT, so a wider one costs no extra spend.)
 	pool.ExpectQuery(`page_embeddings.*<=>`).
-		WithArgs(pgxmock.AnyArg(), "ws-1", 40, (*string)(nil)).
+		WithArgs(pgxmock.AnyArg(), "ws-1", 40, (*string)(nil), 0).
 		WillReturnRows(pgxmock.NewRows([]string{"page_id", "similarity"}).
 			AddRow("private-memo", float64(0.93)).
 			AddRow("public-handbook", float64(0.88)))

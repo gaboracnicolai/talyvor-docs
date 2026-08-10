@@ -170,7 +170,30 @@ func (s *SemanticSearch) IndexPage(ctx context.Context, pageID, workspaceID, tex
 // page.SearchWithRank, and ran this query without it — so "search inside this space" answered with
 // pages from every other space in the workspace, on a row shape that carries no space_name to say
 // so. nil means the whole workspace, matching SearchWithRank's `$3::text IS NULL` arm.
-func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, spaceID *string, limit int) ([]SemanticResult, error) {
+//
+// offset IS THE SAME DEFECT ON THE OTHER PAGINATION PARAMETER, and it was worse than a repeat.
+// The handler reads one `offset`; SearchWithRank applied it and this query had no OFFSET at all, so
+// EVERY page of a semantic search was page 1 — `offset=4` over four rows still returned rows 1-2,
+// which made the semantic tail unreachable at every offset. On type=all — the default when the
+// caller names no type — the stale rows then out-ranked and displaced the full-text rows that HAD
+// paged correctly. It clamps and bounds exactly as SearchWithRank does, so the two halves cannot
+// drift.
+//
+// ⚠ WHO COULD REACH IT, MEASURED RATHER THAN ASSUMED: `offset` is a query parameter of the public
+// HTTP endpoint, and no client in this repo sends one today — SearchModal calls useSearch with no
+// options, and the two MCP call sites pass a literal 0. So this was a broken parameter on the API
+// surface rather than a broken screen. (useSearch's react-query key omits `offset` while carrying
+// every other option, which is the same half-honoured shape one layer up; it is latent for the
+// same reason and is NOT changed here.)
+//
+// ⚠ MEASURED, NOT FIXED HERE: `ORDER BY pe.embedding <=> $1` is not a TOTAL order. Six pages with
+// IDENTICAL embeddings on one database returned [one two three four five six] under a seq scan and
+// [one three four five six two] under the ivfflat index scan — the same rows, a different order,
+// from the same query. Paging is only well defined over a total order, so two requests the planner
+// treats differently can repeat one row and skip another. `ORDER BY rank DESC` in SearchWithRank
+// has the identical exposure. Closing it means a tiebreaker on both halves, and no test in this
+// repo can drive the planner per request — it wants its own measurement and its own merge.
+func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, spaceID *string, limit, offset int) ([]SemanticResult, error) {
 	if !s.IsEnabled() {
 		return []SemanticResult{}, nil
 	}
@@ -179,6 +202,9 @@ func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, 
 	}
 	if limit > 50 {
 		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	vec, err := s.embed(ctx, workspaceID, query)
 	if err != nil {
@@ -204,8 +230,8 @@ func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, 
         WHERE p.workspace_id = $2 AND p.is_template = false
           AND ($4::text IS NULL OR p.space_id = $4)
         ORDER BY pe.embedding <=> $1::vector
-        LIMIT $3`,
-		encoded, workspaceID, limit, spaceID,
+        LIMIT $3 OFFSET $5`,
+		encoded, workspaceID, limit, spaceID, offset,
 	)
 	if err != nil {
 		slog.Warn("search: pgvector query", slog.String("err", err.Error()))
