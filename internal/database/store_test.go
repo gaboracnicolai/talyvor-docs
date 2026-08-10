@@ -152,15 +152,17 @@ func TestUpdateRow_MergesValues(t *testing.T) {
 	// Existing row has c-1=Auth, c-2=todo. The patch updates only c-2.
 	existing := mustJSON(map[string]any{"c-1": "Auth", "c-2": "todo"})
 
-	pool.ExpectQuery(`SELECT values FROM database_rows WHERE id.*workspace_id = ANY\(\$2\)`).
-		WithArgs("r-1", []string{"ws-1"}).
+	// BOTH statements name the database the route authorized — the read half as well as the
+	// write half, since this method returns the merged row (see UpdateRow's comment).
+	pool.ExpectQuery(`SELECT values FROM database_rows WHERE id = \$1 AND database_id = \$2.*workspace_id = ANY\(\$3\)`).
+		WithArgs("r-1", "db-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows([]string{"values"}).AddRow(existing))
-	pool.ExpectQuery(`UPDATE database_rows SET values.*workspace_id = ANY\(\$3\)`).
-		WithArgs(pgxmock.AnyArg(), "r-1", []string{"ws-1"}).
+	pool.ExpectQuery(`UPDATE database_rows SET values.*AND database_id = \$3.*workspace_id = ANY\(\$4\)`).
+		WithArgs(pgxmock.AnyArg(), "r-1", "db-1", []string{"ws-1"}).
 		WillReturnRows(pgxmock.NewRows(testRowCols()).
 			AddRow("r-1", "db-1", mustJSON(map[string]any{"c-1": "Auth", "c-2": "doing"}), float64(1), now, now))
 
-	got, err := store.UpdateRow(context.Background(), "r-1", map[string]any{"c-2": "doing"}, []string{"ws-1"})
+	got, err := store.UpdateRow(context.Background(), "db-1", "r-1", map[string]any{"c-2": "doing"}, []string{"ws-1"})
 	if err != nil {
 		t.Fatalf("UpdateRow: %v", err)
 	}
@@ -171,10 +173,10 @@ func TestUpdateRow_MergesValues(t *testing.T) {
 
 func TestDeleteRow_DeletesByID(t *testing.T) {
 	store, pool := newMockStore(t)
-	pool.ExpectExec(`DELETE FROM database_rows WHERE id.*workspace_id = ANY\(\$2\)`).
-		WithArgs("r-1", []string{"ws-1"}).
+	pool.ExpectExec(`DELETE FROM database_rows WHERE id = \$1 AND database_id = \$2.*workspace_id = ANY\(\$3\)`).
+		WithArgs("r-1", "db-1", []string{"ws-1"}).
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
-	if err := store.DeleteRow(context.Background(), "r-1", []string{"ws-1"}); err != nil {
+	if err := store.DeleteRow(context.Background(), "db-1", "r-1", []string{"ws-1"}); err != nil {
 		t.Fatalf("DeleteRow: %v", err)
 	}
 }
