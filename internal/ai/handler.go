@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -22,6 +23,13 @@ type PageSearcher interface {
 	Search(ctx context.Context, workspaceID, query string, limit int) ([]model.Page, error)
 }
 
+// pageReader authorizes a READ of ONE page for the verified caller. *spaceauth.Authorizer
+// satisfies it — the same shipped primitive internal/search and page.Handler use, so this package
+// introduces NO new access model.
+type pageReader interface {
+	AuthorizePageRead(ctx context.Context, pageID string) (found, canView bool)
+}
+
 type Handler struct {
 	engine *Engine
 	pages  PageSearcher
@@ -29,6 +37,8 @@ type Handler struct {
 	// the pre-hardening behaviour and is retained ONLY so tests can mount the handler bare;
 	// main.go always wires it. See WithRateLimit.
 	limit *ratelimit.Limiter
+	// access gates the pages /ask is allowed to ground an answer in. See WithPageRead.
+	access pageReader
 }
 
 func NewHandler(engine *Engine, pages PageSearcher) *Handler {
@@ -42,6 +52,27 @@ func NewHandler(engine *Engine, pages PageSearcher) *Handler {
 // the raw path param, or a caller names its own bucket and evades the ceiling.
 func (h *Handler) WithRateLimit(l *ratelimit.Limiter) *Handler {
 	h.limit = l
+	return h
+}
+
+// WithPageRead attaches the per-page read gate /ask needs to decide which documents may ground an
+// answer for THIS caller. `Store.Search` scopes to the workspace and nothing else, and the route
+// names a QUESTION rather than an id, so no chi URL-param resolver (permission.RequireAccess) can
+// gate it — the same reason internal/search and page.Handler both needed this primitive.
+//
+// ⚠ NIL REFUSES THE REQUEST RATHER THAN ANSWERING, AND THAT DELIBERATELY DIFFERS FROM BOTH
+// SIBLINGS. internal/search treats nil as UNFILTERED; page.Handler treats it as an EMPTY list.
+// Neither is available here, because this route's output is PROSE:
+//
+//   - unfiltered is the defect (privatespace_realpg_test.go);
+//   - an empty context set is not an empty response — Engine.AskDocs still runs, and the model
+//     answers from zero grounding under a system prompt telling it to use only the provided
+//     documentation. That answer is byte-indistinguishable from "your documentation does not
+//     cover this", which is exactly the failure #57 closed at the MCP ask_docs tool.
+//
+// So an unwired gate must be LOUD. It is a server misconfiguration, reported as one.
+func (h *Handler) WithPageRead(a pageReader) *Handler {
+	h.access = a
 	return h
 }
 
@@ -201,6 +232,42 @@ type askResponse struct {
 	Sources []askSource `json:"sources"`
 }
 
+// askContextPages / askFetchFactor / askFetchRows size the grounding window.
+//
+// askContextPages is the number of pages that reach the prompt — unchanged at 3: "anything past
+// that bloats the prompt for little extra recall". askFetchRows is what the store is ASKED for, so
+// that rows the caller may not read can be dropped without shrinking the window below the context
+// size. 12 is inside page.Store.Search's own clamp of 100, so the number the store is given is the
+// number it uses.
+const (
+	askContextPages = 3
+	askFetchFactor  = 4
+	askFetchRows    = askContextPages * askFetchFactor
+)
+
+// visibleTo drops every page the caller may not VIEW, asking the same engine the by-id page routes
+// ask.
+//
+// A nil gate does not reach here in production — Ask refuses before the store op — but this fails
+// closed anyway, matching page.Handler.visibleTo. The two together are what make the refusal a
+// REPORT rather than the only thing standing between an unwired deployment and the leak: delete
+// the refusal and /ask answers from nothing, which is loudly wrong; delete this and it answers
+// from everything, which is not.
+func (h *Handler) visibleTo(ctx context.Context, pages []model.Page) []model.Page {
+	if h.access == nil {
+		return nil
+	}
+	out := make([]model.Page, 0, len(pages))
+	for _, p := range pages {
+		found, canView := h.access.AuthorizePageRead(ctx, p.ID)
+		if !found || !canView {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
 func (h *Handler) Ask(w http.ResponseWriter, r *http.Request) {
 	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized on the next line by AuthorizeWorkspace, before the value reaches the engine or Lens
 	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
@@ -218,12 +285,38 @@ func (h *Handler) Ask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "question required"})
 		return
 	}
-	// Top-3 full-text matches form the model's grounding context.
-	// Anything past that bloats the prompt for little extra recall.
-	pages, err := h.pages.Search(r.Context(), wsID, in.Question, 3)
+	// THE GATE IS REQUIRED, AND ITS ABSENCE IS REPORTED RATHER THAN ANSWERED AROUND. See
+	// WithPageRead: with no gate the only two alternatives are grounding the answer in every
+	// page in the workspace (the defect) or grounding it in none, and the second is a confident
+	// answer from an empty corpus that reads exactly like "the documentation does not cover
+	// this".
+	if h.access == nil {
+		slog.Error("ai: /ask has no page-read gate wired — refusing rather than answering " +
+			"from an unfiltered or empty corpus (cmd/docs/main.go must call aiHandler.WithPageRead)")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "ask unavailable"})
+		return
+	}
+	// OVER-FETCH, BECAUSE THE PAGES THE CALLER MAY NOT READ ARE DROPPED AFTER THE SQL LIMIT.
+	// Measured: three pages in a private space sorting above one public page leave a denied
+	// caller with ZERO grounding if the window is the context size — and the model answers
+	// anyway. It is a mitigation, not a guarantee: a run of more than
+	// (askFetchFactor-1)×askContextPages consecutive unreadable rows still under-fills, and the
+	// response has never carried a count, so nothing here newly misreports one.
+	pages, err := h.pages.Search(r.Context(), wsID, in.Question, askFetchRows)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "search failed"})
 		return
+	}
+	// Drop every page the caller may not VIEW *before* truncating to the context size — a
+	// document they cannot open must not consume one of their grounding slots, and must not be
+	// quoted to the model or cited back to them either way.
+	//
+	// A page that is filtered out is indistinguishable from one that did not match: both simply
+	// are not there. The empty-corpus answer a denied caller may get is the same answer the
+	// corpus genuinely having nothing produces, which is the correct amount of information.
+	pages = h.visibleTo(r.Context(), pages)
+	if len(pages) > askContextPages {
+		pages = pages[:askContextPages]
 	}
 	ctxPages := make([]PageContext, 0, len(pages))
 	sources := make([]askSource, 0, len(pages))
