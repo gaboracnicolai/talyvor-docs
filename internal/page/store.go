@@ -764,6 +764,21 @@ type SearchResult struct {
 // SearchWithRank is the ranked, paginated, space-scoped successor to
 // Search. Templates are excluded server-side so the user never sees
 // boilerplate in search results.
+//
+// ⚠ `ORDER BY rank DESC, p.id` — THE TIEBREAKER IS WHAT MAKES THIS PAGINATED AT ALL. A ts_rank
+// score is not a key: any two pages whose title+body produce the same tsvector against the same
+// query score IDENTICALLY, and a workspace that templated its runbooks has dozens. Tied rows under
+// an ORDER BY that names no unique column have NO defined relative order, and `LIMIT/OFFSET` over
+// an undefined order is a question this query cannot answer.
+//
+// MEASURED THROUGH THIS FUNCTION, 40 tied rows, ONE connection, ONE plan (Seq Scan → Sort → Limit),
+// nothing written between the requests: paging 5 at a time served page 0 at offsets 0, 5 AND 10,
+// while pages 5 and 10 were never served at all. The cause is not concurrency and not the planner —
+// a bounded sort is a TOP-N HEAPSORT whose N is `limit + offset`, so each page runs a DIFFERENT
+// sort, and a different N permutes an all-equal input differently. PAGING is what changes N, so
+// paging is what breaks it. `p.id` is the primary key, so the order is total and every plan must
+// agree on it. The semantic half carries the same fix (`, pe.page_id` in SemanticSearch.Search).
+// Guarded by searchpaging_realpg_test.go.
 func (s *Store) SearchWithRank(ctx context.Context, workspaceID, query string, spaceID *string, limit, offset int) ([]SearchResult, error) {
 	if s.pool == nil {
 		return nil, nil
@@ -797,7 +812,7 @@ func (s *Store) SearchWithRank(ctx context.Context, workspaceID, query string, s
           ) @@ websearch_to_tsquery('english', $2)
           AND ($3::text IS NULL OR p.space_id = $3)
           AND p.is_template = false
-        ORDER BY rank DESC
+        ORDER BY rank DESC, p.id
         LIMIT $4 OFFSET $5`,
 		workspaceID, query, spaceID, limit, offset,
 	)
