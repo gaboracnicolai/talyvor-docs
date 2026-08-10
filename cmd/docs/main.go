@@ -458,6 +458,11 @@ func main() {
 	// the page-read gate (AccessView on the source page) too. WithPageMeta wires the scoped page-meta
 	// looker the REST page enforcer uses; importer omits it (no page-read).
 	tmplHandler.WithAccess(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
+	// SEARCH IS A READ SURFACE WHOSE TARGET IS A QUERY, so no URL-param resolver can gate it and it
+	// authorized the workspace alone — a member with no grant on a PRIVATE space received its page
+	// titles and a ts_headline excerpt of the body. Same engine, same page-meta looker, no new access
+	// model. Deleting this line reopens that leak; internal/search/mainwiring_test.go is the tripwire.
+	searchHandler.WithAccess(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
 
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles

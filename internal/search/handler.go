@@ -24,12 +24,43 @@ type fullTextSearcher interface {
 	SearchWithRank(ctx context.Context, workspaceID, query string, spaceID *string, limit, offset int) ([]page.SearchResult, error)
 }
 
+// pageReader authorizes a READ of ONE page's content for the verified caller.
+// *spaceauth.Authorizer satisfies it — deliberately, because that is the shipped primitive that
+// already composes the page+space meta join with permission.CheckPage. Search introduces NO new
+// access model; it asks the same engine every other read surface asks.
+type pageReader interface {
+	AuthorizePageRead(ctx context.Context, pageID string) (found, canView bool)
+}
+
+// maxFetchFactor / maxFetchRows size the window the store is asked for when an access gate is
+// wired, so rows the caller may not read do not turn into rows they never see.
+//
+// ⚠ WHAT IS STILL NOT GUARANTEED, STATED SO THE NEXT PERSON DOES NOT HAVE TO REDISCOVER IT: a page
+// is short whenever more than (maxFetchFactor-1)×limit consecutive HIDDEN rows out-rank the next
+// visible one — a workspace that is mostly private spaces can still under-fill. Closing that
+// completely means either the visibility predicate in SQL (a SECOND writer of the access rule,
+// which is the class of defect #73 was) or paging by a cursor this endpoint does not have.
+// `total` has always been len(results) rather than a corpus count, so nothing here newly
+// misreports a total.
+//
+// maxFetchRows is the store's own ceiling (SearchWithRank clamps to 50), named here so the two
+// numbers cannot silently disagree.
+const (
+	maxFetchFactor = 4
+	maxFetchRows   = 50
+)
+
 type Handler struct {
 	pages    fullTextSearcher
 	semantic *SemanticSearch
 	// limit throttles the SEMANTIC side's Lens spend per verified workspace. nil =
 	// unthrottled (tests mount bare); main.go always wires it.
 	limit *ratelimit.Limiter
+	// access drops rows the caller may not VIEW. nil = unfiltered — the same convention `limit`
+	// uses so the many tests that mount a bare handler keep exercising the merge/rank logic
+	// without a database behind them. main.go always wires it, and mainwiring_test.go is the
+	// tripwire on that line being deleted.
+	access pageReader
 }
 
 // WithRateLimit attaches the per-workspace limiter. This route embeds the query via Lens on
@@ -39,6 +70,16 @@ type Handler struct {
 // break Cmd+K. See internal/config for the sizing.
 func (h *Handler) WithRateLimit(l *ratelimit.Limiter) *Handler {
 	h.limit = l
+	return h
+}
+
+// WithAccess attaches the per-page read gate. THE QUERY IS THE TARGET HERE, NOT AN ID, so no chi
+// URL-param resolver (permission.RequireAccess) can reach this route — which is why search was the
+// one read surface in the product that authorized the WORKSPACE and stopped. A workspace member
+// with no grant on a PRIVATE space received that space's page titles, its name, and a ts_headline
+// EXCERPT OF THE BODY. See privatespace_realpg_test.go for the measurement.
+func (h *Handler) WithAccess(a pageReader) *Handler {
+	h.access = a
 	return h
 }
 
@@ -136,6 +177,20 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 
+	// OVER-FETCH, BECAUSE THE ROWS THE CALLER MAY NOT READ ARE DROPPED AFTER THE SQL LIMIT.
+	//
+	// Measured: with limit=1 and one hidden page out-ranking a readable one, the store returns the
+	// hidden row alone, the access gate drops it, and the caller is told NOTHING MATCHED for a
+	// document they may open. Asking for a wider window makes that the exception rather than the
+	// rule. It is a mitigation, not a guarantee, and the residual case is stated on maxFetchFactor.
+	fetchLimit := limit * maxFetchFactor
+	if fetchLimit > maxFetchRows {
+		fetchLimit = maxFetchRows
+	}
+	if h.access == nil {
+		fetchLimit = limit
+	}
+
 	var (
 		ft    []page.SearchResult
 		sem   []SemanticResult
@@ -150,7 +205,7 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ft, ftEr = h.pages.SearchWithRank(r.Context(), wsID, q, spaceID, limit, offset)
+			ft, ftEr = h.pages.SearchWithRank(r.Context(), wsID, q, spaceID, fetchLimit, offset)
 		}()
 	}
 	if kind == "all" || kind == "semantic" {
@@ -161,7 +216,7 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 			// doesn't keep the whole request hanging.
 			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 			defer cancel()
-			sem, semEr = h.semantic.Search(ctx, wsID, q, limit)
+			sem, semEr = h.semantic.Search(ctx, wsID, q, fetchLimit)
 		}()
 	}
 	wg.Wait()
@@ -178,7 +233,9 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	merged := merge(ft, sem)
+	// Drop rows the caller may not VIEW, BEFORE the limit truncation — a page they cannot read
+	// must not consume one of their result slots.
+	merged := h.visibleTo(r.Context(), merge(ft, sem))
 	if len(merged) > limit {
 		merged = merged[:limit]
 	}
@@ -188,6 +245,35 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		Query:   q,
 		TookMS:  time.Since(start).Milliseconds(),
 	})
+}
+
+// visibleTo drops every row whose page the caller may not read, asking the same engine the REST
+// page routes ask (one AuthorizePageRead per row, at most `limit` ≤ 50 of them).
+//
+// ⚠ IT APPLIES TO BOTH HALVES, AND THE SEMANTIC HALF IS NOT THE SMALLER ONE. A semantic-only row
+// carries no title and no headline, so the leak there is narrower — a page id, a URL and a cosine
+// similarity — but "this private document is about what you just asked" is still an answer about a
+// document the caller cannot open, and it comes from the same unfiltered pool.
+//
+// ⚠ A FILTERED PAGE IS A SHORT PAGE, SAID PLAINLY. The LIMIT/OFFSET ran in SQL before this, so a
+// caller asking for 10 can receive 7 while more visible rows exist further down. Fixing that means
+// over-fetching and re-paging against a count this endpoint does not have; `total` has always been
+// len(results) rather than a corpus count, so nothing here newly misreports a total.
+//
+// nil access ⇒ unfiltered, and that is why cmd/docs/main.go's wiring has its own guard.
+func (h *Handler) visibleTo(ctx context.Context, rows []Result) []Result {
+	if h.access == nil {
+		return rows
+	}
+	out := rows[:0]
+	for _, r := range rows {
+		found, canView := h.access.AuthorizePageRead(ctx, r.PageID)
+		if !found || !canView {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // merge combines the two result sets, deduplicating by page_id and
