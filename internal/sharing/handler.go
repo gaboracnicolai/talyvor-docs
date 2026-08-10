@@ -33,14 +33,17 @@ type PublicPage struct {
 type Handler struct {
 	store   *Store
 	page    PageContentLoader
-	pageEnf *permission.Enforcer // A3: sharing admin gates on the parent page (nil = unguarded)
+	pageEnf *permission.Enforcer // A3: sharing admin gates on the parent page (nil => 404, fail-closed)
 }
 
 func NewHandler(store *Store, page PageContentLoader) *Handler {
 	return &Handler{store: store, page: page}
 }
 
-// WithAccess wires the A3 page access enforcer. Without it the routes mount unguarded (tests).
+// WithAccess wires the A3 page access enforcer. Without it those routes FAIL CLOSED:
+// Enforcer.Require on a NIL receiver denies with 404 and never reaches the handler, so a
+// test that skips WithAccess sees 404s, not an open door
+// (permission.TestEnforcer_NilReceiver_FailsClosed).
 func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
 	h.pageEnf = pageEnf
 	return h

@@ -11,13 +11,16 @@ import (
 
 type Handler struct {
 	store    *Store
-	spaceEnf *Enforcer // A3 within-workspace access guard for space-scoped perm routes (nil = unguarded)
-	pageEnf  *Enforcer // A3 within-workspace access guard for page-scoped perm routes (nil = unguarded)
+	spaceEnf *Enforcer // A3 within-workspace access guard for space-scoped perm routes (nil => 404, fail-closed)
+	pageEnf  *Enforcer // A3 within-workspace access guard for page-scoped perm routes (nil => 404, fail-closed)
 }
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
 
-// WithAccess wires the A3 access enforcers. Without it the routes mount unguarded (tests).
+// WithAccess wires the A3 access enforcers. Without it those routes FAIL CLOSED:
+// Enforcer.Require on a NIL receiver denies with 404 and never reaches the handler, so a
+// test that skips WithAccess sees 404s, not an open door
+// (permission.TestEnforcer_NilReceiver_FailsClosed).
 func (h *Handler) WithAccess(spaceEnf, pageEnf *Enforcer) *Handler {
 	h.spaceEnf = spaceEnf
 	h.pageEnf = pageEnf

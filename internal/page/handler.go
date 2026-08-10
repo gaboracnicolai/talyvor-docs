@@ -29,7 +29,10 @@ func NewHandler(store *Store, _ *pgxpool.Pool) *Handler {
 	return &Handler{store: store}
 }
 
-// WithAccess wires the A3 access enforcers. Without it the routes mount unguarded (tests).
+// WithAccess wires the A3 access enforcers. Without it those routes FAIL CLOSED:
+// Enforcer.Require on a NIL receiver denies with 404 and never reaches the handler, so a
+// test that skips WithAccess sees 404s, not an open door
+// (permission.TestEnforcer_NilReceiver_FailsClosed).
 func (h *Handler) WithAccess(pageEnf, spaceEnf *permission.Enforcer) *Handler {
 	h.pageEnf, h.spaceEnf = pageEnf, spaceEnf
 	return h
