@@ -20,7 +20,12 @@ export function useSearch(workspaceId: string, opts: SearchOptions = {}) {
   }, [query]);
 
   const result = useQuery<SearchResponse>({
-    queryKey: ["search", workspaceId, debounced, opts.type, opts.spaceId, opts.limit],
+    // EVERY OPTION THAT REACHES THE REQUEST, INCLUDING `offset`. react-query caches on the key
+    // alone and `opts` is forwarded WHOLE to searchApi.search, so a value missing here makes two
+    // different requests one cache entry: within staleTime (30s, see ~/lib/queryClient) page 2 was
+    // served page 1's rows and no request was made at all. `offset` was the only sibling absent,
+    // which is what makes it an omission rather than a decision. See useSearch.offset.test.tsx.
+    queryKey: ["search", workspaceId, debounced, opts.type, opts.spaceId, opts.limit, opts.offset],
     queryFn: () => searchApi.search(workspaceId, debounced, opts),
     enabled: debounced.length >= 2,
     staleTime: 30_000,
