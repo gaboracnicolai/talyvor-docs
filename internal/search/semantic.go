@@ -278,12 +278,38 @@ func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, 
 	for rows.Next() {
 		var r SemanticResult
 		if err := rows.Scan(&r.PageID, &r.SpaceID, &r.Title, &r.SpaceName, &r.Similarity); err != nil {
+			// A SELECT list and a Scan that disagree is a PROGRAMMING error, and it used to be
+			// laundered through the same silent path as an infrastructure one — no error and,
+			// unlike every other failure in this method, no log either. It stays a degradation
+			// (see the contract above), but it is no longer invisible.
+			slog.Warn("search: pgvector scan", slog.String("err", err.Error()))
 			return []SemanticResult{}, nil
 		}
 		if r.Similarity < similarityThreshold {
 			continue
 		}
 		out = append(out, r)
+	}
+	// ⚠ rows.Err() IS A THIRD DOOR, NOT A TIDY-UP, AND IT IS THE ONE THE REALISTIC FAILURE USES.
+	// pgx reports an error raised DURING row production here and NOWHERE ELSE: `Query()` above
+	// returns nil, `rows.Next()` returns false on its first call, and the Scan branch is never
+	// reached. Which door an error arrives at is decided by whether it was raised before or
+	// after the row description — a pgx implementation detail, not a product distinction — so
+	// this must behave exactly as the `Query()` failure ten lines up already does.
+	//
+	// MEASURED on real Postgres through this function, three indexed pages seeded: a query
+	// vector of the wrong DIMENSION (`different vector dimensions 1536 and 3`, SQLSTATE 22000)
+	// returned ([], nil) with an EMPTY log. The dimension is a property of the model Lens is
+	// configured with, not of this schema — `embedding` is `vector(1536)` but `$1::vector` is
+	// unconstrained — so an upstream model change turns the semantic half off across every
+	// workspace, permanently and silently, while full-text keeps answering 200.
+	//
+	// ⚠ `out` IS DISCARDED RATHER THAN RETURNED. A truncated result set handed back with a nil
+	// error is an incomplete answer presented as a complete one, which is the same silence one
+	// layer up. Guarded by semanticsilence_realpg_test.go and semanticscan_test.go.
+	if err := rows.Err(); err != nil {
+		slog.Warn("search: pgvector rows", slog.String("err", err.Error()))
+		return []SemanticResult{}, nil
 	}
 	return out, nil
 }
