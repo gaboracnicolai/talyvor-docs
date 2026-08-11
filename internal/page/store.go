@@ -290,18 +290,29 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
 		p.Depth = parentDepth + 1
 	}
 
+	// ⚠ ai_cost_usd IS NOT INSERTED, AND THAT IS THE POINT. Handler.Create decodes the WHOLE
+	// model.Page from the request body and overrides only space/workspace/created_by, so every
+	// column named here is caller-settable. This column is not the caller's: migrations/0002
+	// gives it `NOT NULL DEFAULT 0` and migrations/0018's COMMENT ON COLUMN says "Do not add to
+	// this column: the next sweep overwrites it" — it is owned by trackintegration.Syncer,
+	// which writes it through UpdateAICost. It used to be here, so a create body could set it
+	// (measured at eeb1a39: `{"ai_cost_usd":999.99}` -> 201 and a page reporting $999.99),
+	// which is the same column `c3daaf7` had just shut on Update's allowlist — the OTHER door.
+	// Dropped from the INSERT rather than zeroed in the handler because all SIX callers of
+	// Create reach it, and a census found none of them sets AICostUSD. own_ai_cost_usd and
+	// view_count were already absent here for the same reason. Pinned by sec_aicost_create_test.go.
 	out, err := scan(s.pool.QueryRow(ctx,
 		`INSERT INTO pages
             (space_id, workspace_id, parent_id, title, slug,
              content, content_text, icon, cover_url, position, depth,
              is_template, created_by, updated_by,
-             linked_issues, ai_cost_usd, stale_after_days, page_type)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+             linked_issues, stale_after_days, page_type)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         RETURNING `+columns,
 		p.SpaceID, p.WorkspaceID, p.ParentID, p.Title, p.Slug,
 		p.Content, p.ContentText, p.Icon, p.CoverURL, p.Position, p.Depth,
 		p.IsTemplate, p.CreatedBy, p.CreatedBy,
-		p.LinkedIssues, p.AICostUSD, p.StaleAfterDays, p.PageType,
+		p.LinkedIssues, p.StaleAfterDays, p.PageType,
 	))
 	if err != nil {
 		return nil, fmt.Errorf("page: insert: %w", err)
