@@ -89,9 +89,19 @@ function row(own: number, track: number): SearchResult {
   };
 }
 
-// semanticRow builds the OTHER shape merge() produces: a vector hit with no pages row read,
+// semanticRow builds the OTHER shape merge() produces: a vector hit whose row carries no cost,
 // so every cost key is ABSENT. Written as an explicit literal rather than as `row()` minus
 // keys, so it cannot silently acquire a cost field if `row` grows one.
+//
+// ⚠ `page_title` AND `space_name` WERE FILLED HERE BEFORE THE WIRE FILLED THEM, AND THAT IS WHY
+// THE BLANK ROW COULD NOT BE RED IN THIS SUITE. merge()'s semantic branch set neither, so the
+// server sent `""` for both while this fixture said "Semantic"/"Ops" — and SearchModal draws a
+// hit's identity as exactly those two spans, so the reader got a line with nothing written on
+// it. A fixture MORE GENEROUS than the wire makes the renderer unfalsifiable. The server now
+// carries both (internal/search/semantic.go: `p.title` off the already-joined pages row, `sp.name`
+// off the same join the full-text half uses), measured in
+// internal/search/semanticrow_realpg_test.go — so these two values are backed by the wire rather
+// than by this file's optimism. `headline` stays "" because the wire still does not send one.
 function semanticRow(): SearchResult {
   return {
     page_id: "p2",

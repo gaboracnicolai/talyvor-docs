@@ -142,10 +142,15 @@ func TestSearch_ReturnsResultsAboveThreshold(t *testing.T) {
 	defer srv.Close()
 	s, pool := newSemantic(t, srv.URL)
 
-	rows := pgxmock.NewRows([]string{"page_id", "space_id", "similarity"}).
-		AddRow("pg-1", "sp-1", float64(0.93)).
-		AddRow("pg-2", "sp-1", float64(0.81)).
-		AddRow("pg-3", "sp-1", float64(0.50))
+	// ⚠ THESE COLUMNS ARE THE FIXTURE'S, NOT THE PRODUCT'S. pgxmock never asks Postgres to plan
+	// the statement — it regex-matches the SQL text — so a mock row set says only that Scan reads
+	// what THIS LIST supplies. It cannot see the real SELECT list stop producing `title` or
+	// `space_name` any more than it could see it stop producing `space_id` (#90's C2). The
+	// catcher for that is semanticrow_realpg_test.go, over real pgvector.
+	rows := pgxmock.NewRows([]string{"page_id", "space_id", "title", "space_name", "similarity"}).
+		AddRow("pg-1", "sp-1", "Page One", "Space One", float64(0.93)).
+		AddRow("pg-2", "sp-1", "Page Two", "Space One", float64(0.81)).
+		AddRow("pg-3", "sp-1", "Page Three", "Space One", float64(0.50))
 	pool.ExpectQuery(`page_embeddings.*<=>`).
 		WithArgs(pgxmock.AnyArg(), "ws-1", 10, (*string)(nil), 0).
 		WillReturnRows(rows)

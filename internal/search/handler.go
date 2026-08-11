@@ -355,9 +355,20 @@ func merge(ft []page.SearchResult, sem []SemanticResult) []Result {
 		// SemanticSearch.Search already joins `pages` and already filters `p.space_id`, so carrying
 		// the column costs nothing; the title, headline and costs are a separate question because
 		// they are NOT in that join.
+		//
+		// ⚠ AND THE TITLE IS THE SAME ARGUMENT ONE FIELD LATER. This row used to carry no
+		// PageTitle and no SpaceName either, and SearchModal.tsx draws a hit's identity as
+		// exactly those two spans (`{space_name} · {page_title}`) — so the row #90 made openable
+		// was still a blank line in the list. `p.title` is another column of the SAME already-
+		// joined pages row; `sp.name` is the identical join the full-text half above already
+		// performs. `Headline` and the three costs stay zero DELIBERATELY: ts_headline runs the
+		// full-text tsquery this document did not match, and the costs are a money-surface
+		// question (see the note on Result) that discovering they are cheap does not settle.
 		out = append(out, scored{
 			r: Result{
 				PageID:     s.PageID,
+				PageTitle:  s.Title,
+				SpaceName:  s.SpaceName,
 				Similarity: s.Similarity,
 				Source:     "semantic",
 				URL:        pageURL(s.SpaceID, s.PageID),

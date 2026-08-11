@@ -57,9 +57,21 @@ var ErrTokenUnavailable = errors.New("search: per-workspace lens token unavailab
 // ⚠ IT COSTS NOTHING, AND THAT IS THE POINT — the query below ALREADY joins `pages p` and ALREADY
 // filters `p.space_id`. The column was in the join and missing from the SELECT list, so the fix is
 // one identifier and not the page read the handler's own comment assumed it would need.
+//
+// ⚠ Title AND SpaceName ARE HERE FOR THE SAME REASON ONE FIELD LATER: A ROW YOU CAN OPEN AND
+// CANNOT READ IS STILL NOT A RESULT. `SearchModal.tsx` draws a hit's identity as exactly
+// `{space_name} · {page_title}`, and merge() filled neither on a pure-semantic row, so the reader
+// was offered a line with nothing written on it. `title` is another column of the SAME already-
+// joined `pages` row; `space_name` is one more join — the IDENTICAL join the full-text half
+// already performs (`page.Store.SearchWithRank`: `JOIN spaces sp ON sp.id = p.space_id`) — and it
+// cannot drop a hit, because `0002_pages.sql:13` declares `space_id TEXT NOT NULL REFERENCES
+// spaces(id)`. `headline` and the three costs are still absent, deliberately; see the note on
+// search.Result for why each.
 type SemanticResult struct {
 	PageID     string  `json:"page_id"`
 	SpaceID    string  `json:"space_id"`
+	Title      string  `json:"title"`
+	SpaceName  string  `json:"space_name"`
 	Similarity float64 `json:"similarity"`
 }
 
@@ -242,9 +254,15 @@ func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, 
 	}
 	encoded := encodeVector(vec)
 	rows, err := s.pool.Query(ctx,
-		`SELECT pe.page_id, p.space_id, 1 - (pe.embedding <=> $1::vector) AS similarity
+		// `sp` is an INNER join and that is safe rather than convenient: pages.space_id is
+		// `TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE` (0002_pages.sql:13), so every
+		// row this statement can reach has exactly one spaces row. It is the same join
+		// page.Store.SearchWithRank uses for the same column on the full-text half.
+		`SELECT pe.page_id, p.space_id, p.title, sp.name AS space_name,
+               1 - (pe.embedding <=> $1::vector) AS similarity
         FROM page_embeddings pe
         JOIN pages p ON p.id = pe.page_id
+        JOIN spaces sp ON sp.id = p.space_id
         WHERE p.workspace_id = $2 AND p.is_template = false
           AND ($4::text IS NULL OR p.space_id = $4)
         ORDER BY pe.embedding <=> $1::vector, pe.page_id
@@ -259,7 +277,7 @@ func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, 
 	var out []SemanticResult
 	for rows.Next() {
 		var r SemanticResult
-		if err := rows.Scan(&r.PageID, &r.SpaceID, &r.Similarity); err != nil {
+		if err := rows.Scan(&r.PageID, &r.SpaceID, &r.Title, &r.SpaceName, &r.Similarity); err != nil {
 			return []SemanticResult{}, nil
 		}
 		if r.Similarity < similarityThreshold {
