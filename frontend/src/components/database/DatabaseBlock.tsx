@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { LayoutGrid, List, Rows3, Table, Plus } from "lucide-react";
 import { useDatabase } from "~/hooks/useDatabase";
 import type { ColumnDef, ColumnType, ViewType } from "~/api/database";
@@ -25,9 +25,14 @@ const VIEW_TABS: { type: ViewType; label: string; icon: React.ReactNode }[] = [
 // through the useDatabase hook.
 export function DatabaseBlock({ databaseID }: BlockProps) {
   const [viewType, setViewType] = useState<ViewType>("table");
+  // The view type goes INTO the hook: it resolves the matching saved view and puts its id on the
+  // rows request, which is what makes the server apply that view's filters + sort. Resolving it
+  // here instead left the rows query with no view id at all — see useDatabase's header and
+  // DatabaseBlock.view.test.tsx.
   const {
     database,
     views,
+    activeView,
     rows,
     isLoading,
     updateSchema,
@@ -36,15 +41,9 @@ export function DatabaseBlock({ databaseID }: BlockProps) {
     deleteRow,
     createView,
     updateView,
-  } = useDatabase(databaseID);
+  } = useDatabase(databaseID, viewType);
 
-  // Pick (or auto-create) a view that matches the active type so the
-  // server can apply filters + sort. First load: ensure at least a
-  // default table view exists.
-  const activeView = useMemo(
-    () => views.find((v) => v.type === viewType),
-    [views, viewType],
-  );
+  // First load: ensure at least a default table view exists.
   useEffect(() => {
     if (!database || views.length > 0 || createView.isPending) return;
     createView.mutate({
