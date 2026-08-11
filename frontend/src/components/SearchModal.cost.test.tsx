@@ -100,7 +100,12 @@ function semanticRow(): SearchResult {
     headline: "",
     source: "semantic",
     similarity: 0.9,
-    url: "/pages/p2",
+    // ⚠ THIS WAS `/pages/p2` AND THAT WAS THE WIRE SHAPE, NOT AN ARBITRARY FIXTURE VALUE — a
+    // semantic-only hit really was built with no space, and the app has no `/pages/:id` route, so
+    // clicking one landed on NotFoundView. The server now carries the space on that row
+    // (internal/search/semantic.go), and a fixture still holding the old spelling would be this
+    // suite quietly asserting the defect is normal.
+    url: "/spaces/s1/pages/p2",
   };
 }
 

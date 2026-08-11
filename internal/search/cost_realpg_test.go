@@ -108,11 +108,16 @@ func assertCost(t *testing.T, row map[string]any, what string, wantAI, wantOwn, 
 
 // ⚠ THE OTHER DIRECTION, AND THE REASON THE FIELDS ARE POINTERS RATHER THAN BARE FLOATS.
 //
-// A semantic-only row (a page whose embedding matched but whose full-text index did not fire) is
-// built from the vector hit alone — no pages row is read for it, so NO cost is known. Emitting 0.0
-// there would be a fabricated zero: it would claim a document cost nothing on the strength of
-// never having looked. The field must be ABSENT for those rows and PRESENT-AND-ZERO for a page we
-// did read, which a bare float cannot express and a *float64 can.
+// A semantic-only row (a page whose embedding matched but whose full-text index did not fire)
+// carries no cost, so emitting 0.0 there would be a fabricated zero: it would claim a document cost
+// nothing on the strength of never having reported. The field must be ABSENT for those rows and
+// PRESENT-AND-ZERO for a page whose cost WAS read, which a bare float cannot express and a
+// *float64 can.
+//
+// ⚠ THIS COMMENT USED TO SAY "no pages row is read for it", AND THAT IS FALSE — see the note on
+// Result in handler.go. SemanticSearch.Search JOINs `pages` and filters three of its columns; the
+// cost columns are on that same already-joined row and are simply not selected. The costs are
+// absent by CHOICE, not by cost, and that choice is a money-surface question nobody has answered.
 func TestSearch_SemanticOnlyRow_ReportsNoCostRatherThanAFabricatedZero(t *testing.T) {
 	r := Result{PageID: "pg-1", Source: "semantic", Similarity: 0.9}
 	raw, err := json.Marshal(r)

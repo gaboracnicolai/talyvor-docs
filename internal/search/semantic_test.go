@@ -142,10 +142,10 @@ func TestSearch_ReturnsResultsAboveThreshold(t *testing.T) {
 	defer srv.Close()
 	s, pool := newSemantic(t, srv.URL)
 
-	rows := pgxmock.NewRows([]string{"page_id", "similarity"}).
-		AddRow("pg-1", float64(0.93)).
-		AddRow("pg-2", float64(0.81)).
-		AddRow("pg-3", float64(0.50))
+	rows := pgxmock.NewRows([]string{"page_id", "space_id", "similarity"}).
+		AddRow("pg-1", "sp-1", float64(0.93)).
+		AddRow("pg-2", "sp-1", float64(0.81)).
+		AddRow("pg-3", "sp-1", float64(0.50))
 	pool.ExpectQuery(`page_embeddings.*<=>`).
 		WithArgs(pgxmock.AnyArg(), "ws-1", 10, (*string)(nil), 0).
 		WillReturnRows(rows)
