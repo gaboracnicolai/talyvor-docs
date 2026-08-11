@@ -371,10 +371,25 @@ func (s *Store) List(ctx context.Context, filter PageFilter) ([]model.Page, erro
 // updatableFields lists the columns Update will touch directly.
 // `content` triggers the content_text refresh + version snapshot
 // inside the method body.
+//
+// ⚠ NEITHER MONEY COLUMN IS IN HERE, AND ai_cost_usd USED TO BE. Handler.Update decodes
+// the request body straight into the `updates` map, so an entry here is a column any
+// caller who may edit the page may set — which is what is_admin taught this package
+// (sec_isadmin_update_test.go). ai_cost_usd is not an editable property of a document: it
+// is a report, written by trackintegration.Syncer through UpdateAICost below, and
+// own_ai_cost_usd is incremented per Lens ledger row by internal/lensintegration. Both
+// feed the derived total_ai_cost_usd that PageView, SearchModal and the MCP page
+// projection render. Measured at 6f4aabb: an Edit-tier member's
+// `PATCH {"ai_cost_usd":-1000}` returned 200 and drove a page carrying $42.00 of real
+// recorded Lens spend to a reported total of -$958. See sec_aicost_body_test.go.
+//
+// An un-allowlisted key is DROPPED IN SILENCE rather than refused — the rest of the
+// request still lands. That is the pre-existing behaviour of every key not named here,
+// own_ai_cost_usd included, and matching it was cheaper than inventing a rejection path.
 var updatableFields = map[string]struct{}{
 	"title": {}, "content": {}, "icon": {}, "cover_url": {},
 	"position": {}, "is_template": {}, "stale_after_days": {},
-	"linked_issues": {}, "ai_cost_usd": {}, "parent_id": {},
+	"linked_issues": {}, "parent_id": {},
 	"updated_by": {}, "page_type": {},
 }
 
@@ -458,6 +473,14 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	)
 	// Walk a deterministic key order so SQL stays test-stable. The
 	// runtime cost is negligible vs. the readability win.
+	//
+	// ⚠ THIS LIST IS THE ORDER, NOT THE ALLOWLIST — updatableFields is the gate, and the two
+	// deliberately disagree in BOTH directions. `content_text` is here and not in the
+	// allowlist (it is derived from `content` inside this method, so it is permitted by the
+	// explicit `k != "content_text"` below rather than by being writable). `ai_cost_usd` is
+	// here and not in the allowlist, which is what makes it un-writable; it stays listed so
+	// there is exactly ONE place that decides, rather than a second copy of the rule to keep
+	// in sync.
 	for _, k := range []string{
 		"title", "content", "content_text", "icon", "cover_url",
 		"position", "is_template", "stale_after_days",
@@ -1044,6 +1067,11 @@ func (s *Store) WorkspacePageIDs(ctx context.Context, workspaceID string) ([]str
 // UpdateAICost is the syncer's narrow write — bypasses the Update
 // allowlist (which doesn't include ai_cost_usd) so a noisy embed
 // can't drive a full page-version snapshot per sync tick.
+//
+// ⚠ THE PARENTHETICAL ABOVE WAS FALSE FOR THE WHOLE LIFE OF THIS METHOD. updatableFields
+// DID include ai_cost_usd until this comment's own claim was measured, so the column this
+// writer exists to own was simultaneously settable from any PATCH body. It is enforced now
+// — by the allowlist and by sec_aicost_body_test.go — rather than merely described here.
 func (s *Store) UpdateAICost(ctx context.Context, pageID string, costUSD float64) error {
 	if s.pool == nil {
 		return errors.New("page: store has no pool")
