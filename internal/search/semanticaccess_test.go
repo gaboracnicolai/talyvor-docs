@@ -56,9 +56,9 @@ func TestSearch_SemanticOnlyRow_RespectsPageAccess(t *testing.T) {
 	// is a pgvector LIMIT, so a wider one costs no extra spend.)
 	pool.ExpectQuery(`page_embeddings.*<=>`).
 		WithArgs(pgxmock.AnyArg(), "ws-1", 40, (*string)(nil), 0).
-		WillReturnRows(pgxmock.NewRows([]string{"page_id", "space_id", "similarity"}).
-			AddRow("private-memo", "sp-private", float64(0.93)).
-			AddRow("public-handbook", "sp-public", float64(0.88)))
+		WillReturnRows(pgxmock.NewRows([]string{"page_id", "space_id", "title", "space_name", "similarity"}).
+			AddRow("private-memo", "sp-private", "Quarterly Layoffs", "Board Private", float64(0.93)).
+			AddRow("public-handbook", "sp-public", "Employee Handbook", "Handbook", float64(0.88)))
 
 	h := NewHandler(emptyFullText{}, sem).
 		WithAccess(denyList{denied: map[string]bool{"private-memo": true}})
