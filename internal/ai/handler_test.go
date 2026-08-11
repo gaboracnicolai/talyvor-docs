@@ -42,6 +42,15 @@ type allowAllPages struct{}
 
 func (allowAllPages) AuthorizePageRead(context.Context, string) (bool, bool) { return true, true }
 
+// PageWorkspace answers "ws-1" — the workspace every request in this package's bare-handler
+// tests names in its path — because none of those tests is about tenancy and a gate refusing
+// them would fail them for a question they are not asking. What the workspace check actually
+// DECIDES is measured against real Postgres and the real page rows in
+// billingworkspace_realpg_test.go. Returning a fixed id here rather than `("", true)` is
+// deliberate: an empty owner would match an empty billWS and quietly pass a request with no
+// workspace at all.
+func (allowAllPages) PageWorkspace(context.Context, string) (string, bool) { return "ws-1", true }
+
 func newRouter(e *Engine, pages PageSearcher) http.Handler {
 	r := chi.NewRouter()
 	// Mirror production: the authz middleware stamps verified memberships before handlers run. Tests

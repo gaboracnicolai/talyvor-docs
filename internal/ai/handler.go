@@ -23,11 +23,17 @@ type PageSearcher interface {
 	Search(ctx context.Context, workspaceID, query string, limit int) ([]model.Page, error)
 }
 
-// pageReader authorizes a READ of ONE page for the verified caller. *spaceauth.Authorizer
-// satisfies it — the same shipped primitive internal/search and page.Handler use, so this package
-// introduces NO new access model.
+// pageReader authorizes a READ of ONE page for the verified caller, and resolves which workspace
+// that page belongs to. *spaceauth.Authorizer satisfies both — the same shipped primitive
+// internal/search and page.Handler use, so this package introduces NO new access model.
+//
+// ⚠ THE SECOND METHOD IS NOT A CONVENIENCE. AuthorizePageRead resolves against every workspace
+// the caller belongs to, so a caller in two workspaces satisfies it for a page in either. That is
+// correct for a read and insufficient for attribution, which must also know that the page belongs
+// to the workspace being BILLED. See attributable.
 type pageReader interface {
 	AuthorizePageRead(ctx context.Context, pageID string) (found, canView bool)
+	PageWorkspace(ctx context.Context, pageID string) (workspaceID string, found bool)
 }
 
 type Handler struct {
@@ -116,7 +122,23 @@ func (h *Handler) limited(next http.HandlerFunc) http.HandlerFunc {
 // A NIL GATE REFUSES, matching Ask. main.go always wires it, so this is a report rather than the
 // only thing standing between an unwired deployment and the leak — but binding blind is exactly
 // the defect this closes, and omission must not restore it.
-func (h *Handler) attributable(w http.ResponseWriter, r *http.Request, pageID string) bool {
+//
+// ⚠⚠ READ ACCESS IS NOT ENOUGH, AND THE SECOND CHECK IS ABOUT MONEY RATHER THAN ACCESS. billWS is
+// the {wsID} from the path — already authorized by the caller's handler, and the workspace that
+// PAYS Lens for this completion. page_id is authorized separately, against EVERY workspace the
+// caller belongs to. For a caller who is a verified member of two workspaces both gates are
+// honestly satisfied by a request that bills A and attributes to a page in B, and the row that
+// produces is false: page_ai_spend_events carries workspace_id=A beside a page in B, and
+// PriceAISpend rolls it onto that page with no workspace predicate. A's Lens bill then holds a
+// completion no A page accounts for, and B's document shows own_ai_cost_usd that B's Lens ledger
+// never contained — a number a customer reads (PageView.tsx, SearchModal.tsx) and one no
+// reconciliation can balance. MEASURED before this check existed, through these four routes on
+// real Postgres: $49.36 across the boundary (billingworkspace_realpg_test.go).
+//
+// A page outside the billed workspace answers 404: within `/workspaces/{wsID}/…` it is not an
+// addressable object. That is not an existence oracle — the caller can already read it at its own
+// workspace's address, which is where this operation belongs.
+func (h *Handler) attributable(w http.ResponseWriter, r *http.Request, billWS, pageID string) bool {
 	if pageID == "" {
 		return true
 	}
@@ -134,6 +156,13 @@ func (h *Handler) attributable(w http.ResponseWriter, r *http.Request, pageID st
 	if !canView {
 		writeJSON(w, http.StatusForbidden, map[string]string{
 			"error": "insufficient access: attributing an AI operation requires view access to page_id",
+		})
+		return false
+	}
+	owner, ok := h.access.PageWorkspace(r.Context(), pageID)
+	if !ok || owner != billWS {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": "not found: page_id is not in the workspace this operation is billed to",
 		})
 		return false
 	}
@@ -198,7 +227,7 @@ func (h *Handler) Write(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt required"})
 		return
 	}
-	if !h.attributable(w, r, in.PageID) {
+	if !h.attributable(w, r, wsID, in.PageID) {
 		return
 	}
 	out, err := h.engine.WriteWithAI(r.Context(), wsID, in.Prompt, in.Context, in.PageID)
@@ -226,7 +255,7 @@ func (h *Handler) Transform(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
 	}
-	if !h.attributable(w, r, in.PageID) {
+	if !h.attributable(w, r, wsID, in.PageID) {
 		return
 	}
 	var (
@@ -272,7 +301,7 @@ func (h *Handler) Translate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
 	}
-	if !h.attributable(w, r, in.PageID) {
+	if !h.attributable(w, r, wsID, in.PageID) {
 		return
 	}
 	out, err := h.engine.Translate(r.Context(), wsID, in.Text, in.Language, in.PageID)
@@ -426,7 +455,7 @@ func (h *Handler) SuggestTitle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
 		return
 	}
-	if !h.attributable(w, r, in.PageID) {
+	if !h.attributable(w, r, wsID, in.PageID) {
 		return
 	}
 	title, err := h.engine.SuggestTitle(r.Context(), wsID, in.Content, in.PageID)
