@@ -56,6 +56,30 @@ func (a *Authorizer) WithPageMeta(fn func(ctx context.Context, pageID string) (p
 	return a
 }
 
+// PageWorkspace returns the workspace that OWNS pageID, when the page resolves for the VERIFIED
+// caller. found=false ⇒ the page is not in the caller's workspaces, is unresolvable, or this
+// authorizer has no page-meta looker — the same fail-closed set AuthorizePageRead refuses on.
+//
+// ⚠ IT ANSWERS A DIFFERENT QUESTION FROM AuthorizePageRead AND THE DIFFERENCE IS THE POINT.
+// AuthorizePageRead asks whether the CALLER may read the page, resolved against every workspace
+// the caller belongs to. It cannot express which ONE of those workspaces the page is in, so a
+// caller who is a member of two workspaces satisfies it for a page in either — which is correct
+// for reading and wrong for anything that must also name a single tenancy. Decision.WorkspaceID
+// already states that rule for the space-write half ("the tenancy the new content must carry …
+// callers use this, never a client-supplied workspace id"); this is the same value for the
+// page-read half, and it is why the AI attribution path can compare the page it was handed
+// against the workspace it is billing.
+func (a *Authorizer) PageWorkspace(ctx context.Context, pageID string) (workspaceID string, found bool) {
+	if a == nil || a.pageMeta == nil || pageID == "" {
+		return "", false
+	}
+	md, err := a.pageMeta(ctx, pageID)
+	if err != nil {
+		return "", false
+	}
+	return md.WorkspaceID, true
+}
+
 // AuthorizeSpaceWrite resolves whether the VERIFIED caller may create page content in spaceID. FAIL-CLOSED
 // throughout: a nil authorizer, a foreign/unresolvable space, or any lookup error yields Found=false or
 // CanEdit=false — a page is never created on an unresolved or under-privileged space.

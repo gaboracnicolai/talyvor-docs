@@ -25,22 +25,51 @@ import (
 // common case and must not read as an error.
 var ErrNoBinding = errors.New("page: no AI spend binding for that request")
 
+// ErrPageWorkspaceMismatch reports a binding whose page does not live in the workspace the
+// request was billed to. Distinct from ErrNoBinding: that one is a request nobody claimed, this
+// one is a request claimed by the wrong tenant.
+var ErrPageWorkspaceMismatch = errors.New("page: the page named by an AI spend binding is not in the workspace being billed")
+
 // BindAISpend associates a Lens request_id with the page the operation was performed on.
 //
 // Idempotent by primary key: a retried handler, or a duplicate request id, records once. It
 // deliberately does NOT touch pages.own_ai_cost_usd — an unpriced binding must not move a
 // customer-visible number.
+//
+// ⚠ THE PAGE MUST BE IN THE WORKSPACE BEING BILLED, AND THE ROW IS WHY. workspace_id is the
+// workspace that PAID Lens for this completion; page_id is what PriceAISpend will roll the money
+// onto, with `WHERE p.id = priced.page_id` and no workspace predicate. A row where the two
+// disagree is not a partial fact to be repaired later — it is money one tenant paid appearing on
+// another tenant's document, and the FOREIGN KEY cannot see it because the page genuinely exists.
+// The two ids arrive from different places (the path and the request body) and were authorized by
+// different gates, so nothing upstream had both in one hand until here.
+//
+// ⚠ THE PREDICATE IS `ok`, NOT RowsAffected, and that is not style. `ON CONFLICT DO NOTHING`
+// already affects zero rows for the ordinary re-bind, so a RowsAffected==0 branch would report
+// idempotence and a refused mismatch as the same outcome — and the mismatch is the one that must
+// be loud. `ok` counts the page rows that satisfied the join, so it separates them.
 func (s *Store) BindAISpend(ctx context.Context, requestID, pageID, workspaceID, operation string) error {
 	if requestID == "" || pageID == "" || workspaceID == "" || operation == "" {
 		return errors.New("page: BindAISpend requires request_id, page_id, workspace_id, operation")
 	}
-	_, err := s.pool.Exec(ctx, `
-        INSERT INTO page_ai_spend_events (request_id, page_id, workspace_id, operation)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (request_id) DO NOTHING`,
-		requestID, pageID, workspaceID, operation)
-	if err != nil {
+	var ok int
+	if err := s.pool.QueryRow(ctx, `
+        WITH ok AS (
+            SELECT 1 FROM pages WHERE id = $2 AND workspace_id = $3
+        ),
+        ins AS (
+            INSERT INTO page_ai_spend_events (request_id, page_id, workspace_id, operation)
+            SELECT $1, $2, $3, $4 FROM ok
+            ON CONFLICT (request_id) DO NOTHING
+            RETURNING 1
+        )
+        SELECT count(*) FROM ok`,
+		requestID, pageID, workspaceID, operation,
+	).Scan(&ok); err != nil {
 		return fmt.Errorf("page: bind ai spend: %w", err)
+	}
+	if ok == 0 {
+		return fmt.Errorf("%w: page %s, workspace %s", ErrPageWorkspaceMismatch, pageID, workspaceID)
 	}
 	return nil
 }
