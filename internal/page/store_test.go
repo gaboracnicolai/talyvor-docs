@@ -96,9 +96,16 @@ func TestCreate_AutoSlugAndDepthAndVersion(t *testing.T) {
 	pool.ExpectQuery(`INSERT INTO pages`).
 		// The trailing "document" is page_type: Create now WRITES the column, and an
 		// unspecified type resolves to the schema default rather than being left out.
+		//
+		// ⚠ ai_cost_usd USED TO SIT BETWEEN linked_issues AND stale_after_days HERE, as a
+		// float64(0), and it is gone because Create no longer inserts it — the column is
+		// owned by trackintegration.Syncer and a create body could set it. This WithArgs
+		// list is what makes that removal visible: pgxmock counts arguments, so the arity
+		// change fails here loudly rather than passing as a silently-different statement.
+		// See sec_aicost_create_test.go.
 		WithArgs("sp-1", "ws-1", &parent, "My New Page", "my-new-page",
 			"{}", "", "", "", float64(0), 2, false, "creator", "creator",
-			[]string{}, float64(0), 0, "document").
+			[]string{}, 0, "document").
 		WillReturnRows(pageRow("pg-1", "My New Page", "my-new-page", 2, &parent))
 	// Version 1 insert — now carries the page's workspace_id.
 	pool.ExpectExec(`INSERT INTO page_versions \(page_id, workspace_id, version`).
