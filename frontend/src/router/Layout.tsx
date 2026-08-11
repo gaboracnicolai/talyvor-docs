@@ -68,8 +68,17 @@ export function Layout() {
             onClose={() => setSearchOpen(false)}
             onOpenPage={(r) => {
               setSearchOpen(false);
-              // Prefer a built path from ids; fall back to the result's own url (already a
-              // /spaces/../pages/.. string) when the space id wasn't resolved.
+              // Prefer a built path from ids; fall back to the result's own url when the space id
+              // wasn't resolved.
+              //
+              // ⚠ THE COMMENT HERE USED TO SAY THE FALLBACK URL IS "already a /spaces/../pages/..
+              // string", AND IT WAS FALSE FOR EXACTLY THE ONE CASE THE FALLBACK EXISTS TO SERVE.
+              // A semantic-only hit was built server-side as `/pages/{id}` — a shape this app has
+              // no route for, so it resolved to `*` = NotFoundView. The server now carries the
+              // space on that row too (internal/search/semantic.go), which is what makes the
+              // sentence true rather than aspirational. This branch is therefore no longer
+              // reachable from a well-formed response; it stays because a url the regex cannot
+              // parse is still better navigated than dropped.
               navigate(r.spaceID ? paths.page(r.spaceID, r.pageID) : r.url);
             }}
           />

@@ -50,8 +50,16 @@ const indexTimeout = 10 * time.Second
 // per-tenant rate-limit + spend attribution, the exact bug this seam fixes.
 var ErrTokenUnavailable = errors.New("search: per-workspace lens token unavailable")
 
+// SemanticResult is one vector hit. SpaceID is here because a URL WITHOUT IT IS NOT A URL THIS
+// PRODUCT CAN OPEN: the SPA registers `/spaces/:spaceID/pages/:pageID` and nothing else that
+// reaches a page, so merge() building `/pages/{id}` sent every semantic-only hit to NotFoundView.
+//
+// ⚠ IT COSTS NOTHING, AND THAT IS THE POINT — the query below ALREADY joins `pages p` and ALREADY
+// filters `p.space_id`. The column was in the join and missing from the SELECT list, so the fix is
+// one identifier and not the page read the handler's own comment assumed it would need.
 type SemanticResult struct {
 	PageID     string  `json:"page_id"`
+	SpaceID    string  `json:"space_id"`
 	Similarity float64 `json:"similarity"`
 }
 
@@ -234,7 +242,7 @@ func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, 
 	}
 	encoded := encodeVector(vec)
 	rows, err := s.pool.Query(ctx,
-		`SELECT pe.page_id, 1 - (pe.embedding <=> $1::vector) AS similarity
+		`SELECT pe.page_id, p.space_id, 1 - (pe.embedding <=> $1::vector) AS similarity
         FROM page_embeddings pe
         JOIN pages p ON p.id = pe.page_id
         WHERE p.workspace_id = $2 AND p.is_template = false
@@ -251,7 +259,7 @@ func (s *SemanticSearch) Search(ctx context.Context, workspaceID, query string, 
 	var out []SemanticResult
 	for rows.Next() {
 		var r SemanticResult
-		if err := rows.Scan(&r.PageID, &r.Similarity); err != nil {
+		if err := rows.Scan(&r.PageID, &r.SpaceID, &r.Similarity); err != nil {
 			return []SemanticResult{}, nil
 		}
 		if r.Similarity < similarityThreshold {

@@ -295,8 +295,16 @@ export function SearchModal({ workspaceId, open, onClose, onOpenPage }: SearchMo
 }
 
 // spaceIDFromURL pulls the space slug out of /spaces/:spaceID/pages/:pageID.
-// The server-built URLs are deterministic; if the shape ever changes
-// this returns undefined and the caller routes to a bare page view.
+// The server-built URLs are deterministic; if the shape ever changes this
+// returns undefined and the caller navigates to the raw server string.
+//
+// ⚠ THIS COMMENT USED TO SAY THE CALLER "routes to a bare page view". THERE IS NO SUCH ROUTE —
+// router/paths.ts registers `/spaces/:spaceID`, `/spaces/:spaceID/pages/:pageID` and `/s/:token`,
+// so a bare `/pages/{id}` resolves to `*` = NotFoundView. That mattered, because a semantic-only
+// search hit was built server-side as exactly that shape: the undefined branch below was not a
+// theoretical edge, it was every result the semantic half alone produced, and it sent each one to
+// Not found. Fixed in internal/search/semantic.go by carrying the space the vector query already
+// joins on.
 function spaceIDFromURL(url: string): string | undefined {
   const m = url.match(/^\/spaces\/([^/]+)\/pages\//);
   return m?.[1];

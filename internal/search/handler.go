@@ -118,9 +118,22 @@ type Result struct {
 	// ⚠ POINTERS, AND NOT AS A STYLE CHOICE. A row has three possible states and a bare float can
 	// only express two. `omitempty` on a float64 deletes the field when the value is 0, so
 	// "this page cost nothing" and "this surface did not report a cost" were the same bytes. They
-	// are different facts: a SEMANTIC-ONLY row is built from a vector hit with no pages row read,
-	// so no cost is KNOWN for it and emitting 0.0 would be a fabricated zero. nil means not
-	// reported; 0 means measured and zero. `omitempty` on a pointer omits only nil.
+	// are different facts: a SEMANTIC-ONLY row carries no cost, so emitting 0.0 would be a
+	// fabricated zero. nil means not reported; 0 means measured and zero. `omitempty` on a pointer
+	// omits only nil.
+	//
+	// ⚠ WHY THOSE ROWS CARRY NO COST IS NOT WHAT THIS COMMENT USED TO SAY, AND THE DIFFERENCE IS
+	// LOAD-BEARING FOR WHOEVER CHANGES IT NEXT. It said the row is "built from a vector hit with
+	// no pages row read". MEASURED: SemanticSearch.Search's SQL is
+	// `FROM page_embeddings pe JOIN pages p ON p.id = pe.page_id`, so a pages row IS read — the
+	// query filters `p.workspace_id`, `p.is_template` and `p.space_id` on it. `space_id`,
+	// `title`, `ai_cost_usd` and `own_ai_cost_usd` are ALL columns of that already-joined table;
+	// only `space_name` (a second join onto spaces) and `headline` (ts_headline over the
+	// full-text query) are genuinely absent. So "should a semantic hit pay for a page read?" is a
+	// question about a read that already happens. The URL's space was taken because a url without
+	// it is unroutable; the costs are LEFT ABSENT DELIBERATELY, because whether a number that has
+	// never been rendered on this row should start appearing is a product question about a money
+	// surface, not a plumbing one — and it is not settled by discovering it would be cheap.
 	AICostUSD      *float64 `json:"ai_cost_usd,omitempty"`
 	OwnAICostUSD   *float64 `json:"own_ai_cost_usd,omitempty"`
 	TotalAICostUSD *float64 `json:"total_ai_cost_usd,omitempty"`
@@ -334,12 +347,20 @@ func merge(ft []page.SearchResult, sem []SemanticResult) []Result {
 		if seen[s.PageID] {
 			continue
 		}
+		// THE SPACE IS NOT COSMETIC HERE — IT IS THE DIFFERENCE BETWEEN A RESULT YOU CAN OPEN AND
+		// ONE THAT LANDS ON "Not found". This row used to be built with `pageURL("", s.PageID)`,
+		// i.e. `/pages/{id}`, and the SPA registers no such route (`router/paths.ts`: `/spaces/:s`,
+		// `/spaces/:s/pages/:p`, `/s/:token`), so it resolved to `*` = NotFoundView. Every hit only
+		// the SEMANTIC half could produce — the whole reason this half exists — was a dead link.
+		// SemanticSearch.Search already joins `pages` and already filters `p.space_id`, so carrying
+		// the column costs nothing; the title, headline and costs are a separate question because
+		// they are NOT in that join.
 		out = append(out, scored{
 			r: Result{
 				PageID:     s.PageID,
 				Similarity: s.Similarity,
 				Source:     "semantic",
-				URL:        pageURL("", s.PageID),
+				URL:        pageURL(s.SpaceID, s.PageID),
 			},
 			score: s.Similarity * 0.4,
 		})

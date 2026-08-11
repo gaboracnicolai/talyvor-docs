@@ -192,7 +192,7 @@ func TestSearchEmbed_CarriesPerWorkspaceJWT_NotGlobalKey(t *testing.T) {
 	defer f.Close()
 	s, pool := meteredSemantic(t, f.URL)
 
-	rows := pgxmock.NewRows([]string{"page_id", "similarity"}).AddRow("pg-1", float64(0.93))
+	rows := pgxmock.NewRows([]string{"page_id", "space_id", "similarity"}).AddRow("pg-1", "sp-1", float64(0.93))
 	pool.ExpectQuery(`page_embeddings.*<=>`).
 		WithArgs(pgxmock.AnyArg(), "wsB", 10, (*string)(nil), 0).
 		WillReturnRows(rows)
@@ -268,10 +268,10 @@ func TestTwoTenants_DecisiveEndToEndIsolation(t *testing.T) {
 	// (upsert), wsA search (pgvector query scoped to wsA), then the same pair for wsB.
 	pool.ExpectExec(`INSERT INTO page_embeddings`).WithArgs("pgA", pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectQuery(`page_embeddings.*<=>`).WithArgs(pgxmock.AnyArg(), "wsA", 10, (*string)(nil), 0).
-		WillReturnRows(pgxmock.NewRows([]string{"page_id", "similarity"}).AddRow("pgA", float64(0.9)))
+		WillReturnRows(pgxmock.NewRows([]string{"page_id", "space_id", "similarity"}).AddRow("pgA", "spA", float64(0.9)))
 	pool.ExpectExec(`INSERT INTO page_embeddings`).WithArgs("pgB", pgxmock.AnyArg()).WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectQuery(`page_embeddings.*<=>`).WithArgs(pgxmock.AnyArg(), "wsB", 10, (*string)(nil), 0).
-		WillReturnRows(pgxmock.NewRows([]string{"page_id", "similarity"}).AddRow("pgB", float64(0.9)))
+		WillReturnRows(pgxmock.NewRows([]string{"page_id", "space_id", "similarity"}).AddRow("pgB", "spB", float64(0.9)))
 
 	ctx := context.Background()
 	if err := s.IndexPage(ctx, "pgA", "wsA", "alpha body"); err != nil {
