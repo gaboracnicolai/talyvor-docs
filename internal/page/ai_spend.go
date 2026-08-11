@@ -76,6 +76,16 @@ func (s *Store) BindAISpend(ctx context.Context, requestID, pageID, workspaceID,
 
 // PriceAISpend lands the cost of one Lens request on the page it was bound to, EXACTLY ONCE.
 //
+// ⚠ IT DOES NOT TOUCH updated_at, AND IT USED TO — THIS IS THE THIRD COPY OF THE SEAM THE
+// RecordView BLOCK IN store.go DESCRIBES. GetStalePages keys on pages.updated_at, so landing a
+// cost here re-dated the document: measured on real Postgres, a page 200 days past a 30-day TTL
+// dropped off the stale list when a $0.0031 `docs-ai-summarize` was priced. The operation that
+// paid for it need not have changed anything — summarize and title-suggest are read-only — and
+// this sweep runs minutes-to-hours after the call, so the timestamp was not even the moment of
+// the operation. For the features that DO change the page, the user's save goes through Update,
+// which bumps the column itself. The sibling writer UpdateAICost never touched it.
+// Pinned by aispend_staleness_test.go.
+//
 // ⚠ THE EXACTLY-ONCE GUARANTEE IS THE `cost_usd IS NULL` PREDICATE, not the caller's diligence.
 // The sync re-reads an overlapping window on every tick by design, so the same request arrives
 // repeatedly. The UPDATE matches only a still-unpriced row, and pages.own_ai_cost_usd is
@@ -102,8 +112,7 @@ func (s *Store) PriceAISpend(ctx context.Context, requestID string, costUSD floa
         ),
         rolled AS (
             UPDATE pages p
-               SET own_ai_cost_usd = p.own_ai_cost_usd + priced.cost_usd,
-                   updated_at = NOW()
+               SET own_ai_cost_usd = p.own_ai_cost_usd + priced.cost_usd
               FROM priced
              WHERE p.id = priced.page_id
             RETURNING p.id
