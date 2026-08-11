@@ -2,6 +2,7 @@ package analytics
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -125,47 +126,76 @@ func TestGetReadStats_AggregatesViewsAndViewers(t *testing.T) {
 	}
 }
 
+// allowAllPages is a visibility gate that admits everything.
+//
+// ⚠ IT MAKES THIS TEST BLIND TO THE FILTER BY CONSTRUCTION, AND THAT IS THE POINT OF SAYING SO.
+// With every page visible, a GetWorkspaceStats that dropped the AuthorizePageRead calls entirely
+// would pass here. This test owns the PROJECTION — which statements run, with which arguments,
+// and that their columns round-trip into the struct. The filter's catcher is
+// privatespace_realpg_test.go, on real Postgres against the real permission engine. Neither
+// subsumes the other; a uniform fixture cannot tell two sources apart.
+type allowAllPages struct{}
+
+func (allowAllPages) AuthorizePageRead(context.Context, string) (bool, bool) { return true, true }
+
 func TestGetWorkspaceStats_TopAndBottomPagesAndNeverRead(t *testing.T) {
 	store, pool := newMockStore(t)
+	store.WithPageRead(allowAllPages{})
 
-	// Aggregate totals.
-	pool.ExpectQuery(`COUNT.*page_views.*workspace_id`).
-		WithArgs("ws-1", 30).
-		WillReturnRows(pgxmock.NewRows([]string{"total_views", "unique_viewers"}).
-			AddRow(int(120), int(15)))
-
-	// Most-read pages.
+	// The whole ranked window — ONE statement for both cohorts, and NO `LIMIT` in it. The cap is
+	// applied in Go after filtering, because a filter after a SQL LIMIT returns short lists.
 	pool.ExpectQuery(`(?i)page_id.*group by.*order by count.*desc`).
 		WithArgs("ws-1", 30).
 		WillReturnRows(pgxmock.NewRows([]string{"page_id", "title", "view_count"}).
 			AddRow("pg-1", "Top", int(50)).
-			AddRow("pg-2", "Second", int(30)))
-
-	// Least-read pages (with > 0 views).
-	pool.ExpectQuery(`(?i)page_id.*group by.*order by count.*asc`).
-		WithArgs("ws-1", 30).
-		WillReturnRows(pgxmock.NewRows([]string{"page_id", "title", "view_count"}).
+			AddRow("pg-2", "Second", int(30)).
 			AddRow("pg-9", "Cold", int(1)))
 
-	// Never-read count.
-	pool.ExpectQuery(`COUNT.*pages.*LEFT JOIN page_views`).
+	// Distinct viewers, restricted to the pages that survived the filter.
+	pool.ExpectQuery(`(?i)count\(distinct viewer_id\).*page_id = any`).
+		WithArgs("ws-1", 30, []string{"pg-1", "pg-2", "pg-9"}).
+		WillReturnRows(pgxmock.NewRows([]string{"unique_viewers"}).AddRow(int(15)))
+
+	// Never-read page IDS, not a COUNT — a count cannot be filtered.
+	pool.ExpectQuery(`(?i)select p\.id from pages p.*left join page_views`).
 		WithArgs("ws-1").
-		WillReturnRows(pgxmock.NewRows([]string{"never"}).AddRow(int(3)))
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).
+			AddRow("pg-a").AddRow("pg-b").AddRow("pg-c"))
 
 	got, err := store.GetWorkspaceStats(context.Background(), "ws-1", 30)
 	if err != nil {
 		t.Fatalf("GetWorkspaceStats: %v", err)
 	}
-	if got.TotalViews != 120 {
-		t.Fatalf("total views = %d", got.TotalViews)
+	// Summed from the surviving rows (50+30+1), never read off a workspace-wide COUNT.
+	if got.TotalViews != 81 {
+		t.Fatalf("total views = %d, want 81 (summed from the visible rows)", got.TotalViews)
 	}
-	if len(got.MostReadPages) != 2 || got.MostReadPages[0].PageID != "pg-1" {
+	if got.UniqueViewers != 15 {
+		t.Fatalf("unique viewers = %d, want 15", got.UniqueViewers)
+	}
+	if len(got.MostReadPages) != 3 || got.MostReadPages[0].PageID != "pg-1" {
 		t.Fatalf("most read wrong: %+v", got.MostReadPages)
 	}
-	if len(got.LeastReadPages) != 1 || got.LeastReadPages[0].PageID != "pg-9" {
+	// The tail of the same ranking, reversed — the set the old ORDER BY ASC statement returned.
+	if len(got.LeastReadPages) != 3 || got.LeastReadPages[0].PageID != "pg-9" {
 		t.Fatalf("least read wrong: %+v", got.LeastReadPages)
 	}
 	if got.NeverRead != 3 {
 		t.Fatalf("never read = %d", got.NeverRead)
+	}
+}
+
+// TestGetWorkspaceStats_NoGate_FailsClosed pins the misconfiguration answer. An unwired gate must
+// not fall through to an unfiltered roll-up, and must not answer with a zeroed one either — on
+// this surface zeroes are the positive claim "this workspace has no readership".
+func TestGetWorkspaceStats_NoGate_FailsClosed(t *testing.T) {
+	store, _ := newMockStore(t)
+
+	got, err := store.GetWorkspaceStats(context.Background(), "ws-1", 30)
+	if !errors.Is(err, ErrNoPageReadGate) {
+		t.Fatalf("err = %v, want ErrNoPageReadGate", err)
+	}
+	if got != nil {
+		t.Fatalf("stats = %+v, want nil — an unwired gate must not answer with numbers", got)
 	}
 }
