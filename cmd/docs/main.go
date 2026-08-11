@@ -486,6 +486,14 @@ func main() {
 	// and it reads the unexported system-scoped list rather than this one.
 	freshEngine.WithPageRead(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
 
+	// The workspace ANALYTICS ROLL-UP is the fifth copy of the same seam: GET
+	// /v1/workspaces/{wsID}/analytics/pages authorized the workspace and stopped, so it named
+	// pages in private spaces the caller has no grant on — while the by-page analytics route one
+	// level down 403s that same caller. Without this line the roll-up returns
+	// analytics.ErrNoPageReadGate rather than an unfiltered answer;
+	// internal/analytics/mainwiring_test.go is the tripwire on it.
+	analyticsStore.WithPageRead(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
+
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
 	// frames through the engine's per-client send channels.
