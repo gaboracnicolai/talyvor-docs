@@ -113,6 +113,35 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      # THE RULES' OWN TEST, AND IT RUNS FIRST — a class guard that has silently narrowed makes
+      # the scan below exit 0 for the wrong reason, so "the rules still catch what they claim"
+      # has to be established before "the tree is clean" means anything.
+      #
+      # docs-no-url-param-workspace-scope narrowed twice. Once visibly (a paths.include
+      # allow-list that omitted four packages, one of them shipping the exact defect the rule
+      # exists to catch) and once invisibly: its pattern matches a LITERAL param name, so the
+      # single indirect workspace read in the tree — ratelimit.WorkspaceLimit, whose param name
+      # is a function argument — was never flagged, while carrying an inline exemption written
+      # as though it had been.
+      #
+      # `semgrep --test` pairs a rule file with a fixture of the same basename IN THE SAME
+      # DIRECTORY, hence the copy: the fixtures live in .semgrep/tests/ (a `tests/` path
+      # component is in semgrep's default ignore, which is what keeps their deliberate
+      # violations out of the scan below — measured; a hidden directory does NOT have that
+      # property) and running --test in place would load .semgrep/*.yml twice.
+      - name: rule fixtures (the class guards must still catch what they claim)
+        run: |
+          set -eu
+          mkdir -p /tmp/semgrep-rule-tests
+          cp .semgrep/*.yml .semgrep/tests/*.go /tmp/semgrep-rule-tests/
+          semgrep --test /tmp/semgrep-rule-tests
+      # AND THE TWO THINGS THE FIXTURES ARE BLIND TO. `semgrep --test` applies a rule straight to
+      # its fixture and IGNORES `paths:` — so the fixtures stay 4/4 green while an allow-list
+      # narrows the rule to nothing in production. That is not hypothetical: it is the narrowing
+      # this repo already shipped. This check also names the rules that have no fixture, so a new
+      # one cannot join them silently.
+      - name: rule scope (no allow-lists; the unfixtured rules are named)
+        run: python3 scripts/check-semgrep-rule-scope.py
       # --error → non-zero exit on any finding, so this BLOCKS rather than reports.
       - run: semgrep --config .semgrep/ --error --quiet
 

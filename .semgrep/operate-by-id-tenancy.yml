@@ -81,6 +81,44 @@ rules:
     # each exemption is one line long, states why it is safe, and is reviewed in the diff
     # that introduces it — while any NEW unauthorized read is flagged by default, which is
     # the property that failed here.
+    #
+    # ⚠ THAT LAST SENTENCE WAS TRUE ONLY OF A LITERAL. `pattern: chi.URLParam($R, "wsID")`
+    # matches a STRING; a read whose param NAME is not one is not flagged, and the deny-list
+    # then has nothing to deny. MEASURED, both directions, because the boundary is not where
+    # it looks:
+    #   · `const wsParam = "wsID"; chi.URLParam(r, wsParam)`  IS flagged — semgrep constant-
+    #     propagates within a file, so a named constant is not an escape.
+    #   · `func f(param string) { chi.URLParam(r, param) }`   is NOT flagged — propagation
+    #     does not cross a function boundary, and this is the shape three of this repo's own
+    #     middlewares already use (ratelimit.WorkspaceLimit, permission's two enforcers).
+    # The evidence that the gap was invisible rather than accepted: ratelimit/middleware.go
+    # carried a `// nosemgrep: docs-no-url-param-workspace-scope` for a finding this rule has
+    # never produced — an exemption written by someone who believed the line was covered.
+    # docs-no-indirect-url-param-scope below closes it; see .semgrep/operate-by-id-tenancy.go
+    # for the fixture that fails if either half regresses.
+
+  # ── The literal-only blind spot of the rule above, closed. A path param read through a name
+  #    this rule cannot resolve is not automatically a defect — it is a read NOBODY HAS
+  #    CLASSIFIED. Every one of the four in the tree at authoring time is safe, and each now
+  #    says why at the line, which is the same deny-list discipline the sibling rule uses.
+  - id: docs-no-indirect-url-param-scope
+    languages: [go]
+    severity: ERROR
+    message: >
+      SEC-4 L2 (indirect param name): this reads a chi path param whose NAME is not a literal
+      here, so docs-no-url-param-workspace-scope — which matches chi.URLParam($R, "wsID") —
+      cannot tell whether this is the workspace. Constant propagation covers `const p = "wsID"`;
+      it does NOT cross a function boundary, so a name arriving as an ARGUMENT reads a param the
+      class guard never sees. That is the deceptive shape with one more indirection: the caller
+      supplies the name, so the call site alone cannot show what was read. If the value can be
+      the workspace, authorize it (authz.AuthorizeWorkspace) or scope by authz.WorkspaceIDs(ctx)
+      before it reaches a store; if it is a resource id resolved elsewhere, say so in an inline
+      `// nosemgrep: docs-no-indirect-url-param-scope -- <what this name is, and who scopes it>`.
+    patterns:
+      - pattern: chi.URLParam($R, $P)
+      # Every literal read is the sibling rule's business, INCLUDING "wsID" — so a line does
+      # not need two suppressions, and this rule's findings are exactly the unclassified set.
+      - pattern-not: chi.URLParam($R, "...")
 
   - id: docs-by-id-write-requires-workspace-scope-sprintf
     languages: [go]
