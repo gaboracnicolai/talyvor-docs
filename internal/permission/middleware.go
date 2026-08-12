@@ -187,6 +187,7 @@ func (e *Enforcer) Require(minAccess AccessLevel) func(http.Handler) http.Handle
 // private + created_by — the only fields the rule engine needs.
 func SpaceResolverFromParam(paramName string, looker SpaceLookup) ResourceResolver {
 	return func(ctx context.Context, r *http.Request) (resourceContext, error) {
+		// nosemgrep: docs-no-indirect-url-param-scope -- a SPACE id, never a workspace: the sole caller is cmd/docs/main.go's spaceEnf with "spaceID". It is not used as a scope — the looker is workspace-scoped by the host, and the WorkspaceID this resolver returns is read off the ROW (md.WorkspaceID), never off the URL.
 		id := chi.URLParam(r, paramName)
 		md, err := looker(ctx, id)
 		if err != nil {
@@ -232,6 +233,7 @@ type PageMeta struct {
 // preloads the space-level grants via ListForResource.
 func PageResolverFromParam(paramName string, looker PageLookup, store *Store) ResourceResolver {
 	return func(ctx context.Context, r *http.Request) (resourceContext, error) {
+		// nosemgrep: docs-no-indirect-url-param-scope -- a PAGE id, never a workspace: the sole caller is cmd/docs/main.go's pageEnf with "pageID". Same shape as SpaceResolverFromParam above — the looker is workspace-scoped by the host and md.WorkspaceID comes off the row.
 		id := chi.URLParam(r, paramName)
 		md, err := looker(ctx, id)
 		if err != nil {
@@ -262,6 +264,7 @@ type BlockPageLookup func(ctx context.Context, blockID string) (pageID string, m
 // PageResolverFromBlock gates a /blocks/{blockID} route on the access of the PAGE that owns the block.
 func PageResolverFromBlock(blockParam string, looker BlockPageLookup, store *Store) ResourceResolver {
 	return func(ctx context.Context, r *http.Request) (resourceContext, error) {
+		// nosemgrep: docs-no-indirect-url-param-scope -- a BLOCK id, never a workspace: the sole caller is cmd/docs/main.go's blockEnf with "blockID", and the host's lookup is scoped to the caller's workspaces (a foreign block errors → 404), as the BlockPageLookup contract above states.
 		pageID, md, err := looker(ctx, chi.URLParam(r, blockParam))
 		if err != nil {
 			return resourceContext{}, err

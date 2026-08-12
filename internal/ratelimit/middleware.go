@@ -34,7 +34,15 @@ import (
 func (l *Limiter) WorkspaceLimit(param string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// nosemgrep: docs-no-url-param-workspace-scope -- authorized on the next line by AuthorizeWorkspace; the limiter keys on the returned Membership, never on this raw param
+			// THIS LINE CARRIED A SUPPRESSION THAT SUPPRESSED NOTHING. It named
+			// docs-no-url-param-workspace-scope, which matches chi.URLParam($R, "wsID") — a
+			// LITERAL. `param` is a function argument, so constant propagation has nothing to
+			// resolve here and that rule has never produced a finding on this line. The
+			// exemption was the only visible trace of the gap: someone believed the class guard
+			// covered the one indirect workspace read in the tree, and it could not see it.
+			// docs-no-indirect-url-param-scope is the rule that does; the reason below is the
+			// original author's and is unchanged, because it was right.
+			// nosemgrep: docs-no-indirect-url-param-scope -- authorized on the next line by AuthorizeWorkspace; the limiter keys on the returned Membership, never on this raw param
 			wsID := chi.URLParam(r, param)
 			m, ok := authz.AuthorizeWorkspace(r.Context(), wsID)
 			if !ok {
