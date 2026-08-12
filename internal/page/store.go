@@ -619,6 +619,24 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 // Depth is intentionally NOT recomputed for the entire subtree in
 // Phase 1 — the simplest correct option for now. A "rebalance depth"
 // helper can come later if anyone notices the off-by-one.
+//
+// ⚠ STATEMENT 2 MUST NOT TOUCH updated_at, AND IT USED TO — THE FOURTH COPY OF THE SEAM THE
+// RecordView BLOCK BELOW AND ai_spend.go's PriceAISpend BLOCK BOTH DESCRIBE. GetStalePages keys
+// on pages.updated_at, so re-dating the children here cleared the freshness clock of EVERY child
+// of the deleted page, for a full stale_after_days window, with nobody editing or verifying one
+// of them. Measured on real Postgres: a child 30 days past a 7-day window left the stale list the
+// moment its parent was deleted.
+//
+// ⚠ THIS ONE DIFFERS FROM THE OTHER THREE IN WHO IS ACTING. They re-dated ONE page as a side
+// effect of an operation ON that page; this re-dates every child at once, and the actor is
+// somebody deleting a DIFFERENT document. GetStalePages feeds the SPA's stale screen and sidebar
+// count, the 09:00 UTC freshness digest, GET /workspaces/{wsID}/stale and the MCP
+// get_stale_pages tool — all four went quiet together, and nothing anywhere recorded it.
+//
+// A user-initiated MOVE is untouched and still bumps the column: parent_id is in Update's field
+// list and Update sets updated_at itself. What is fixed is only that the CASCADE from deleting
+// another page no longer answers "has this document been reviewed lately" on the child's behalf.
+// Pinned by reparent_staleness_realpg_test.go.
 func (s *Store) Delete(ctx context.Context, id string) error {
 	if s.pool == nil {
 		return errors.New("page: store has no pool")
@@ -635,7 +653,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	_ = depth // documented above; kept for future rebalance hook.
 
 	if _, err := s.pool.Exec(ctx,
-		`UPDATE pages SET parent_id = $1, updated_at = NOW() WHERE parent_id = $2`,
+		`UPDATE pages SET parent_id = $1 WHERE parent_id = $2`,
 		parent, id,
 	); err != nil {
 		return fmt.Errorf("page: reparent: %w", err)
