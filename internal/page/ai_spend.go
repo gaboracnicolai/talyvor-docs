@@ -99,6 +99,23 @@ func (s *Store) BindAISpend(ctx context.Context, requestID, pageID, workspaceID,
 //	ErrNoBinding                          this request was never bound to a page — NOT an error
 //	                                      condition, just a request that was not a page operation
 func (s *Store) PriceAISpend(ctx context.Context, requestID string, costUSD float64, tokens int) (landed bool, err error) {
+	return s.PriceAISpendWithServeSource(ctx, requestID, costUSD, tokens, "")
+}
+
+// PriceAISpendWithServeSource is PriceAISpend plus the one fact that says whether a $0.00 price is
+// a completion that cost nothing or a completion Talyvor did not pay a provider for.
+//
+// ⚠ WHY THE FOUR-ARGUMENT FORM SURVIVES RATHER THAN EVERY CALLER GAINING AN EMPTY STRING. The
+// sweep is the only caller that has a serve_source to pass — it is a field of Lens's pull — and it
+// is bound to THIS method by the PageSpendStore interface, so it cannot silently fall back to the
+// short form. Every other caller (the store's own guards, the attribution and billing tests) is
+// asserting something about money or tenancy and has no serve_source in hand; making them write
+// `""` would spell "not reported" in eleven places instead of one, and each of those is a seam a
+// later reader could mistake for a claim about how the completion was served.
+//
+// serveSource is recorded VERBATIM, including empty. Empty means NOT REPORTED and must never be
+// normalised to "upstream": that value asserts a provider was paid, which is the whole question.
+func (s *Store) PriceAISpendWithServeSource(ctx context.Context, requestID string, costUSD float64, tokens int, serveSource string) (landed bool, err error) {
 	if requestID == "" {
 		return false, errors.New("page: PriceAISpend requires request_id")
 	}
@@ -106,7 +123,7 @@ func (s *Store) PriceAISpend(ctx context.Context, requestID string, costUSD floa
 	qErr := s.pool.QueryRow(ctx, `
         WITH priced AS (
             UPDATE page_ai_spend_events
-               SET cost_usd = $2, tokens = $3, priced_at = NOW()
+               SET cost_usd = $2, tokens = $3, priced_at = NOW(), serve_source = $4
              WHERE request_id = $1 AND cost_usd IS NULL
             RETURNING page_id, cost_usd
         ),
@@ -121,7 +138,7 @@ func (s *Store) PriceAISpend(ctx context.Context, requestID string, costUSD floa
             SELECT 1 FROM page_ai_spend_events WHERE request_id = $1
         )
         SELECT (SELECT count(*) FROM rolled), (SELECT count(*) FROM bound)`,
-		requestID, costUSD, tokens,
+		requestID, costUSD, tokens, serveSource,
 	).Scan(&updated, new(int))
 	if qErr != nil {
 		return false, fmt.Errorf("page: price ai spend: %w", qErr)
