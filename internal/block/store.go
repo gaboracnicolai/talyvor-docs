@@ -59,12 +59,40 @@ func (s *Store) Create(ctx context.Context, b model.Block) (*model.Block, error)
 	if b.Content == "" {
 		b.Content = "{}"
 	}
-	return scan(s.pool.QueryRow(ctx,
+	// A BLOCK'S PARENT IS A BLOCK ON THE SAME PAGE, and until this predicate existed nothing said
+	// so. The FK in 0002_pages.sql points at blocks(id) with no page and no workspace column in
+	// sight, and the handler sets PageID from the URL but takes ParentID off the decoded body — so
+	// a caller could name ANY block in the table, including another tenant's, and the row was
+	// accepted.
+	//
+	// Folded INTO the insert rather than run as a lookup before it: a separate SELECT leaves a
+	// window in which the parent moves page or is deleted between check and write.
+	//
+	// BOTH refusals return the SAME error on purpose. "Parent lives on another page" and "parent
+	// does not exist" were distinguishable before this (201 vs an FK violation), and that
+	// difference IS the cross-tenant existence oracle over block ids that ErrNotFound's comment
+	// below exists to deny. Pinned by TestBlockCreate_UnknownParentAndOtherPageParentAre-
+	// Indistinguishable_RealPG, which compares the two error strings.
+	out, err := scan(s.pool.QueryRow(ctx,
 		`INSERT INTO blocks (page_id, type, content, position, parent_id)
-        VALUES ($1, $2, $3, $4, $5) RETURNING `+columns,
+        SELECT $1, $2, $3, $4, $5::text
+        WHERE $5::text IS NULL
+           OR EXISTS (SELECT 1 FROM blocks WHERE id = $5::text AND page_id = $1)
+        RETURNING `+columns,
 		b.PageID, b.Type, b.Content, b.Position, b.ParentID,
 	))
+	// No row inserted => the WHERE refused it. The FK can no longer fire for a missing parent,
+	// because a parent that exists nowhere fails the EXISTS first.
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrParentNotOnPage
+	}
+	return out, err
 }
+
+// ErrParentNotOnPage is returned when parent_id names a block that is not on the page being
+// written to — whether it belongs to another page, another workspace, or no row at all. One error
+// for all three: telling them apart is the existence oracle.
+var ErrParentNotOnPage = errors.New("block: parent_id must be a block on the same page")
 
 func (s *Store) ListByPage(ctx context.Context, pageID string) ([]model.Block, error) {
 	if s.pool == nil {
