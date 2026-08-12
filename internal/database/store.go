@@ -355,6 +355,22 @@ func (s *Store) DeleteRow(ctx context.Context, databaseID, id string, wsIDs []st
 // rather than building dynamic WHERE clauses against JSONB because
 // the row counts are bounded (MaxRows = 10K) and the rule engine
 // stays unit-testable.
+//
+// ⚠ `ORDER BY position ASC, created_at ASC, id ASC` — THE TIEBREAK IS NOT DECORATION, AND TIES ARE
+// THE ORDINARY CASE HERE. `position` is a client-supplied FLOAT and the SPA computes it as
+// `rows.length + 1` (DatabaseBlock.tsx:89), so deleting any row and adding another hands the new
+// row the position an existing one already holds. `position ASC` alone then left the answer to the
+// heap: measured on real Postgres, delete-the-middle + "+ New" returned the NEW row ABOVE the older
+// one it tied with, because it reused the freed slot once the space was reclaimed. `page/store.go`
+// states the rule this obeys — an ORDER BY that names no unique column has NO defined relative
+// order — and `id` is the PRIMARY KEY, which is what makes this one total: `created_at` is `NOW()`,
+// so rows written in a single transaction share it. `created_at` sits ahead of `id` so ties read as
+// creation order rather than as UUID order, `id` being `gen_random_uuid()`.
+//
+// This ordering also feeds `sortRows` below, which is a `sort.SliceStable` — a stable sort
+// PRESERVES its input order for equal keys, so an undefined order here stayed undefined all the way
+// to the client rather than being re-decided. Pinned by
+// TestListRows_TiedPositionsHaveADefinedOrder_RealPG, which asserts both halves.
 func (s *Store) ListRows(ctx context.Context, databaseID string, view *DatabaseView, wsIDs []string) ([]Row, error) {
 	if s.pool == nil {
 		return nil, nil
@@ -362,7 +378,7 @@ func (s *Store) ListRows(ctx context.Context, databaseID string, view *DatabaseV
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+rowCols+` FROM database_rows WHERE database_id = $1
         AND database_id IN (SELECT id FROM databases WHERE workspace_id = ANY($2))
-        ORDER BY position ASC`,
+        ORDER BY position ASC, created_at ASC, id ASC`,
 		databaseID, wsIDs,
 	)
 	if err != nil {
