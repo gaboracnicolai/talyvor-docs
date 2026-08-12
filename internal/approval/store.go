@@ -351,6 +351,19 @@ func (s *Store) aggregate(ctx context.Context, requestID string) (ApprovalStatus
 			pending++
 		}
 	}
+	// A STREAM THAT FAILED MID-FLIGHT IS NOT A COMPLETE COUNT, AND WITHOUT THIS IT IS
+	// INDISTINGUISHABLE FROM ONE. When Postgres raises an error while rows are being produced,
+	// pgx delivers every row made so far — each with a nil Scan error — and then Next() returns
+	// false exactly as it does at a clean end of stream; the reason is only ever in rows.Err().
+	// The counters below make that silence one-directional: a row that never arrived cannot be
+	// `rejected` and cannot be `pending`, so a truncated read can only move the verdict TOWARD
+	// approval. Measured on real Postgres through Decide before this line existed — two of four
+	// rows read, a reviewer's `rejected` row unread, Decide returning nil, and both
+	// approval_requests.status and pages.doc_status written as "approved".
+	// See decisionstream_realpg_test.go.
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("approval: aggregate decisions: %w", err)
+	}
 	if rejected > 0 {
 		return ApprovalRejected, nil
 	}
