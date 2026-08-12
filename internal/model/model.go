@@ -125,8 +125,10 @@ type Block struct {
 	UpdatedAt time.Time `json:"updated_at"          db:"updated_at"`
 }
 
-// PageVersion captures the state of a page each time its content
-// changes. History is APPEND-ONLY — every committed save's snapshot is
+// PageVersion captures the state of a page each time its TITLE OR its
+// CONTENT changes — both, because RestoreVersion writes both back, and
+// a column that is restored but not recorded is a column a restore can
+// overwrite with no copy left. History is APPEND-ONLY — every committed save's snapshot is
 // a restore point and is never pruned/truncated (the single-writer +
 // versioning model relies on a complete linear history). WorkspaceID is
 // the version's own tenant (denormalized from the page) so a row is

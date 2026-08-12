@@ -432,8 +432,10 @@ func validatePageType(v string) (string, error) {
 
 // Update applies the supplied field map and returns the materialised
 // row. When `content` is patched we ALSO bump content_text (extracted
-// from the new ProseMirror JSON) and append a new entry to
-// page_versions. History is append-only — no version is ever pruned.
+// from the new ProseMirror JSON). A save that submits EITHER versioned
+// column — title or content, the two RestoreVersion writes back —
+// appends one entry to page_versions. History is append-only — no
+// version is ever pruned.
 func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (*model.Page, error) {
 	if s.pool == nil {
 		return nil, errors.New("page: store has no pool")
@@ -460,6 +462,24 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 		if str, isStr := v.(string); isStr {
 			contentChanged = true
 			updates["content_text"] = extractContentText(str)
+		}
+	}
+	// A RENAME IS A SAVE, SO IT OPENS A RESTORE POINT TOO. page_versions carries exactly two
+	// content-bearing columns and RestoreVersion writes BOTH of them back onto the live page;
+	// only the second used to append a row. A title-only save therefore left the new name in no
+	// version anywhere, and restoring the NEWEST version — the state the page is supposedly
+	// already in, under a button the SPA labels "non-destructive" — renamed the live document
+	// back and destroyed the only copy of the rename. Two shipped callers produce a title-only
+	// map: PageView.tsx's flushTitle sends {title} as its own PATCH, and mcp toolUpdatePage
+	// builds the map one PRESENT argument at a time.
+	//
+	// The test is content's, verbatim — "was this column submitted as a string", not "did the
+	// value differ" — so the two versioned columns are versioned by one rule rather than two.
+	// A save that submits both still appends exactly ONE row (the || below).
+	titleChanged := false
+	if v, ok := updates["title"]; ok {
+		if _, isStr := v.(string); isStr {
+			titleChanged = true
 		}
 	}
 
@@ -526,7 +546,7 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 		return nil, fmt.Errorf("page: update: %w", err)
 	}
 
-	if contentChanged {
+	if contentChanged || titleChanged {
 		// Bump version: SELECT MAX(version) + INSERT new row. Version history is APPEND-ONLY —
 		// every committed save's snapshot is a restore point and must never be truncated (the
 		// single-writer + versioning model, and Option B later, both rely on a complete linear
@@ -553,6 +573,14 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
             VALUES ($1, $2, $3, $4, $5, $6)`,
 			id, out.WorkspaceID, nextVer, out.Title, out.Content, updatedBy,
 		)
+	}
+
+	// THE TWO CONTENT HOOKS STAY ON `contentChanged` ALONE, and that is the reason the snapshot
+	// block ends above rather than wrapping them. SyncLinks is handed out.Content and IndexPage
+	// out.ContentText — neither is touched by a rename, so re-running them would re-derive the
+	// values they already hold, and IndexPage's is a paid Lens round-trip per keystroke-flush of
+	// a title field. TestTitleOnlySave_DoesNotRunTheContentHooks_RealPG holds the split.
+	if contentChanged {
 		// Reconcile page_links → Track issue embeds. Best-effort:
 		// a sync failure shouldn't fail the page save. The next
 		// content edit will reconcile again.
@@ -974,9 +1002,15 @@ func (s *Store) GetVersions(ctx context.Context, pageID string) ([]model.PageVer
 	return out, rows.Err()
 }
 
-// RestoreVersion overwrites the live page with the content from a
-// historical version. The current state lands as a fresh version
-// first so the restore is itself reversible.
+// RestoreVersion overwrites the live page's TITLE AND CONTENT with a historical version's.
+//
+// ⚠ WHAT MAKES IT REVERSIBLE IS NOT THIS FUNCTION, and the comment that said otherwise ("the
+// current state lands as a fresh version first") was measured false at 78be685: the row Update
+// appends here records the RESTORED state, after the write, not the state that was replaced. The
+// restore is reversible only because every save that changes either restored column has already
+// left its own snapshot — which is why Update versions a title-only save. While it did not,
+// restoring the newest version wrote a stale title over the live one and the discarded name was
+// in no row anywhere.
 func (s *Store) RestoreVersion(ctx context.Context, pageID string, version int) (*model.Page, error) {
 	if s.pool == nil {
 		return nil, errors.New("page: store has no pool")
