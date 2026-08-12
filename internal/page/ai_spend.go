@@ -98,6 +98,13 @@ func (s *Store) BindAISpend(ctx context.Context, requestID, pageID, workspaceID,
 //	landed=false  with err==nil          already priced (a re-pull), nothing changed
 //	ErrNoBinding                          this request was never bound to a page — NOT an error
 //	                                      condition, just a request that was not a page operation
+//
+// ⚠ THE THIRD LINE WAS A PROMISE THE CODE COULD NOT KEEP, AND THE STATEMENT ALREADY HELD THE
+// ANSWER. The `bound` CTE below exists for exactly this decision and its count was scanned into
+// `new(int)` — discarded — so ErrNoBinding had ZERO producers in the repository and
+// `errors.Is(err, ErrNoBinding)` was false for every possible input. "Never ours" and "already
+// priced" came back as the same `(false, nil)`, which is the one distinction a reconciliation of
+// this ledger has to make. Fixing it moves no money: `landed` and the roll-up are untouched.
 func (s *Store) PriceAISpend(ctx context.Context, requestID string, costUSD float64, tokens int) (landed bool, err error) {
 	return s.PriceAISpendWithServeSource(ctx, requestID, costUSD, tokens, "")
 }
@@ -119,7 +126,7 @@ func (s *Store) PriceAISpendWithServeSource(ctx context.Context, requestID strin
 	if requestID == "" {
 		return false, errors.New("page: PriceAISpend requires request_id")
 	}
-	var updated int
+	var updated, bound int
 	qErr := s.pool.QueryRow(ctx, `
         WITH priced AS (
             UPDATE page_ai_spend_events
@@ -139,9 +146,16 @@ func (s *Store) PriceAISpendWithServeSource(ctx context.Context, requestID strin
         )
         SELECT (SELECT count(*) FROM rolled), (SELECT count(*) FROM bound)`,
 		requestID, costUSD, tokens, serveSource,
-	).Scan(&updated, new(int))
+	).Scan(&updated, &bound)
 	if qErr != nil {
 		return false, fmt.Errorf("page: price ai spend: %w", qErr)
+	}
+	// ⚠ THE CTE READS THE PRE-STATEMENT SNAPSHOT, WHICH IS WHY `bound` SURVIVES THE UPDATE ABOVE
+	// IT. `priced` only ever SETs columns on the binding row — it never deletes one — so a request
+	// this sweep just priced still counts as bound, and only a request with no row at all reaches
+	// zero. request_id is the table's conflict key, so the count is 0 or 1, never more.
+	if bound == 0 {
+		return false, fmt.Errorf("%w: request %s", ErrNoBinding, requestID)
 	}
 	return updated > 0, nil
 }

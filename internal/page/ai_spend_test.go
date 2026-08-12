@@ -2,6 +2,7 @@ package page_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/talyvor/docs/internal/page"
@@ -174,18 +175,35 @@ func TestOwnAICost_LinkedIssueSweepDoesNotEraseTheOwnCost(t *testing.T) {
 	}
 }
 
-// A request that was never bound is NOT an error. The sync pulls every request in the Lens
-// workspace and most belong to other tenants of it; treating a miss as a failure would make the
-// sync log an error on almost every row it sees.
-func TestOwnAICost_PricingAnUnboundRequestIsNotAnError(t *testing.T) {
+// A request that was never bound is reported as ErrNoBinding, and that is NOT a failure — it is
+// the sentinel a caller checks so it can skip the row without treating it as one.
+//
+// ⚠ THIS TEST USED TO ASSERT `err == nil`, WHICH IS WHY THE SENTINEL HAD NO PRODUCER. Its name
+// was TestOwnAICost_PricingAnUnboundRequestIsNotAnError and its message read "a request that was
+// not a page operation is the common case, not a fault" — the right goal, pinned to the wrong
+// mechanism. It made "never bound" and "already priced" the same `(false, nil)`, contradicting
+// PriceAISpend's own documented Returns: block one file away, and both were written in the same
+// commit (34ab2d5, #52), so neither was a later regression from the other.
+//
+// Two measurements settled the direction rather than a preference:
+//
+//   - ITS STATED REASON DOES NOT DESCRIBE THE CALLER. "the sync would log an error on almost
+//     every row it sees" — syncWorkspace pre-filters every pulled row against its OWN unpriced
+//     binding ids and never calls this method for a request Docs did not bind.
+//   - THE GOAL IS PRESERVED WHERE IT BELONGS. "Not a fault" is now asserted at the caller that
+//     could make it one: internal/lensintegration's sweep skips ErrNoBinding without warning,
+//     pinned by TestSweep_ANeverBoundRequestIsSkipped_NotLoggedAsAFailure.
+//
+// The distinction from the already-priced case lives in aispend_nobinding_test.go.
+func TestOwnAICost_PricingAnUnboundRequestReportsErrNoBinding(t *testing.T) {
 	d := testutil.New(t)
 	ctx := context.Background()
 	s := store(t, d)
 
 	landed, err := s.PriceAISpend(ctx, "req-not-ours", 9.99, 1)
-	if err != nil {
-		t.Fatalf("pricing an unbound request returned an error: %v — a request that was not a page "+
-			"operation is the common case, not a fault", err)
+	if !errors.Is(err, page.ErrNoBinding) {
+		t.Fatalf("pricing an unbound request returned err=%v, want page.ErrNoBinding — a request "+
+			"that was not a page operation must be SAYABLE, not silent", err)
 	}
 	if landed {
 		t.Error("an unbound request reported landed=true")

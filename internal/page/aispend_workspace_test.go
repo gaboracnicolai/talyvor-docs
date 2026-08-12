@@ -90,9 +90,16 @@ func TestBindAISpend_RefusesAPageOutsideTheBilledWorkspace(t *testing.T) {
 	// an error the caller ignored (Engine.run only logs it) must still leave the ledger unable
 	// to move money. This is the assertion the refusal exists FOR — the error alone proves a
 	// return value, this proves the customer-visible number.
+	//
+	// ⚠ THE EXPECTED ERROR IS NOW ErrNoBinding, AND THAT IS THIS TEST'S OWN CLAIM RESTATED. The
+	// refusal above means no ledger row was written, so "there is no binding for req-cross" is
+	// exactly what [P-NOROW] asserts one screen up. Until PriceAISpend stopped discarding the
+	// binding count it answered `(false, nil)` here — indistinguishable from a request it had
+	// already priced, i.e. the refusal was invisible on the pricing side.
 	landed, pErr := s.PriceAISpend(ctx, "req-cross", 12.34, 1000)
-	if pErr != nil {
-		t.Fatalf("PriceAISpend(req-cross): %v", pErr)
+	if !errors.Is(pErr, page.ErrNoBinding) {
+		t.Fatalf("PriceAISpend(req-cross) = %v, want page.ErrNoBinding — the bind was REFUSED, so "+
+			"there is no binding to price", pErr)
 	}
 	if landed {
 		t.Errorf("[P-NOMONEY] PriceAISpend reported landed=true for a refused binding")

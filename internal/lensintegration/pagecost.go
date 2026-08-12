@@ -2,7 +2,10 @@ package lensintegration
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+
+	"github.com/talyvor/docs/internal/page"
 )
 
 // THE PRICING SWEEP — turns page↔request bindings into money on the page.
@@ -100,6 +103,9 @@ func (s *PageCostSyncer) syncWorkspace(ctx context.Context, wsID string) {
 
 	var landed int
 	var landedUSD float64
+	// Bindings that vanished between this workspace's two queries. Counted rather than warned
+	// about, and kept out of still_unpriced below: a row that no longer exists is not waiting.
+	var skipped int
 	for _, r := range rows {
 		if _, mine := ours[r.RequestID]; !mine {
 			continue
@@ -108,6 +114,15 @@ func (s *PageCostSyncer) syncWorkspace(ctx context.Context, wsID string) {
 		// serve is 0 by construction in Lens's SQL, not by measurement of a cheap completion.
 		ok, pErr := s.pages.PriceAISpendWithServeSource(
 			ctx, r.RequestID, r.CostUSD, r.InputTokens+r.OutputTokens, r.ServeSource)
+		// ⚠ "NOT OURS" IS NOT A FAILURE, AND IT IS REACHABLE HERE DESPITE THE PRE-FILTER ABOVE.
+		// page_ai_spend_events cascades from pages, so a document deleted between
+		// UnpricedRequestIDs and this call leaves an id that was ours a moment ago and is now
+		// bound to nothing. Warning about it would report an ordinary race as a broken money path
+		// — and ErrNoBinding exists precisely so a caller can tell the two apart.
+		if errors.Is(pErr, page.ErrNoBinding) {
+			skipped++
+			continue
+		}
 		if pErr != nil {
 			slog.Warn("lensintegration: page cost sync — price failed",
 				slog.String("workspace_id", wsID),
@@ -125,5 +140,6 @@ func (s *PageCostSyncer) syncWorkspace(ctx context.Context, wsID string) {
 		slog.Int("bindings_waiting", len(want)),
 		slog.Int("priced", landed),
 		slog.Float64("priced_usd", landedUSD),
-		slog.Int("still_unpriced", len(want)-landed))
+		slog.Int("vanished_bindings", skipped),
+		slog.Int("still_unpriced", len(want)-landed-skipped))
 }
