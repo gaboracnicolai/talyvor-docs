@@ -63,7 +63,25 @@ export function DatabaseBlock({ databaseID }: BlockProps) {
     );
   }
 
+  // `schema` is the DATABASE's whole column set and is what every WRITE path sends back.
+  // `visibleSchema` is what this VIEW renders. They are two different things and conflating them
+  // is destructive — see below.
   const schema = database.schema ?? [];
+
+  // The active view's hidden columns, applied. `hidden_cols` is stored, served on the views
+  // payload and declared in api/database.ts, and until this line it appeared in no component:
+  // every renderer was handed the whole schema. Measured through the shipped routes on real
+  // Postgres — the server stores and returns hidden_cols, and `GET /rows` returns every cell
+  // regardless, because it returns ROWS and not columns. Hiding is therefore the renderer's job
+  // and there is nowhere else it can happen. DatabaseBlock.hiddencols.test.tsx holds it.
+  //
+  // ⚠ THE FILTER MUST NOT MOVE UP INTO `schema`. `addColumn` sends `[...schema, next]` to
+  // `PATCH /databases/{dbID}/schema`, which replaces the WHOLE schema — so a filtered `schema`
+  // would DELETE every hidden column, and its cells, the next time anyone added one.
+  // [SCHEMA-INTACT] is the assertion on that, and it is green before this change as well as
+  // after: it exists to stay green, not to turn.
+  const hiddenCols = new Set(activeView?.hidden_cols ?? []);
+  const visibleSchema = schema.filter((c) => !hiddenCols.has(c.id));
 
   // Common mutation wrappers — the per-view components accept simple
   // callbacks rather than the mutation objects directly.
@@ -91,9 +109,14 @@ export function DatabaseBlock({ databaseID }: BlockProps) {
   // Find a select column to drive the kanban grouping. Users can
   // change this from the view's settings menu in a future polish
   // pass.
+  //
+  // Resolved over the VISIBLE schema, so one rule covers the whole component: a column this view
+  // hides is not part of the view's column set, and you cannot group by a column you have hidden.
+  // With `hidden_cols` empty — every view this SPA creates — `visibleSchema` IS `schema`, so this
+  // is byte-for-byte the previous behaviour.
   const kanbanGroup =
     activeView?.group_by ||
-    schema.find((c) => c.type === "select")?.id ||
+    visibleSchema.find((c) => c.type === "select")?.id ||
     "";
 
   return (
@@ -145,7 +168,7 @@ export function DatabaseBlock({ databaseID }: BlockProps) {
       <div className="p-2">
         {viewType === "table" ? (
           <TableView
-            schema={schema}
+            schema={visibleSchema}
             rows={rows}
             onUpdateRow={patchRow}
             onDeleteRow={removeRow}
@@ -155,17 +178,17 @@ export function DatabaseBlock({ databaseID }: BlockProps) {
             onRetypeColumn={retypeColumn}
           />
         ) : viewType === "list" ? (
-          <ListView schema={schema} rows={rows} />
+          <ListView schema={visibleSchema} rows={rows} />
         ) : viewType === "kanban" ? (
           <KanbanView
-            schema={schema}
+            schema={visibleSchema}
             rows={rows}
             groupBy={kanbanGroup}
             onUpdateRow={patchRow}
             onAddRow={(col) => addRow(kanbanGroup ? { [kanbanGroup]: col } : {})}
           />
         ) : (
-          <GalleryView schema={schema} rows={rows} />
+          <GalleryView schema={visibleSchema} rows={rows} />
         )}
       </div>
     </div>
