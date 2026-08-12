@@ -33,7 +33,10 @@ import (
 type PageSpendStore interface {
 	UnpricedWorkspaces(ctx context.Context, limit int) ([]string, error)
 	UnpricedRequestIDs(ctx context.Context, workspaceID string, limit int) ([]string, error)
-	PriceAISpend(ctx context.Context, requestID string, costUSD float64, tokens int) (bool, error)
+	// The sweep binds to the serve-source-carrying form DELIBERATELY. It is the one caller that
+	// holds the field, and naming only this method here makes the short form unreachable from
+	// the sweep — so a refactor cannot quietly drop the fact back on the floor.
+	PriceAISpendWithServeSource(ctx context.Context, requestID string, costUSD float64, tokens int, serveSource string) (bool, error)
 }
 
 // PageCostSyncer prices page↔request bindings from Lens.
@@ -101,7 +104,10 @@ func (s *PageCostSyncer) syncWorkspace(ctx context.Context, wsID string) {
 		if _, mine := ours[r.RequestID]; !mine {
 			continue
 		}
-		ok, pErr := s.pages.PriceAISpend(ctx, r.RequestID, r.CostUSD, r.InputTokens+r.OutputTokens)
+		// r.ServeSource travels with r.CostUSD because the two are one fact. A cache or node
+		// serve is 0 by construction in Lens's SQL, not by measurement of a cheap completion.
+		ok, pErr := s.pages.PriceAISpendWithServeSource(
+			ctx, r.RequestID, r.CostUSD, r.InputTokens+r.OutputTokens, r.ServeSource)
 		if pErr != nil {
 			slog.Warn("lensintegration: page cost sync — price failed",
 				slog.String("workspace_id", wsID),

@@ -22,6 +22,12 @@ import (
 
 // RequestSpend is one per-request row. Field names mirror talyvor-track's decoder so the two
 // consumers of this endpoint cannot drift in how they read it.
+//
+// ⚠ THEY DID NOT DRIFT — THEY AGREED, AND BOTH WERE WRONG THE SAME WAY. Neither consumer decoded
+// `serve_source`, the column Lens's migration 0100 added and its by-request handler emits with the
+// instruction to "render cache rows as 'served from cache', not 'free'". Docs carries it now
+// (see ServeSource); talyvor-track's copy of this struct still does not, and that is reported in
+// the queue rather than reached into from here.
 type RequestSpend struct {
 	RequestID    string  `json:"request_id"`
 	Feature      string  `json:"feature"`
@@ -29,6 +35,16 @@ type RequestSpend struct {
 	InputTokens  int     `json:"input_tokens"`
 	OutputTokens int     `json:"output_tokens"`
 	TS           string  `json:"ts"`
+
+	// ServeSource is what PRODUCED the bytes: "upstream" (a provider was called, and CostUSD is
+	// that provider's price), "cache_hit_*" or "node" (Talyvor called no provider, so CostUSD is
+	// 0 by construction and the requester's debit lives in another ledger and another unit), or
+	// "" when the field was absent — a Lens older than its migration 0100.
+	//
+	// ⚠ IT IS THE ONLY THING THAT SEPARATES TWO KINDS OF $0.00, and a completion that was served
+	// from cache is the ordinary case rather than an edge one: Docs's transforms are short,
+	// repeated prompts, which is precisely what a semantic cache is for.
+	ServeSource string `json:"serve_source"`
 }
 
 type byRequestPage struct {
