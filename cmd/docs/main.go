@@ -443,6 +443,15 @@ func main() {
 	changelogHandler.WithAccess(pageEnf)
 	freshHandler.WithAccess(pageEnf)
 	exportHandler.WithAccess(pageEnf)
+	// THE SIXTH COPY OF THE SAME SEAM, and the most disclosive of them: pageEnf above authorizes
+	// the {pageID} in the URL and nothing else, while `?include_children=true` appends the CHILD
+	// pages' whole documents — title and full rendered body, in all four formats — to the same
+	// download. Measured on real Postgres in internal/export/privatespace_realpg_test.go: bob,
+	// holding a page-level view grant on one page of a PRIVATE space, is refused the child with
+	// 403 at /spaces/{s}/pages/{child} and receives that child's body from
+	// /spaces/{s}/pages/{parent}/export in the same run. Unwired, a children-including export
+	// returns ErrNoPageReadGate rather than an export missing its children.
+	exporter.WithPageRead(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
 	approvalHandler.WithAccess(pageEnf)
 	permHandler.WithAccess(spaceEnf, pageEnf)
 	// MCP write tools (create/update/verify_page) enforce the same AccessEdit tier as the REST doors:

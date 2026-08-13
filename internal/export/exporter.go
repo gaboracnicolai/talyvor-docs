@@ -56,9 +56,19 @@ type spaceReader interface {
 	GetByID(ctx context.Context, id string) (*model.Space, error)
 }
 
+// pageVisibility is the per-page read gate THE CHILD EXPANSION needs. It is the same interface
+// spaceauth.Authorizer satisfies and the same primitive internal/search, internal/page,
+// internal/freshness and internal/analytics are already gated on — deliberately not a second copy
+// of the access rule expressed here or in SQL, which is how a hand-written predicate and the
+// engine drift apart.
+type pageVisibility interface {
+	AuthorizePageRead(ctx context.Context, pageID string) (found, canView bool)
+}
+
 type Exporter struct {
 	pages  pageReader
 	spaces spaceReader
+	access pageVisibility
 }
 
 func New(pages pageReader, spaces spaceReader) *Exporter {
@@ -68,6 +78,26 @@ func New(pages pageReader, spaces spaceReader) *Exporter {
 func newExporter(pages pageReader, spaces spaceReader) *Exporter {
 	return &Exporter{pages: pages, spaces: spaces}
 }
+
+// WithPageRead attaches the per-page read gate the child expansion is answered through.
+//
+// ⚠ THE ROUTE ENFORCER AUTHORIZES THE ROOT ID AND NOTHING ELSE. `pageEnf.Require(AccessView)` is
+// resolved from the {pageID} URL param, so it says exactly one thing: this caller may read THIS
+// page. `include_children=true` then appends other pages' whole documents to the same response,
+// and those ids were never in front of any gate.
+//
+// ⚠ AN UNWIRED GATE IS AN ERROR, NOT AN EXPORT WITH THE CHILDREN QUIETLY DROPPED. Mirrors
+// analytics.ErrNoPageReadGate: silently omitting children from a document a user asked to export
+// WITH them is its own false statement, and it is the kind that gets noticed months later.
+// The root page is unaffected either way — it is gated by the route.
+func (e *Exporter) WithPageRead(a pageVisibility) *Exporter {
+	e.access = a
+	return e
+}
+
+// ErrNoPageReadGate is what a children-including export returns when no gate was wired. A server
+// misconfiguration, reported as one.
+var ErrNoPageReadGate = errors.New("export: no page-read gate wired (cmd/docs/main.go must call exporter.WithPageRead) — include_children cannot be answered without it")
 
 // ExportPage is the top-level entry point used by the HTTP handler.
 // It dispatches to the right backend based on opts.Format and
@@ -115,6 +145,15 @@ func (e *Exporter) gatherPages(ctx context.Context, pageID string, wsIDs []strin
 	if !includeChildren {
 		return out, nil
 	}
+	// ⚠ THE WORKSPACE IS NOT THE READ TIER, AND THIS IS THE SIXTH PLACE THAT WAS TRUE.
+	// #78 (page search/stale), #79 (/ask), #80 (freshness), #81 (six MCP tools) and #94
+	// (analytics roll-up) each authorized a workspace and stopped. Here the route enforcer
+	// authorizes the ROOT ID and stops, and the expansion below appends OTHER pages. A private
+	// space with a page-level grant — the ordinary "share this one doc" — is all it takes for a
+	// child to be a page this caller is refused one route over. See privatespace_realpg_test.go.
+	if e.access == nil {
+		return nil, ErrNoPageReadGate
+	}
 	siblings, err := e.pages.List(ctx, page.PageFilter{SpaceID: root.SpaceID})
 	if err != nil {
 		return out, nil
@@ -132,6 +171,11 @@ func (e *Exporter) gatherPages(ctx context.Context, pageID string, wsIDs []strin
 			continue
 		}
 		if p.ParentID != nil && *p.ParentID == root.ID {
+			// Asked PER CHILD, after the parentage test so the engine is not consulted for every
+			// page in the space. The same question the by-page route asks about the same page.
+			if found, canView := e.access.AuthorizePageRead(ctx, p.ID); !found || !canView {
+				continue
+			}
 			children = append(children, p)
 		}
 	}

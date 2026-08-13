@@ -14,6 +14,14 @@ import (
 	"github.com/talyvor/docs/internal/page"
 )
 
+// allowAllPages is the visibility gate for the fake-store tests: every page is readable. The real
+// gate is spaceauth.Authorizer, measured end to end on real Postgres in
+// privatespace_realpg_test.go — this one exists so a test about RENDERING states its access
+// premise instead of relying on the absence of one.
+type allowAllPages struct{}
+
+func (allowAllPages) AuthorizePageRead(context.Context, string) (bool, bool) { return true, true }
+
 // fakePages stubs the page-store lookups Exporter needs. Each test
 // hands in a fixed graph; the fake never hits the database.
 type fakePages struct {
@@ -109,7 +117,11 @@ func TestToMarkdown_IncludesChildrenInPositionOrder(t *testing.T) {
 		bySpace: map[string][]model.Page{
 			"sp-1": {*child2, *child1}, // intentionally reversed
 		},
-	}, &fakeSpaces{})
+		// This test is about ORDER, so it says "both children are readable" out loud rather than
+		// inheriting that as a default. The child expansion is gated per page now
+		// (privatespace_realpg_test.go measures why); an ungated exporter refuses the whole
+		// option rather than answering it half-scoped.
+	}, &fakeSpaces{}).WithPageRead(allowAllPages{})
 
 	md, err := exp.ToMarkdown(context.Background(), parent, []string{"ws-1"}, ExportOptions{IncludeChildren: true})
 	if err != nil {
