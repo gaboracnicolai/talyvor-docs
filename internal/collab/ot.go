@@ -93,7 +93,18 @@ type PageState struct {
 	Version  int
 	History  []Change
 	Snapshot string
-	clients  map[string]*CollabClient
+	// SnapshotBy is the member id of the client whose change produced Snapshot. It travels WITH the
+	// snapshot because the only consumer of the snapshot — the AutoSaver — writes through
+	// page.Store.Update, whose lock/approval/single-writer gate reads updates["updated_by"] and
+	// treats the empty string as "some anonymous writer". Saving with no author meant the gate was
+	// asked whether "" may write, and pagelock answers "Locked by <holder>" to that for EVERY held
+	// lock — including the holder's own. See lockedsave_realpg_test.go.
+	//
+	// It is recorded at Apply time rather than looked up at flush time on purpose: the author may
+	// have disconnected (Leave removes them from clients) before the 5s tick fires, and the answer
+	// must not depend on whether they are still on the socket.
+	SnapshotBy string
+	clients    map[string]*CollabClient
 }
 
 // PresenceInfo is the wire shape for presence broadcasts and the
@@ -158,16 +169,17 @@ func (e *OTEngine) pageState(pageID string) *PageState {
 	return e.pages[pageID]
 }
 
-// Snapshot returns the most recent doc JSON the engine has seen for
-// a page. AutoSaver calls this on its tick.
-func (e *OTEngine) Snapshot(pageID string) (string, int) {
+// Snapshot returns the page's latest snapshot, its version, and the member id of the client whose
+// change produced it. The three are returned TOGETHER rather than through separate accessors so a
+// caller cannot persist one page's bytes under another moment's author.
+func (e *OTEngine) Snapshot(pageID string) (string, int, string) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	st := e.pages[pageID]
 	if st == nil {
-		return "", 0
+		return "", 0, ""
 	}
-	return st.Snapshot, st.Version
+	return st.Snapshot, st.Version, st.SnapshotBy
 }
 
 // DirtyPages returns the IDs of pages whose snapshots have been
@@ -289,6 +301,12 @@ func (e *OTEngine) Apply(pageID string, change Change) ([]Change, error) {
 	st.Version = change.Version
 	if change.Snapshot != "" {
 		st.Snapshot = change.Snapshot
+		// The author is resolved from the SOCKET, never from the frame: dispatch overwrites
+		// change.ClientID with the server-side c.ID before calling this, and c.MemberID came from
+		// the verified gateway context via ResolveSession. Nothing client-supplied names the author.
+		if c, ok := st.clients[change.ClientID]; ok {
+			st.SnapshotBy = c.MemberID
+		}
 	}
 	return []Change{change}, nil
 }
