@@ -53,6 +53,21 @@ function prettyContent(content: string): string {
   }
 }
 
+// versionText is the text a snapshot is DIFFED as, and it is the whole snapshot rather than half
+// of it. A `page_versions` row has exactly two content-bearing columns — title and content — and
+// RestoreVersion writes BOTH back onto the live page, so a version IS the pair. Diffing content
+// alone made a title-only save (which appends its own version row: see
+// internal/page/versioning_title_only_save_test.go, "A RENAME IS A SAVE") render as an all-`same`
+// panel: the screen answered "nothing changed" for the revision that renamed the document.
+//
+// The title is diffed as a leading line rather than shown in a separate strip, so a rename reads
+// in the panel's existing +/- vocabulary and stays subject to the same LCS comparison — printing
+// it outside the diff would report a rename on every ordinary body edit. The blank line keeps the
+// title from anchoring against a body line that happens to match it.
+function versionText(v: { title: string; content: string }): string {
+  return `title: ${v.title}\n\n${prettyContent(v.content)}`;
+}
+
 interface VersionHistoryProps {
   spaceID: string;
   pageID: string;
@@ -88,7 +103,7 @@ export function VersionHistory({ spaceID, pageID, onRestored }: VersionHistoryPr
 
   const diffLines = useMemo(() => {
     if (!diff.data) return [];
-    return lineDiff(prettyContent(diff.data.from.content), prettyContent(diff.data.to.content));
+    return lineDiff(versionText(diff.data.from), versionText(diff.data.to));
   }, [diff.data]);
 
   const toggle = (v: number) =>
