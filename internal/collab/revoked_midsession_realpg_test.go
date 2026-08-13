@@ -70,6 +70,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/talyvor/docs/internal/authz"
 	"github.com/talyvor/docs/internal/model"
 	"github.com/talyvor/docs/internal/page"
 	"github.com/talyvor/docs/internal/permission"
@@ -89,7 +90,7 @@ func TestSEC_Collab_RevokedMidSession_ChangeIsRefused(t *testing.T) {
 	ctx := context.Background()
 	_, pageID, _, editor := tierSeed(t, d)
 	perms := permission.NewStore(d.Pool)
-	env := newTierEnv(t, d, NewPermissionSession(perms, tierPageLooker(d)))
+	env := newTierEnv(t, d, NewPermissionSession(perms, tierPageLooker(d), authz.NewPGResolver(d.Pool)))
 
 	econn := env.dial(t, pageID, "e-client", "editor@corp.com")
 	readUntil(t, econn, "init")
@@ -155,7 +156,7 @@ func TestSEC_Collab_RevokedMidSession_ReadHalf_Measured(t *testing.T) {
 	ws, pageID, owner, member := privateSeed(t, d)
 	_ = ws
 	perms := permission.NewStore(d.Pool)
-	env := newTierEnv(t, d, NewPermissionSession(perms, tierPageLooker(d)))
+	env := newTierEnv(t, d, NewPermissionSession(perms, tierPageLooker(d), authz.NewPGResolver(d.Pool)))
 
 	mconn := env.dial(t, pageID, "m-client", "member@corp.com")
 	readUntil(t, mconn, "init")
