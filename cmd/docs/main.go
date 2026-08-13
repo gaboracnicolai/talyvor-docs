@@ -520,9 +520,18 @@ func main() {
 	collabHandler := collab.NewHandler(otEngine).WithGuard(lockStore).
 		WithAllowedOrigins(cfg.AllowedOrigins).
 		WithAccess(collab.NewPermissionSession(permStore, pageLooker, authzResolver))
+	// updated_by is the member whose change produced this snapshot, resolved from the socket's
+	// verified identity (see OTEngine.Snapshot). It is load-bearing, not attribution garnish:
+	// pageStore carries the composite lock/approval/single-writer guard wired above, and that guard
+	// reads exactly this key. Passing content alone asked it whether "" may write, which pagelock
+	// refuses for every held lock — so a lock holder's own live edits were ACKed at the socket and
+	// then silently dropped by their own lock. See internal/collab/lockedsave_realpg_test.go.
 	saver := collab.NewAutoSaver(otEngine,
-		func(ctx context.Context, pageID, content string) error {
-			_, err := pageStore.Update(ctx, pageID, map[string]any{"content": content})
+		func(ctx context.Context, pageID, content, memberID string) error {
+			_, err := pageStore.Update(ctx, pageID, map[string]any{
+				"content":    content,
+				"updated_by": memberID,
+			})
 			return err
 		})
 	go saver.Start(ctx)

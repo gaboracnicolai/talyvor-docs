@@ -84,8 +84,8 @@ func newTierEnv(t *testing.T, d *testutil.DB, resolver SessionResolver) *tierEnv
 	// No WithGuard: nil guard skips the lock/approval check, isolating the TIER gate (lock behavior is
 	// covered elsewhere). WithAccess wires the resolver under test.
 	h := NewHandler(engine).WithAccess(resolver)
-	saver := NewAutoSaver(engine, func(ctx context.Context, pageID, content string) error {
-		_, err := pageStore.Update(ctx, pageID, map[string]any{"content": content})
+	saver := NewAutoSaver(engine, func(ctx context.Context, pageID, content, memberID string) error {
+		_, err := pageStore.Update(ctx, pageID, map[string]any{"content": content, "updated_by": memberID})
 		return err
 	})
 	r := chi.NewRouter()
