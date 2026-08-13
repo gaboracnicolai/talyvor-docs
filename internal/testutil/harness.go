@@ -69,6 +69,19 @@ func New(t *testing.T) *DB {
 // a unit-only local run works exactly as before; CI never passes -short, so CI can never skip.
 // Silence is not consent: an unset variable with no -short is an error, not a preference.
 // (Same shape as talyvor-track internal/testutil/require.go, which fixed the identical class.)
+//
+// ⚠⚠ "CI NEVER PASSES -short" WAS A CLAIM ABOUT A FILE IN THIS REPOSITORY THAT NOTHING CHECKED,
+// AND THE REPO NAMED ON THE LINE ABOVE HAS THE CHECK. `grep -c short .github/workflows/ci.yaml`
+// returned 0 — no flag, and no instrument either. It is now locked by
+// internal/testutil/shortflag_test.go, controlled by scripts/w31-shortflag-controls-6b4d.py.
+//
+// ⚠ AND THE COUNT BELOW WAS STALE BY A FACTOR OF THREE. "78" was true when it was written; the
+// population is now 244, MEASURED rather than re-estimated —
+// `DOCS_TEST_DATABASE_URL= go test -short -count=1 -json ./...` on 2026-08-13 reported 244 tests
+// skipped, 0 failed, exit 0, against exit 1 for the same tree without the flag. It is dated and
+// left un-pinned on purpose: asserting the number would mean running the whole suite twice to
+// check a figure whose drift changes no behaviour. What matters is the direction — it grows, and
+// every tenancy, IDOR, cross-workspace and money test in this repository is inside it.
 func requireDatabaseURL(t *testing.T) string {
 	t.Helper()
 	if dsn := os.Getenv("DOCS_TEST_DATABASE_URL"); dsn != "" {
@@ -80,7 +93,7 @@ func requireDatabaseURL(t *testing.T) string {
 	t.Fatalf(`DOCS_TEST_DATABASE_URL is not set.
 
 This test needs a real Postgres. It FAILS rather than skips: a silently skipped real-PG suite
-looks exactly like a passing one, and this repo has 78 such tests.
+looks exactly like a passing one, and this repo has 244 such tests (measured 2026-08-13).
 
   · CI: the postgres service supplies it (pgvector/pgvector:pg16 — the migrations need the
     vector extension).
