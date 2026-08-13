@@ -22,11 +22,12 @@ export const pagesApi = {
       method: "DELETE",
     });
   },
-  recordView(spaceID: string, pageID: string) {
-    return apiRequest<{ ok: boolean }>(`/v1/spaces/${spaceID}/pages/${pageID}/view`, {
-      method: "POST",
-    });
-  },
+  // `recordView` lived here and is DELETED, not moved. It POSTed to
+  // /v1/spaces/{s}/pages/{p}/view with no body, and that route's handler rejects an empty body
+  // with 400 before it reaches the store — so the method could not record a view from any
+  // caller, and its sole caller (PageView's mount effect) swallowed the failure. The recording
+  // client is `analyticsApi.recordView` in ~/api/analytics, which sends the duration the
+  // server requires. See PageView.viewrecord.wire.test.tsx.
   verify(spaceID: string, pageID: string) {
     return apiRequest<{ ok: boolean }>(`/v1/spaces/${spaceID}/pages/${pageID}/verify`, {
       method: "POST",
