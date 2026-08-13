@@ -564,17 +564,39 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	// value untyped, and that is one finding with one fix, not this one.
 	if v, present := updates["parent_id"]; present {
 		if newParent, isStr := v.(string); isStr {
-			var ok bool
+			var sameWorkspace, wouldCycle bool
+			// ⚠ `UNION`, NOT `UNION ALL`, AND THE DIFFERENCE IS WHETHER THIS QUERY RETURNS. A
+			// recursive walk with UNION ALL over a table that ALREADY contains a ring never
+			// terminates, and rings exist: every one written before this guard is still on disk,
+			// and the guard is what stops new ones, not what repairs old ones. UNION stops when
+			// the recursive term produces no NEW id, so a ring simply ends on its second lap.
+			// Pinned by [NO-HANG] in parentcycle_realpg_test.go, which seeds a ring with raw SQL
+			// and drives an ordinary move through here under a deadline.
 			if err := s.pool.QueryRow(ctx, `
-                SELECT EXISTS (
-                    SELECT 1 FROM pages parent, pages child
-                     WHERE parent.id = $1 AND child.id = $2
-                       AND parent.workspace_id = child.workspace_id
-                )`, newParent, id).Scan(&ok); err != nil {
+                WITH RECURSIVE descendants AS (
+                    SELECT id FROM pages WHERE id = $2
+                    UNION
+                    SELECT p.id FROM pages p JOIN descendants d ON p.parent_id = d.id
+                )
+                SELECT
+                    EXISTS (
+                        SELECT 1 FROM pages parent, pages child
+                         WHERE parent.id = $1 AND child.id = $2
+                           AND parent.workspace_id = child.workspace_id
+                    ),
+                    EXISTS (SELECT 1 FROM descendants WHERE id = $1)`,
+				newParent, id).Scan(&sameWorkspace, &wouldCycle); err != nil {
 				return nil, fmt.Errorf("page: parent lookup: %w", err)
 			}
-			if !ok {
+			if !sameWorkspace {
 				return nil, ErrParentNotFound
+			}
+			// The seed row of `descendants` is the page ITSELF, so this one predicate refuses
+			// the self-parent, the two-page ring and the grandchild alike. There is no separate
+			// `newParent == id` branch, deliberately: a self-link is a cycle of length one, and
+			// two checks for one invariant is two places for it to drift.
+			if wouldCycle {
+				return nil, ErrParentCycle
 			}
 		}
 	}
@@ -847,6 +869,13 @@ var ErrNotFound = errors.New("page: not found in an accessible workspace")
 // replaces what the missing-parent case used to return: the raw driver text, foreign-key
 // constraint name and SQLSTATE included, straight out of a 400.
 var ErrParentNotFound = errors.New("page: parent page not found in this workspace")
+
+// ErrParentCycle refuses a move that would make a page its own ancestor. Distinct from
+// ErrParentNotFound: that one is a parent the caller may not name, this one is a parent the
+// caller may name and a link the tree cannot hold. Both are reachable only from Update — a page
+// being CREATED has no id yet and no children, so neither self-parenting nor a descendant loop
+// is expressible at that door.
+var ErrParentCycle = errors.New("page: a page cannot be its own ancestor")
 
 // assertInWorkspaces returns ErrNotFound unless page id lives in one of wsIDs.
 // PageInWorkspaces reports whether page id lives in one of wsIDs — the scope check the collab
