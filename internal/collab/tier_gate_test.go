@@ -218,7 +218,7 @@ const (
 func TestSEC4_Collab_ChangeTierGate(t *testing.T) {
 	d := testutil.New(t)
 	_, pageID, _, _ := tierSeed(t, d)
-	env := newTierEnv(t, d, NewPermissionSession(permission.NewStore(d.Pool), tierPageLooker(d)))
+	env := newTierEnv(t, d, NewPermissionSession(permission.NewStore(d.Pool), tierPageLooker(d), authz.NewPGResolver(d.Pool)))
 
 	vconn := env.dial(t, pageID, "v-client", "viewer@corp.com")
 	readUntil(t, vconn, "init")

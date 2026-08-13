@@ -503,6 +503,12 @@ func main() {
 	// internal/analytics/mainwiring_test.go is the tripwire on it.
 	analyticsStore.WithPageRead(spaceauth.New(spaceStore, permStore).WithPageMeta(pageLooker))
 
+	// ONE membership resolver, shared by the two authz middlewares below and by the collab session
+	// resolver. Every HTTP request re-runs it (the middleware is per-request), and a collab session
+	// re-runs it per `change` frame — the roster is mutable state, and a long-lived socket that
+	// holds the connect-time answer is serving somebody the roster no longer names.
+	authzResolver := authz.NewPGResolver(pool)
+
 	// Collaborative editing engine. The engine is WebSocket-agnostic;
 	// the handler layer below upgrades the HTTP request and shuttles
 	// frames through the engine's per-client send channels.
@@ -513,7 +519,7 @@ func main() {
 	// permission.CheckPage). A view-only member may connect (cursor/presence) but cannot mutate.
 	collabHandler := collab.NewHandler(otEngine).WithGuard(lockStore).
 		WithAllowedOrigins(cfg.AllowedOrigins).
-		WithAccess(collab.NewPermissionSession(permStore, pageLooker))
+		WithAccess(collab.NewPermissionSession(permStore, pageLooker, authzResolver))
 	saver := collab.NewAutoSaver(otEngine,
 		func(ctx context.Context, pageID, content string) error {
 			_, err := pageStore.Update(ctx, pageID, map[string]any{"content": content})
@@ -554,7 +560,7 @@ func main() {
 	r.Group(func(r chi.Router) {
 		mcpExempt := func(string) bool { return false }
 		r.Use(gatewayauth.Middleware(cfg.GatewayAuthSecret, mcpExempt))
-		r.Use(authz.Middleware(authz.NewPGResolver(pool), mcpExempt))
+		r.Use(authz.Middleware(authzResolver, mcpExempt))
 		// JSON-RPC bodies are small; no exemption — nothing under /mcp uploads a file.
 		r.Use(bodylimit.Middleware(cfg.MaxBodyBytes, nil))
 		r.Use(dbChecker.Middleware()) // clean 503 while PG is unreachable, not a 500
@@ -595,7 +601,7 @@ func main() {
 		// resolve. See internal/gatewayauth/exempt.go for the two lanes and what keeps the
 		// service lane safe. Shared definitions so a test exercises this exact chain.
 		r.Use(gatewayauth.Middleware(cfg.GatewayAuthSecret, gatewayauth.ExemptTransitProof))
-		r.Use(authz.Middleware(authz.NewPGResolver(pool), gatewayauth.ExemptMembership))
+		r.Use(authz.Middleware(authzResolver, gatewayauth.ExemptMembership))
 
 		// Collab WS is now INSIDE the boundary: the gateway proof + membership run on the
 		// upgrade request before ServeWS opens a session (chi's Timeout is disabled for

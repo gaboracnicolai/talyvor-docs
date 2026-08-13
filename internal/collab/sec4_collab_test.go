@@ -56,7 +56,7 @@ func newCollabChain(t *testing.T, d *testutil.DB) http.Handler {
 	// scoped to the caller's workspace membership. (Pre-fix this mounted on the root router
 	// with no middleware/scope — the RED baseline.)
 	h := collab.NewHandler(collab.NewOTEngine()).
-		WithAccess(collab.NewPermissionSession(permission.NewStore(d.Pool), collabPageLooker(d)))
+		WithAccess(collab.NewPermissionSession(permission.NewStore(d.Pool), collabPageLooker(d), authz.NewPGResolver(d.Pool)))
 	r := chi.NewRouter()
 	r.Route("/v1", func(r chi.Router) {
 		exempt := func(string) bool { return false }
