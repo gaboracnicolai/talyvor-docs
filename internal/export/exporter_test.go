@@ -50,8 +50,47 @@ func (f *fakePages) GetByIDInWorkspaces(_ context.Context, id string, wsIDs []st
 	return nil, page.ErrNotFound
 }
 
+// List answers the way page.Store.List answers.
+//
+// ⚠ IT USED TO BE `return f.bySpace[filter.SpaceID], nil` — ONE OF THE FILTER'S FOUR FIELDS READ,
+// AND THE THREE IT IGNORED WERE THE ONES THE CHILD EXPANSION DEPENDS ON. No limit (the store
+// defaults an unset one to 100 and clamps anything over 500), no offset, no parent scope. That is
+// why TestToMarkdown_IncludesChildrenInPositionOrder — the only unit test of the child expansion
+// in this package — stayed green through the 100-row truncation #134 fixed: the fake it exercises
+// had no 100 to hit. And after #134's paging loop, a double that ignores Offset returns the same
+// full slice forever, so it is a hang and not only a blind spot. Pinned against the real store,
+// filter by filter, in fakestorefidelity_realpg_test.go.
+//
+// ⚠ IT DOES NOT SORT, DELIBERATELY. The store's ORDER BY is the store's; this double answers in
+// the order its caller loaded it with, because TestToMarkdown_IncludesChildrenInPositionOrder
+// hands it its rows REVERSED on purpose to prove the exporter sorts them. A double that sorted
+// would make that test pass for a reason that has nothing to do with the code it names — which is
+// the same failure as the one above, pointed the other way. The fidelity test therefore loads it
+// from page.Store.List's own output, so the orders agree by construction rather than by a second
+// implementation of the ORDER BY living here.
 func (f *fakePages) List(_ context.Context, filter page.PageFilter) ([]model.Page, error) {
-	return f.bySpace[filter.SpaceID], nil
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	var rows []model.Page
+	for _, p := range f.bySpace[filter.SpaceID] {
+		if filter.ParentID != nil && (p.ParentID == nil || *p.ParentID != *filter.ParentID) {
+			continue
+		}
+		rows = append(rows, p)
+	}
+	if filter.Offset >= len(rows) {
+		return nil, nil
+	}
+	rows = rows[filter.Offset:]
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	return rows, nil
 }
 
 type fakeSpaces struct{ byID map[string]*model.Space }
