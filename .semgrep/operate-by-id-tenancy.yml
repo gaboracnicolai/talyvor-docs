@@ -14,12 +14,27 @@
 # NOTE (metavariable-regex is re.match-ANCHORED and the raw-string value includes the leading
 # backtick, so patterns need a `(?s).*` prefix to match anywhere in the SQL literal).
 #
-# BLIND SPOT (closed): rule (a) matches only INLINE STRING LITERAL SQL — its $SQL metavariable binds the
-# VARIABLE name for `sql := fmt.Sprintf(...); Exec(ctx, sql, ...)`, so the format literal was never checked.
+# BLIND SPOT: rule (a) matches only SQL WRITTEN AT THE CALL — its $SQL metavariable binds the NAME for
+# `sql := …; Exec(ctx, sql, ...)`, so whatever that name holds was never checked.
 # That is the class that hid track's issue BulkUpdate. Rule
-# docs-by-id-write-requires-workspace-scope-sprintf (below) now covers Sprintf-constructed by-id writes,
+# docs-by-id-write-requires-workspace-scope-sprintf (below) covers Sprintf-constructed by-id writes,
 # with documented inline nosemgrep at page/store.go + space/store.go Update (safe: callers gate the id
 # upstream via assertInWorkspaces / the collab WithPageScope session binding).
+#
+# ⚠ THAT PARAGRAPH SAID "BLIND SPOT (closed)" AND NAMED Sprintf AS THE SHAPE, AND Sprintf WAS ONE OF
+# FOUR. MEASURED at 09d8c2e on the CI-pinned semgrep 1.165.0, against a file holding the same
+# unscoped by-id write in seven forms: THE WHOLE SHIPPED RULE SET RETURNED ZERO FINDINGS for the SQL
+# held in a package `const`, a package `var`, a local variable, and a local variable built by
+# concatenation. Caught: the literal written at the call, and — measured, because it is not where it
+# looks — that same concatenation when it is the call's ARGUMENT rather than a name
+# (`Exec(ctx, `UPDATE … WHERE id = $1 RETURNING ` + cols, …)` IS flagged; assign it to `q` first and
+# it is not). Nothing chose that boundary. docs-by-id-write-requires-workspace-scope-indirect-literal
+# below moves the anchor onto the SQL itself, which is where the evidence is.
+#
+# ⚠ LATENT, NOT LIVE, AND SAY SO: a census of all 164 production `pool.Exec/Query/QueryRow` sites at
+# 09d8c2e found 149 inline literals, 2 Sprintf and 13 indirect — and NOT ONE of the 13 is a by-id
+# DELETE/UPDATE. No shipped statement was hiding here. What the shape costs is the NEXT one, and
+# `SELECT ` + cols + ` FROM …` assigned to a name is already house style in comment, page and space.
 rules:
   - id: docs-by-id-write-requires-workspace-scope
     languages: [go]
@@ -141,3 +156,60 @@ rules:
             - metavariable-regex:
                 metavariable: $FMT
                 regex: (?s).*workspace_id
+
+  # ── THE SQL LITERAL THAT IS NOT THE CALL'S ARGUMENT. Anchored on the ASSIGNMENT, exactly as the
+  #    Sprintf rule is anchored on the Sprintf, and for the same reason: the SQL is the evidence.
+  #    Following a name to its call site is a dataflow problem that grows one blind spot per
+  #    plumbing shape, and this rule exists because that is what happened.
+  - id: docs-by-id-write-requires-workspace-scope-indirect-literal
+    languages: [go]
+    severity: ERROR
+    message: >
+      SEC-4 L2 (indirect literal): this names a by-id DELETE/UPDATE (WHERE id = $N) with no
+      workspace scope. The sibling rule reads the CALL's argument, so SQL held in a const, a var or
+      a local — including `... ` + cols` assigned to a name — reaches a pool unread by any class
+      guard. Same cross-tenant class: a verified member of any workspace acts on another's object
+      by id. Scope it in-SQL (AND workspace_id = ANY($n), $n = authz.WorkspaceIDs(ctx)) or, if an
+      upstream assertInWorkspaces / route-enforcer gate 404s a foreign id BEFORE the write,
+      suppress with an inline nosemgrep + written reason.
+    patterns:
+      - pattern-either:
+          - pattern: $X := $SQL
+          - pattern: $X = $SQL
+          - pattern: var $X = $SQL
+          - pattern: const $X = $SQL
+          - pattern: $X += $SQL
+      # $SQL MUST BE THE SQL, NOT AN EXPRESSION THAT CONTAINS IT.
+      #
+      # ⚠ THE FIRST VERSION OF THIS CLAUSE WAS `metavariable-pattern` REQUIRING A STRING, AND IT DID
+      # NOTHING — measured, 16 findings across eight stores, every one an ordinary
+      # `if _, err := pool.Exec(ctx, `DELETE … WHERE id = $1`, id)`. `metavariable-pattern` matches
+      # ANYWHERE INSIDE the binding, so a CALL that merely contains a string literal satisfies
+      # `pattern: "..."`. The rule was a duplicate-report generator for findings the sibling rule
+      # already owns, dressed as a new guard. Excluding the call-shaped right-hand side is what
+      # actually separates "SQL held in a name" from "SQL written at the call".
+      - pattern-not: $X := $F(...)
+      - pattern-not: $X = $F(...)
+      - pattern-not: $X, $Y := $F(...)
+      - pattern-not: $X, $Y = $F(...)
+      - metavariable-regex:
+          metavariable: $SQL
+          regex: (?s).*(DELETE FROM|UPDATE)\s+\w+.*WHERE id = \$\d+
+      # Already membership-scoped in the SAME literal — the sibling rule's exclusion, verbatim, so
+      # the two rules cannot disagree about what "scoped" means.
+      - pattern-not:
+          patterns:
+            - pattern-either:
+                - pattern: $X := $SQL
+                - pattern: $X = $SQL
+                - pattern: var $X = $SQL
+                - pattern: const $X = $SQL
+                - pattern: $X += $SQL
+            - metavariable-regex:
+                metavariable: $SQL
+                regex: (?s).*workspace_id = ANY
+      # fmt.Sprintf is the OTHER rule's subject and its format literal contains the same text, so
+      # without this the two would both fire on one line and the fixture would fail on a duplicate
+      # rather than on a defect. Measured: it does fire there without this clause.
+      - pattern-not: $X := fmt.Sprintf(...)
+      - pattern-not: $X = fmt.Sprintf(...)
