@@ -279,7 +279,7 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
 		p.Slug = slugify(p.Title)
 	}
 	if p.Content == "" {
-		p.Content = "{}"
+		p.Content = emptyDoc
 	}
 	if p.LinkedIssues == nil {
 		p.LinkedIssues = []string{}
@@ -371,8 +371,60 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
         VALUES ($1, $2, $3, $4, $5, $6)`,
 		out.ID, out.WorkspaceID, 1, out.Title, out.Content, p.CreatedBy,
 	)
+
+	// ⚠ THE SAME TWO CONTENT HOOKS Update RUNS, AND THEY WERE HERE IN NEITHER FORM. A page can be
+	// BORN with content — Handler.Create decodes the whole model.Page, the MCP `create_page` tool
+	// takes an agent-authored `content` argument, and internal/importer builds every Confluence and
+	// Notion page with Content + ContentText set — and until this block a page created that way had
+	// no page_links row and no embedding until somebody happened to EDIT it.
+	//
+	// The link half is the one that reads as an answer rather than as an absence: the cost sweep
+	// sums a page's total from these very rows, and pageTotal treats an empty issue list as a
+	// COMPLETE answer (correctly — see its comment), so it wrote $0.00 to ai_cost_usd without
+	// failing and without logging. The embedding half is a coverage hole with no catch-up behind
+	// it: SemanticSearch.IndexAllPages, the documented boot backfill, has no caller in this
+	// repository. Both measured through the shipped chain in createcontenthooks_realpg_test.go.
+	//
+	// `hasContent` IS THE CREATE-TIME ANALOGUE OF Update's `contentChanged`, and it gates both
+	// hooks for the same reason that one does: the SPA's "+ New page" posts a page with no body at
+	// all, and neither reconciling links against an empty doc nor scheduling an embed of empty text
+	// derives anything. It is one predicate, written once, so the two hooks cannot drift apart on
+	// this path the way they never have on Update's.
+	//
+	// ⚠ IT MUST TEST AGAINST `emptyDoc`, NOT AGAINST "", AND A CONTROL IS WHY THIS SENTENCE EXISTS.
+	// Create DEFAULTS an absent body to `emptyDoc` thirty lines above, so by the time `out` comes
+	// back from the INSERT there is no such thing as a page whose content is the empty string —
+	// `!= ""` was true for every page ever created, and [BLANK-NOT-INDEXED] failed on the first
+	// run of the fix. The two sites share the constant rather than the literal so a change to one
+	// cannot leave the other reading a document that is empty as one that is not.
+	hasContent := (strings.TrimSpace(out.Content) != "" && out.Content != emptyDoc) ||
+		strings.TrimSpace(out.ContentText) != ""
+	if hasContent {
+		// Best-effort, exactly as in Update: a link-sync failure must not fail a save the caller
+		// already committed, and the next content edit reconciles again.
+		if s.linker != nil {
+			_ = s.linker.SyncLinks(ctx, out.ID, out.WorkspaceID, out.Content, p.CreatedBy)
+		}
+		// Asynchronous and template-excluding, again exactly as in Update: the embed is a paid Lens
+		// round-trip, and every other reader of `pages` in this repo excludes templates.
+		if s.indexer != nil && !out.IsTemplate {
+			pageID := out.ID
+			workspaceID := out.WorkspaceID
+			text := out.ContentText
+			go func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				_ = s.indexer.IndexPage(ctx, pageID, workspaceID, text)
+			}()
+		}
+	}
 	return out, nil
 }
+
+// emptyDoc is the canonical "this document has no body" ProseMirror value. Create defaults an
+// absent body to it, and the content hooks at the end of Create test against it — one constant
+// rather than two spellings of the same emptiness, which is what a control caught.
+const emptyDoc = "{}"
 
 // maxVersionAttempts bounds the retry on `UNIQUE (page_id, version)`. Each attempt re-derives the
 // version from the table, so an attempt is only spent when ANOTHER writer won the number this one
