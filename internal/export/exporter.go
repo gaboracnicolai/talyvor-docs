@@ -154,7 +154,7 @@ func (e *Exporter) gatherPages(ctx context.Context, pageID string, wsIDs []strin
 	if e.access == nil {
 		return nil, ErrNoPageReadGate
 	}
-	siblings, err := e.pages.List(ctx, page.PageFilter{SpaceID: root.SpaceID})
+	siblings, err := e.listChildren(ctx, root)
 	if err != nil {
 		return out, nil
 	}
@@ -183,6 +183,74 @@ func (e *Exporter) gatherPages(ctx context.Context, pageID string, wsIDs []strin
 		return children[i].Position < children[j].Position
 	})
 	return append(out, children...), nil
+}
+
+// childBatch is how many children one round-trip asks for. It is page.Store.List's OWN maximum
+// (store.go:504-506 clamps anything larger), not a bound this package invented — asking for more
+// would silently become 500 anyway, and asking for fewer would only add round-trips.
+const childBatch = 500
+
+// listChildren returns EVERY direct child of root, and the word every is the point.
+//
+// ⚠ THIS READ USED TO BE `List(PageFilter{SpaceID: root.SpaceID})` AND FILTER FOR THE CHILDREN IN
+// GO. PageFilter.Limit was left at its zero value, which page.Store.List reads as "the default" —
+// 100 (store.go:500-503) — so the parentage filter ran over the first 100 rows of the SPACE rather
+// than over the space. `ORDER BY depth ASC` (store.go:525) puts every top-level page ahead of every
+// child, so with T top-level pages in the space at most 100−T children survived ANYWHERE in it,
+// and at T=100 none did — the export answered 200 with the children missing, no error and no
+// marker. Measured on real Postgres in all four formats, and the boundary measured rather than
+// reasoned: childrentruncated_realpg_test.go, controls B1/B2.
+//
+// ⚠ AND THAT WAS THE FAILURE THIS PACKAGE HAD ALREADY REFUSED IN WRITING. WithPageRead's comment
+// says an unwired gate must be an error rather than "an export with the children quietly dropped",
+// because silently omitting children from a document a user asked to export WITH them "is its own
+// false statement". ErrNoPageReadGate honours that; the 100-row default broke it on the same
+// route. The size bound on this response is MaxExportBytes, which fails LOUD with a 413.
+//
+// The parent scope is the store's, not a predicate rewritten here: PageFilter.ParentID reaches the
+// SQL as `$4::text IS NULL OR parent_id = $4` (merge #116, which put it there because list_pages
+// promised a parent scope its query never applied). So this asks for the children instead of
+// asking for the space and hoping they are in it.
+//
+// ⚠ THE RESIDUAL, MEASURED RATHER THAN WAVED AT. Paging by OFFSET over an ORDER BY with no unique
+// key can skip a row when a tie straddles a batch boundary, and List orders by
+// `depth, position, created_at` — none of them unique. Reaching it needs a page with more than
+// childBatch direct children AND two of them sharing all three columns. `position` is 0 for every
+// page no caller positioned, so it comes down to created_at: `now()` is the TRANSACTION timestamp,
+// and page.Store.Create runs one statement per page off the pool with no explicit transaction.
+// Measured on pg16: three inserts in one transaction share a created_at (1 distinct value for 3
+// rows), three in separate transactions do not (3 distinct) — and internal/migrate and
+// internal/membership are the only two `Begin(` sites in this repo, neither of which creates pages.
+// So the tie needs two page creates in the same microsecond on different connections. Deduping by
+// id below removes the duplicate half of the hazard outright; the skip half is what a unique
+// tiebreak on List's ORDER BY would close, and that is a change to a query six callers share.
+func (e *Exporter) listChildren(ctx context.Context, root *model.Page) ([]model.Page, error) {
+	seen := make(map[string]struct{})
+	var out []model.Page
+	for offset := 0; ; offset += childBatch {
+		batch, err := e.pages.List(ctx, page.PageFilter{
+			SpaceID:  root.SpaceID,
+			ParentID: &root.ID,
+			Limit:    childBatch,
+			Offset:   offset,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range batch {
+			if _, dup := seen[p.ID]; dup {
+				continue
+			}
+			seen[p.ID] = struct{}{}
+			out = append(out, p)
+		}
+		// A short batch is the end of the children. A full one says nothing about whether more
+		// exist, so it must ask again — which is the whole difference between this and a read that
+		// stops at a number nobody chose.
+		if len(batch) < childBatch {
+			return out, nil
+		}
+	}
 }
 
 // SlugFilename returns a URL-safe filename for the exported file.
