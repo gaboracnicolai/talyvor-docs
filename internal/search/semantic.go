@@ -149,7 +149,28 @@ func (s *SemanticSearch) IndexPage(ctx context.Context, pageID, workspaceID, tex
 	if !s.IsEnabled() {
 		return nil
 	}
+	// AN EMPTIED DOCUMENT LEAVES THE INDEX. It does NOT keep the last vector it had.
+	//
+	// This branch used to `return nil` on its own, and the cost half of that is right — there is
+	// nothing to embed in an empty string, so do not pay Lens for it. What it also decided,
+	// silently, was that the STORED vector stays: `page_embeddings` is an upsert keyed on page_id
+	// with no other writer, so skipping the write leaves the previous text's embedding on disk and
+	// the page goes on answering semantic queries for content it no longer holds. The full-text
+	// half stops matching in the same save — its index is a derived expression over the live
+	// `content_text` — so the two halves of one search disagreed about whether the document said
+	// anything. Measured through page.Store.Update on real Postgres in
+	// staleembedding_realpg_test.go.
+	//
+	// Best-effort and logged, exactly like the upsert below: this runs in a detached goroutine
+	// behind the editor's save, so a failure here must not fail a save the user already committed
+	// — but it must not be invisible either. The next save of this page re-runs the hook
+	// (pageindex.Throttle re-queues on any newer content), so a lost retirement is retried by the
+	// ordinary save loop rather than by a bespoke retry here.
 	if strings.TrimSpace(text) == "" {
+		if _, err := s.pool.Exec(ctx,
+			`DELETE FROM page_embeddings WHERE page_id = $1`, pageID); err != nil {
+			slog.Warn("search: retire embedding", slog.String("page_id", pageID), slog.String("err", err.Error()))
+		}
 		return nil
 	}
 	vec, err := s.embed(ctx, workspaceID, text)
