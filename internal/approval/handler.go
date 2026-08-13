@@ -152,6 +152,13 @@ func (h *Handler) Decide(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusNotFound, err.Error())
 			return
 		}
+		// The caller can reach this request (the store's scope gate passed) but is on none of its
+		// decision rows. Said plainly, at 403 — the 200 {"ok":true} this replaced told a reviewer
+		// their verdict had landed when the UPDATE had matched nothing.
+		if errors.Is(err, ErrNotReviewer) {
+			writeErr(w, http.StatusForbidden, err.Error())
+			return
+		}
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

@@ -277,13 +277,35 @@ func (s *Store) Decide(ctx context.Context, requestID, pageID, reviewerID, decis
 		return ErrNotFound
 	}
 
-	if _, err := s.pool.Exec(ctx,
+	// ⚠ THE ROW COUNT IS THE ONLY REVIEWER TEST THIS METHOD HAS, AND IT USED TO BE DISCARDED.
+	// The WHERE clause is what stops a non-reviewer WRITING — that much this package already had
+	// written down, in crosspage_realpg_test.go's own words ("a stranger's decision matches no
+	// row, so this is not 'anyone can decide anything'"). What nothing asked was what the stranger
+	// is TOLD: zero rows fell straight through to aggregate() and the handler answered
+	// 200 {"ok":true}. On the ordinary NON-PRIVATE space, resolveAccess hands AccessView to every
+	// workspace member with no grant at all, so the route's own gate admits them — the success was
+	// reachable by design, not by misconfiguration, and a quorum workflow whose failed click is
+	// byte-identical to a successful one cannot be operated (the item stays in the caller's
+	// inbox forever, because that inbox is these same rows).
+	//
+	// RETURNING BEFORE aggregate() IS PART OF THE FIX, not tidiness: aggregate + the two flips
+	// below are the write half, and a call that recorded nothing must not re-drive the request's
+	// or the page's state at all.
+	tag, err := s.pool.Exec(ctx,
 		`UPDATE review_decisions
         SET decision = $1, comment = $2
         WHERE request_id = $3 AND reviewer_id = $4`,
 		decision, comment, requestID, reviewerID,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("approval: update decision: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// 403 and not 404: the scope gate above has already established that this caller may reach
+		// this request, and `GET …/approval` serves them the request WITH its reviewers array, so
+		// naming the refusal discloses nothing they cannot already read. 404 here would also be a
+		// lie of a different kind — the request is right where they asked.
+		return ErrNotReviewer
 	}
 
 	agg, err := s.aggregate(ctx, requestID)
@@ -386,6 +408,13 @@ func (s *Store) aggregate(ctx context.Context, requestID string) (ApprovalStatus
 // (caller has no membership) matches nothing → ErrNotFound / empty
 // list. This is the IDOR cure.
 var ErrNotFound = errors.New("approval: not found in workspace")
+
+// ErrNotReviewer signals that Decide matched no review_decisions row: the caller is not an
+// assigned reviewer on that request. The handler maps it to 403, DISTINCT from ErrNotFound's 404,
+// because the two say different true things — ErrNotFound means "not here", this means "here, and
+// not yours to decide". It exists because the alternative that shipped was a 200 for a write that
+// never happened (nonreviewer_realpg_test.go).
+var ErrNotReviewer = errors.New("approval: not an assigned reviewer on this request")
 
 // PageInWorkspaces reports whether pageID belongs to one of the caller's verified workspaces —
 // SEC-4 L2: the page-scoped read endpoints 404 a foreign page id (no existence oracle) rather than
