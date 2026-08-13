@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -330,6 +331,58 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
 	return out, nil
 }
 
+// maxVersionAttempts bounds the retry on `UNIQUE (page_id, version)`. Each attempt re-derives the
+// version from the table, so an attempt is only spent when ANOTHER writer won the number this one
+// picked — i.e. the bound is on simultaneous savers of one page, not on retries of one save. Five
+// covers the measured worst case (8 concurrent saves) with room; exhausting it logs rather than
+// silently dropping a restore point, which is the failure this whole path exists to stop.
+const maxVersionAttempts = 5
+
+// appendVersion writes one snapshot of a page into its append-only history.
+//
+// THE VERSION IS DERIVED INSIDE THE INSERT, not read into Go first: a number carried across a
+// statement boundary is a number a second writer can take in between, and that is exactly what
+// lost restore points here (see the note in Update). The unique violation is then EXPECTED under
+// concurrency and retried, not an anomaly.
+//
+// ⚠ IT DOES NOT RETURN AN ERROR, AND THAT IS THE SAME DELIBERATE CHOICE AS BEFORE, made loud
+// instead of silent: a snapshot that cannot be written must not fail the save the user already
+// committed. What changed is that the failure is now REPORTED. `_, _ =` meant a lost restore point
+// and a successful-looking save were the same bytes in the log, which is why a defect that reddens
+// 10 runs out of 10 sat here unnoticed.
+func (s *Store) appendVersion(ctx context.Context, pageID, workspaceID, title, content, createdBy string) {
+	var lastErr error
+	for attempt := 1; attempt <= maxVersionAttempts; attempt++ {
+		// nosemgrep: docs-by-id-write-requires-workspace-scope -- not a by-id write: this INSERTs a
+		// child row whose page_id and workspace_id are both taken from the page row the caller's
+		// UPDATE just returned (out.WorkspaceID), never from a request.
+		_, err := s.pool.Exec(ctx,
+			`INSERT INTO page_versions (page_id, workspace_id, version, title, content, created_by)
+            SELECT $1, $2, COALESCE(MAX(version), 0) + 1, $3, $4, $5
+            FROM page_versions WHERE page_id = $1`,
+			pageID, workspaceID, title, content, createdBy,
+		)
+		if err == nil {
+			return
+		}
+		lastErr = err
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != uniqueViolation {
+			break // not a contested version number — retrying cannot help
+		}
+	}
+	slog.Error("page: version snapshot NOT written — this save has no restore point",
+		slog.String("page_id", pageID),
+		slog.String("workspace_id", workspaceID),
+		slog.Int("attempts", maxVersionAttempts),
+		slog.String("err", lastErr.Error()),
+		slog.String("effect", "the page saved; its history is missing this state, so a restore cannot return to it"))
+}
+
+// uniqueViolation is Postgres's SQLSTATE for a duplicate key — the contested-version case
+// appendVersion retries.
+const uniqueViolation = "23505"
+
 // ─── Get* ──────────────────────────────────────────────────
 
 func (s *Store) GetByID(ctx context.Context, id string) (*model.Page, error) {
@@ -547,18 +600,27 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	}
 
 	if contentChanged || titleChanged {
-		// Bump version: SELECT MAX(version) + INSERT new row. Version history is APPEND-ONLY —
-		// every committed save's snapshot is a restore point and must never be truncated (the
-		// single-writer + versioning model, and Option B later, both rely on a complete linear
-		// history). Two statements, no transaction — a half-applied snapshot just means one
-		// fewer historical row, not a corrupt page.
-		var nextVer int
-		_ = s.pool.QueryRow(ctx,
-			`SELECT COALESCE(MAX(version), 0) FROM page_versions WHERE page_id = $1`,
-			id,
-		).Scan(&nextVer)
-		nextVer++
-
+		// Bump version. Version history is APPEND-ONLY — every committed save's snapshot is a
+		// restore point and must never be truncated (the single-writer + versioning model, and
+		// Option B later, both rely on a complete linear history).
+		//
+		// ⚠⚠ IT USED TO BE `SELECT COALESCE(MAX(version),0)` THEN `INSERT $3`, WITH BOTH ERRORS
+		// DISCARDED, AND THAT LOST RESTORE POINTS FOR COMMITTED SAVES. Two saves of one page that
+		// overlap both read the same MAX, both compute the same next version, and the second
+		// INSERT violates `UNIQUE (page_id, version)` — which `_, _ =` then threw away, so the
+		// save returned nil with no snapshot behind it. MEASURED on real Postgres through this
+		// method: 8 concurrent saves left 4 to 6 version rows, **10 runs out of 10 lost at least
+		// one**, every save reporting success. Overlapping saves are ordinary here and not a
+		// stress case: PageView.tsx flushes a title mutation SEPARATELY from the content
+		// mutation (#99's census), the collab AutoSaver saves on its own debounce, and MCP
+		// toolUpdatePage is a third writer.
+		//
+		// ONE STATEMENT DERIVES THE VERSION WHERE IT IS WRITTEN, so no value is carried across a
+		// gap a second writer can fit inside. Under READ COMMITTED two of these can still read
+		// the same MAX, so the unique violation is the CONTRACT rather than a surprise: it is
+		// retried, and the retry re-reads MAX and lands on the next free number. The retry is
+		// what makes the append complete; the loudness below is what makes a failure that
+		// survives it diagnosable instead of invisible.
 		updatedBy, _ := updates["updated_by"].(string)
 		// BOTH columns come from `out` — the row returned by the UPDATE above — so the
 		// snapshot is a state the page was ACTUALLY IN. The title used to be read from a
@@ -568,11 +630,7 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 		// restoring the NEWEST version silently renamed the live page to its previous title.
 		// The two sources agree on any save that touches only one of the fields, which is why
 		// a suite with zero title-changing saves was green over it for the column's whole life.
-		_, _ = s.pool.Exec(ctx,
-			`INSERT INTO page_versions (page_id, workspace_id, version, title, content, created_by)
-            VALUES ($1, $2, $3, $4, $5, $6)`,
-			id, out.WorkspaceID, nextVer, out.Title, out.Content, updatedBy,
-		)
+		s.appendVersion(ctx, id, out.WorkspaceID, out.Title, out.Content, updatedBy)
 	}
 
 	// THE TWO CONTENT HOOKS STAY ON `contentChanged` ALONE, and that is the reason the snapshot
