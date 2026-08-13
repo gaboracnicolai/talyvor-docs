@@ -77,6 +77,27 @@ func New(pool Pinger, ttl time.Duration) *Checker {
 // The cache is the point: without it every request carries a database round trip, and the
 // health check becomes its own bottleneck — and, during an outage, every request would
 // block on its own doomed connect attempt.
+//
+// ⚠⚠ THE PROBE IS DETACHED FROM THE CALLER'S CANCELLATION, AND THAT IS THE WHOLE POINT OF
+// context.WithoutCancel HERE. The verdict this method computes is SHARED — it is cached and
+// handed to every subsequent caller for the TTL — so deriving it from one caller's lifetime
+// let that caller decide a fact about the database for everybody. It did: a context that was
+// already done made Ping return THAT CALLER'S context error, which was cached as
+// `healthy = false`. Measured on real Postgres with the database up throughout, one cancelled
+// caller turned every following request into 503 DB_UNAVAILABLE through Middleware (which
+// fronts all of /v1 and /mcp) and made /readyz report "unreachable", so an orchestrator pulls
+// a healthy replica out of rotation. The readiness probe is itself a caller, so the shape was
+// self-amplifying: a ping slower than kubelet's timeoutSeconds took the replica's whole
+// traffic down for the TTL, then did it again. callercontext_realpg_test.go holds it.
+//
+// WithoutCancel rather than context.Background(): the caller's VALUES (tracing spans, pgx
+// hooks) are still the right ones to carry into the probe — only its LIFETIME was never ours
+// to inherit. probeTimeout still bounds the probe, and it is now the only thing that does,
+// which is what "the probe must never become the outage" required all along.
+//
+// The caller with the dead context is deliberately given the true answer rather than an
+// error: "is the database reachable" is not a question about the caller, and their own
+// handler will fail on their own dead context a moment later either way.
 func (c *Checker) Healthy(ctx context.Context) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -85,7 +106,7 @@ func (c *Checker) Healthy(ctx context.Context) bool {
 		return c.healthy
 	}
 
-	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), probeTimeout)
 	defer cancel()
 
 	c.probes.Add(1)
