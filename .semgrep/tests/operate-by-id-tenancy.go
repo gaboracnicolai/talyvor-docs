@@ -23,9 +23,13 @@
 // cause; it cannot fail quietly. Nothing else in this repo relies on it: `frontend/src/test` is
 // the only other such directory and holds no Go.
 //
-// COVERAGE, STATED SO IT IS NOT OVERREAD: the three rules in operate-by-id-tenancy.yml. The four
-// in body-supplied-authority.yml have NO fixture — they need cross-function shapes this file does
-// not model, and a green run here says nothing about them.
+// COVERAGE, STATED SO IT IS NOT OVERREAD: the five rules in operate-by-id-tenancy.yml. A green
+// run here says nothing about body-supplied-authority.yml, which has its own fixture in this
+// directory. (This sentence used to read "the four in body-supplied-authority.yml have NO
+// fixture — they need cross-function shapes this file does not model". They did not: writing
+// that fixture measured that one of those four rules could only fire against the two helpers a
+// sibling rule already rejected. A coverage claim in a comment is a claim, and this one was
+// wrong in the direction that made the gap look principled.)
 package tests
 
 import (

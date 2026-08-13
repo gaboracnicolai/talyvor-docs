@@ -175,3 +175,63 @@ rules:
       - metavariable-regex:
           metavariable: $VERIFIED
           regex: (?s).*(ActorOrEmpty|WorkspaceOrEmpty|AuthorizedMember|ActorFromContext|WorkspaceFromContext|MemberIDForWorkspace|SingleMemberID|SingleWorkspace)
+
+  # ── C'. THE SAME INVERTED FALLBACK, ONE PLUMBING SHAPE OVER — AND UNTIL IT WAS WRITTEN, RULE C
+  #       ABOVE COULD ONLY FIRE AGAINST THE TWO HELPERS RULE D ALREADY REJECTS.
+  #
+  # Rule C binds $VERIFIED to the RIGHT-HAND SIDE OF A SINGLE-VALUE ASSIGNMENT and matches its
+  # source text against the eight names below. SIX of those eight — AuthorizedMember,
+  # ActorFromContext, WorkspaceFromContext, MemberIDForWorkspace, SingleMemberID, SingleWorkspace
+  # — return `(string, bool)`. A two-value call cannot stand in that position in Go; it does not
+  # compile. So the only two names rule C could ever bind are ActorOrEmpty and WorkspaceOrEmpty,
+  # which rule D rejects outright and which every call site in this repository has already been
+  # migrated off — while rule C's own message names the two-value resolvers as the fix.
+  #
+  # MEASURED rather than read off the signatures: the two cases now in
+  # .semgrep/tests/body-supplied-authority.go are the same defect written the only way Go allows
+  # against a two-value resolver, and the whole shipped rule set returned ZERO findings over a
+  # file containing exactly them.
+  #
+  # THE ANCHOR IS THE EMPTINESS TEST, NOT "a resolver's local reaches a body field". A handler
+  # that assigns the verified value UNCONDITIONALLY is the correct shape and stays silent — that
+  # is the difference between this rule and one every correct handler has to suppress.
+  #
+  # ⚠ THE NAME LIST IS RULE C's, BYTE FOR BYTE, and deliberately not narrowed to the six this
+  # rule can reach. Two lists that both mean "a verified identity" are two definitions that drift;
+  # one list with a partly-unreachable tail in each rule is not. The `pattern-inside` also reaches
+  # an if-statement's init clause, so the nested comma-ok form needs no second pattern — measured,
+  # and the fixture case that says so is invertedAgainstWorkspaceFromContext.
+  - id: docs-no-inverted-identity-fallback-two-value
+    languages: [go]
+    severity: ERROR
+    message: >
+      INVERTED IDENTITY FALLBACK (two-value form): a verified identity is unpacked from one of the
+      approved resolvers into a local, and the client's field is overwritten ONLY when the client
+      left it empty — so any caller who sends the field is whoever they say they are. This is the
+      same defect as docs-no-inverted-identity-fallback; it is a separate rule because Go forces
+      the unpack for every resolver that returns (value, ok), which is six of the eight the sibling
+      rule names, and the sibling is structurally unable to see them. The verified identity is not
+      a default; it is the only answer. Assign it unconditionally and drop the client field.
+    patterns:
+      - pattern-either:
+          - pattern: |
+              if $IN.$FIELD == "" {
+                ...
+                $IN.$FIELD = $V
+                ...
+              }
+          - pattern: |
+              if $VAR == "" {
+                ...
+                $VAR = $V
+                ...
+              }
+      - pattern-inside: |
+          func $F(...) {
+            ...
+            $V, $OK := $VERIFIED(...)
+            ...
+          }
+      - metavariable-regex:
+          metavariable: $VERIFIED
+          regex: (?s).*(ActorOrEmpty|WorkspaceOrEmpty|AuthorizedMember|ActorFromContext|WorkspaceFromContext|MemberIDForWorkspace|SingleMemberID|SingleWorkspace)
