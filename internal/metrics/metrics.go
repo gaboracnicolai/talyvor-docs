@@ -39,12 +39,27 @@ var (
 	//     every space ever created, contradicting that discipline in the same binary.
 	//
 	// The operational signal worth having is the RATE of page creation, which needs no label.
-	// Per-tenant creation counts belong behind the authenticated analytics API, which already
-	// serves them (internal/analytics), not in an open metrics scrape.
+	//
+	// ⚠ THE SENTENCE THAT USED TO FOLLOW WAS FALSE AND IS RETRACTED HERE RATHER THAN DELETED:
+	// "Per-tenant creation counts belong behind the authenticated analytics API, which already
+	// serves them (internal/analytics)". The first half is a judgement and stands. The second is
+	// a claim about this repository and it is wrong: internal/analytics mounts exactly ONE route
+	// (GET /v1/workspaces/{wsID}/analytics/pages) and it is READERSHIP — total_views,
+	// unique_viewers, most/least read, never_read_count. There is no page-creation count in that
+	// package, or in any other; the only COUNT(*) statements outside page_views are over
+	// custom_domains and comments. So dropping the space_id label removed the per-tenant number
+	// and pointed at a replacement that does not exist. Dropping it was still right (see 1 and 2
+	// above) — what was not right was saying it had landed somewhere else.
+	//
+	// ⚠ INCREMENTED IN page.Store.Create, NOT IN A HANDLER, and that is load-bearing rather than
+	// stylistic. The Inc lived in page.Handler.Create and was one of SIX doors into that single
+	// INSERT, so `create_page` (MCP), template instantiation and every bulk import moved this
+	// number by zero. Pinned per surface by pagescreated_metric_realpg_test.go in internal/page,
+	// internal/mcp, internal/templatelib and internal/importer.
 	PagesCreated = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "docs_pages_created_total",
-			Help: "Pages created (all spaces; deliberately unlabelled — /metrics is unauthenticated).",
+			Help: "Pages created, by any route (REST, MCP, template, import); deliberately unlabelled — /metrics is unauthenticated.",
 		},
 	)
 )

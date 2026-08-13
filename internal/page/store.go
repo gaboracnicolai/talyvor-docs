@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/model"
 )
 
@@ -343,6 +344,23 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
 	if err != nil {
 		return nil, fmt.Errorf("page: insert: %w", err)
 	}
+
+	// ⚠ THE PAGE-CREATION METRIC IS INCREMENTED HERE, BESIDE THE INSERT, AND IT USED TO BE
+	// INCREMENTED IN Handler.Create. `INSERT INTO pages` exists in exactly one place in this
+	// repository — the statement above — and the comment on it already names the SIX callers
+	// that reach it. The counter saw ONE of them: the REST handler. `create_page` (the MCP tool
+	// an agent calls), both templatelib.UseTemplate paths and all three importer paths landed
+	// pages and moved docs_pages_created_total by zero, so a five-thousand-page Confluence
+	// import and every agent-authored page were invisible in the ONLY page-creation signal this
+	// service exports. Its Help string says "Pages created"; nothing anywhere narrowed it to one
+	// door, and the failure shape is the bad one — not a gap an operator can see, but a
+	// plausible smaller number.
+	//
+	// AFTER the insert succeeded and NOT before: a refused or failed create is not a page
+	// created, and a counter that moves on the attempt is a different, quieter lie.
+	// Pinned per surface by pagescreated_metric_realpg_test.go in internal/page (the REST door
+	// plus the refusal case), internal/mcp, internal/templatelib and internal/importer.
+	metrics.PagesCreated.Inc()
 
 	// First version. Failure here doesn't roll back the page itself
 	// — the version table is informational. A retry path could
