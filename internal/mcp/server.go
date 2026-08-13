@@ -88,15 +88,48 @@ func (s *Server) WithAccess(a AccessController) *Server {
 
 // New constructs the server with the real package stores. Tests use
 // newServer with fakes.
+//
+// ⚠ EVERY ARGUMENT IS A CONCRETE POINTER AND EVERY deps FIELD IS AN INTERFACE, so assigning one
+// straight through turns a nil pointer into a NON-NIL interface holding nil. That is not a
+// nuisance, it is the thing that disarms the nil guards downstream: `s.deps.spaces != nil` is
+// TRUE for a nil *space.Store, and space.Store.GetByID dereferences s.pool with no receiver check
+// — measured as a get_page panic in typednil_deps_realpg_test.go. freshness.GetStaleReport
+// records the same footgun as a SIGSEGV it answered with a nil-RECEIVER check, and hands this
+// half on by name ("THE DEAD nil GUARD IN internal/mcp IS ITS OWN FINDING").
+//
+// So the conversion happens HERE, once, and every guard downstream asks a question that can
+// actually be false. A dep added later inherits it by writing one more line in this block, which
+// is the cheapest place in the package to remember.
+//
+// ⚠ AND MAKING THEM LIVE IS NOT FREE — two fallbacks these guards were hiding are LIES, and both
+// move in this same commit rather than being switched on underneath: get_stale_pages answered an
+// absent engine with `[]` ("nothing needs attention") and ask_docs with `answer: ""` ("the
+// documents say nothing"). Both are errors now. Turning a dead guard live without fixing what it
+// guards would have made this class worse, not better.
+//
+// ⚠ MEASURED AND NOT FIXED HERE: deps.analytics has NO guard at any call site, so this
+// normalisation neither helps nor hurts it. get_page_analytics with a nil *analytics.Store PANICS
+// both before and after (probed on real Postgres: "invalid memory address or nil pointer
+// dereference") — GetReadStats checks s.pool and cannot check its own receiver. That is a
+// missing guard rather than a dead one, which is a different finding and wants its own merge.
 func New(pages *page.Store, spaces *space.Store, analyticsStore *analytics.Store, aiEngine *ai.Engine, fresh *freshness.FreshnessEngine, version string) *Server {
-	return newServer(deps{
-		pages:     pages,
-		spaces:    spaces,
-		analytics: analyticsStore,
-		ai:        aiEngine,
-		freshness: fresh,
-		version:   version,
-	})
+	d := deps{version: version}
+	if pages != nil {
+		d.pages = pages
+	}
+	if spaces != nil {
+		d.spaces = spaces
+	}
+	if analyticsStore != nil {
+		d.analytics = analyticsStore
+	}
+	if aiEngine != nil {
+		d.ai = aiEngine
+	}
+	if fresh != nil {
+		d.freshness = fresh
+	}
+	return newServer(d)
 }
 
 func newServer(d deps) *Server { return &Server{deps: d} }
@@ -981,20 +1014,25 @@ func (s *Server) toolAskDocs(ctx context.Context, args map[string]any) (any, err
 	// by New with no engine; the call proceeds on the nil receiver, IsAvailable returns false,
 	// and run() returns ai.ErrUnavailable. Before this change that error was swallowed too, so
 	// "Lens is down", "Lens is unconfigured" and "no engine wired at all" were one empty
-	// string. All three are errors now. The check still catches a genuinely nil interface,
-	// which only newServer (the fake path) can produce.
-	answer := ""
-	if s.deps.ai != nil {
-		ans, err := s.deps.ai.AskDocs(ctx, wsID, question, pages)
-		if err != nil {
-			slog.Error("mcp: ask_docs AI call failed — reporting the failure rather than an empty answer",
-				slog.String("workspace_id", wsID), slog.Any("err", err))
-			if errors.Is(err, ai.ErrUnavailable) {
-				return nil, &rpcError{Code: errInternal, Message: "the AI service is not available"}
-			}
-			return nil, &rpcError{Code: errInternal, Message: "the AI service failed to answer"}
+	// string. All three are errors now.
+	//
+	// ⚠ AND THE FOURTH CASE — NO ENGINE AT ALL — IS AN ERROR TOO, WHICH IT WAS NOT. New now
+	// converts a nil *ai.Engine into a genuinely nil interface, so this branch is REACHABLE
+	// rather than the dead check described above. Falling through it left `answer: ""` beside
+	// the sources the search half really did find, which is the very shape this comment says was
+	// fixed: a claim that the documents say nothing, standing in for "I could not ask". Absent
+	// and unavailable are the same answer to the caller, so they share one message.
+	if s.deps.ai == nil {
+		return nil, &rpcError{Code: errInternal, Message: "the AI service is not available"}
+	}
+	answer, err := s.deps.ai.AskDocs(ctx, wsID, question, pages)
+	if err != nil {
+		slog.Error("mcp: ask_docs AI call failed — reporting the failure rather than an empty answer",
+			slog.String("workspace_id", wsID), slog.Any("err", err))
+		if errors.Is(err, ai.ErrUnavailable) {
+			return nil, &rpcError{Code: errInternal, Message: "the AI service is not available"}
 		}
-		answer = ans
+		return nil, &rpcError{Code: errInternal, Message: "the AI service failed to answer"}
 	}
 	return toolContent(askOut{Answer: answer, Sources: sources})
 }
@@ -1012,8 +1050,14 @@ func (s *Server) toolGetStalePages(ctx context.Context, args map[string]any) (an
 	if err := requireStrings(args, "workspace_id"); err != nil {
 		return nil, err
 	}
+	// AN ABSENT ENGINE IS AN ERROR, NOT AN EMPTY STALE LIST. This guard used to be unreachable
+	// (New put a typed nil in the interface), and the `[]` it returned was never the neutral
+	// answer it looks like: an empty stale report is the positive claim "nothing in this
+	// workspace needs attention", which the SPA paints as a zero on the sidebar.
+	// internal/freshness states the rule for its own path in those words and returns errors
+	// rather than empty lists; now that New makes this guard live, the tool has to obey it too.
 	if s.deps.freshness == nil {
-		return toolContent([]stalePageOut{})
+		return nil, &rpcError{Code: errInternal, Message: "the freshness engine is not wired; the stale report is unavailable"}
 	}
 	reports, err := s.deps.freshness.GetStaleReport(ctx, stringArg(args, "workspace_id", ""))
 	if err != nil {
