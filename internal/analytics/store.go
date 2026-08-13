@@ -278,6 +278,29 @@ const rollupCap = 10
 // MAY VIEW. The "never read" count is computed against the pages table (not page_views) so pages
 // that were created without any traffic show up.
 //
+// ⚠⚠ BOTH COHORTS EXCLUDE TEMPLATES, AND THEY DID NOT ALWAYS. The never-read half named
+// `p.is_template = false` from the start ("boilerplate, not content"); the ranked half named no
+// template predicate, so ONE SCREEN HELD TWO DEFINITIONS OF "A PAGE" — a template that had been
+// read was content, a template that had not been read did not exist. Measured on real Postgres
+// through the route: a 5-view template ranked FIRST in "Most read", sat in "Needs attention
+// (lowest read)", and put its views in "Views (30d)" and its reader in "Unique visitors", while
+// an unread template was absent from "Never read". ⚠ THE LIVE PATH IS THE FLIP, not a fixture:
+// `is_template` is in page.Update's allowlist, and a 9-view document PATCHed to a template left
+// `SearchWithRank` (1 hit → 0) and `WorkspacePageIDs` (2 ids → 1) and did NOT leave the ranking.
+// Every other reader of `pages` in this repository excludes templates — SearchWithRank, both
+// semantic queries, WorkspacePageIDs, this file's never-read cohort, and customdomain.Handler in
+// Go — so the ranked cohort was the one reader ignoring the column, by omission.
+//
+// ⚠ `total_views` AND `unique_viewers` FOLLOW FROM THE ONE PREDICATE rather than being narrowed
+// separately: both are derived from the SURVIVING ranked rows (see the filter below), so the four
+// figures on the screen cannot disagree about what a page is. That is this method's existing rule,
+// not a new one.
+//
+// ⚠ THE OTHER READING, RECORDED BECAUSE THE REVERT IS ONE LINE: "Views (30d)" could be held to be
+// a traffic figure, in which case template traffic belongs in it — but then the never-read count
+// must widen to match. What is not defensible is the screen holding both definitions at once.
+// templatecohort_realpg_test.go's [NEVER-READ-EXCLUDES-TEMPLATES] is the case to change first.
+//
 // ⚠ THIS IS THE FIFTH COPY OF THE PRIVATE-SPACE SEAM (#78 search/stale, #79 /ask, #80 freshness,
 // #81 six MCP tools). Its single caller — GET /v1/workspaces/{wsID}/analytics/pages, which the
 // SPA's Analytics screen reads — authorized the WORKSPACE and stopped, so a member with no grant
@@ -321,12 +344,18 @@ func (s *Store) GetWorkspaceStats(ctx context.Context, workspaceID string, days 
 	var out WorkspaceReadStats
 
 	// The WHOLE ranked window, no LIMIT — the cap is applied after filtering.
+	//
+	// ⚠ `p.is_template = false` MATCHES THE NEVER-READ COHORT BELOW, AND IT IS IN THE SQL RATHER
+	// THAN IN GO FOR THE SAME REASON THE VISIBILITY FILTER IS NOT: a template dropped after
+	// `visible[:rollupCap]` would shorten the dashboard instead of narrowing it. Here the row
+	// never enters the ranking, so the cap still fills from content. [SHORT-LIST] holds it.
 	rows, err := s.pool.Query(ctx,
 		`SELECT pv.page_id, MAX(p.title), COUNT(*)::int
         FROM page_views pv
         JOIN pages p ON p.id = pv.page_id
         WHERE pv.workspace_id = $1
           AND pv.created_at > NOW() - INTERVAL '1 day' * $2
+          AND p.is_template = false
         GROUP BY pv.page_id
         ORDER BY COUNT(*) DESC, pv.page_id`,
 		workspaceID, days,
