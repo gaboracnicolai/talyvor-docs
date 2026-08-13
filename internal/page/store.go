@@ -104,13 +104,29 @@ var ErrLocked = errors.New("page: locked")
 // PageFilter drives the List query. Empty / zero fields fall back to
 // permissive defaults so callers can list "everything in the space"
 // with a single struct field set.
+//
+// ⚠ EVERY FIELD HERE IS IN List's SQL, AND THAT SENTENCE IS THE POINT OF THIS BLOCK. ParentID
+// used to be declared and never read: MCP's `list_pages` set it, its published schema promised
+// "Restrict to children of this page", and the query named `space_id` alone — so an agent asking
+// for one page's children was handed the whole space, in a well-formed list it had no way to
+// doubt. A filter field that the query does not mention is not a smaller feature than a working
+// one; it is a wrong answer wearing the shape of a right one.
+//
+// ⚠ TWO MORE FIELDS WERE REMOVED HERE RATHER THAN IMPLEMENTED — `IsTemplet` (a typo of its
+// neighbour) and `IsTemplate`. Both were inert in exactly the same way, and a census of every
+// PageFilter literal in the repository found NO caller that set either, so nothing observable
+// changes by dropping them; the compiler now proves it. Implementing them instead would have
+// invented a product behaviour nobody asked for — the one caller that wants templates out of a
+// listing, customdomain.Handler, filters `p.IsTemplate` itself in Go. If a caller ever wants the
+// predicate, it belongs here WITH a test, the way ParentID now is.
 type PageFilter struct {
-	SpaceID    string
-	ParentID   *string
-	IsTemplet  bool
-	IsTemplate bool
-	Limit      int
-	Offset     int
+	SpaceID string
+	// ParentID scopes the listing to the DIRECT children of that page. nil lists the whole
+	// space. A non-nil pointer to "" means `parent_id = ''`, which matches nothing — it does
+	// NOT mean "the pages with no parent", and no caller constructs it.
+	ParentID *string
+	Limit    int
+	Offset   int
 }
 
 // ─── slug + content_text helpers ────────────────────────────
@@ -409,11 +425,27 @@ func (s *Store) List(ctx context.Context, filter PageFilter) ([]model.Page, erro
 	if limit > 500 {
 		limit = 500
 	}
+	// ONE STATEMENT, NOT TWO BUILT BY A BRANCH. `$4::text IS NULL` carries the "no parent scope
+	// asked for" case inside the SQL, so the filtered and unfiltered listings cannot drift into
+	// different column lists or different ORDER BYs — which is the failure the two-query shape
+	// invites and the reason the ordering rule below is written down once.
+	//
+	// `idx_pages_parent ON pages(parent_id) WHERE parent_id IS NOT NULL` has existed since
+	// migration 0002; this is the query it was created for.
+	//
+	// The ORDER BY is unchanged, and `depth ASC` is not redundant under a parent scope even
+	// though every direct child of one page shares a depth BY CONSTRUCTION AT CREATE TIME. The
+	// column is derived in Create and nowhere else; `parent_id` is in Update's allowlist and
+	// Update does not recompute it. MEASURED on real Postgres rather than read off the source: a
+	// page moved under a depth-5 parent by PATCH still reports depth 0. So two children of one
+	// page really can carry different depths on disk, and sorting by it keeps the scoped listing
+	// consistent with the unscoped one rather than quietly using a second order.
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+columns+` FROM pages WHERE space_id = $1
+		`SELECT `+columns+` FROM pages
+        WHERE space_id = $1 AND ($4::text IS NULL OR parent_id = $4)
         ORDER BY depth ASC, position ASC, created_at ASC
         LIMIT $2 OFFSET $3`,
-		filter.SpaceID, limit, filter.Offset,
+		filter.SpaceID, limit, filter.Offset, filter.ParentID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("page: list: %w", err)
