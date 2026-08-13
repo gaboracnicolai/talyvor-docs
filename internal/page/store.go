@@ -293,11 +293,20 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
 	p.PageType = pageType
 
 	// Depth = parent.depth + 1; root pages are depth 0.
+	//
+	// ⚠ AND workspace_id: THE PARENT IS A CALLER-SUPPLIED PAGE ID AND THIS LOOKUP USED TO ACCEPT
+	// ANY ROW IN THE TABLE. The FK is `parent_id REFERENCES pages(id)` with no tenancy predicate,
+	// so a create in workspace A could name workspace B's page and inherit ITS depth. See
+	// parenttenancy_realpg_test.go; the same hole was open on Update, which is the other door.
 	if p.ParentID != nil {
 		var parentDepth int
 		err := s.pool.QueryRow(ctx,
-			`SELECT depth FROM pages WHERE id = $1`, *p.ParentID,
+			`SELECT depth FROM pages WHERE id = $1 AND workspace_id = $2`,
+			*p.ParentID, p.WorkspaceID,
 		).Scan(&parentDepth)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrParentNotFound
+		}
 		if err != nil {
 			return nil, fmt.Errorf("page: parent lookup: %w", err)
 		}
@@ -542,6 +551,33 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	}
 	// is_admin is a gate-only flag — never persist it.
 	delete(updates, "is_admin")
+	// ⚠ THE NEW PARENT IS A CALLER-SUPPLIED PAGE ID AND NOTHING ABOVE THIS LINE HAS LOOKED AT IT.
+	// UpdateInWorkspaces authorizes the PAGE BEING EDITED against the caller's memberships; the
+	// value in the body is a second object, authorized by nothing, and `parent_id REFERENCES
+	// pages(id)` carries no tenancy predicate — so a page could be made the child of another
+	// tenant's page. Measured at e9f6109; see parenttenancy_realpg_test.go, which also pins the
+	// premise this check rests on (workspace_id is not writable, so the fact cannot change under
+	// the write that follows).
+	//
+	// nil is an UNPARENT and is not a lookup. A non-string value is left to the existing
+	// behaviour rather than given a new refusal here: every allowlisted column takes its body
+	// value untyped, and that is one finding with one fix, not this one.
+	if v, present := updates["parent_id"]; present {
+		if newParent, isStr := v.(string); isStr {
+			var ok bool
+			if err := s.pool.QueryRow(ctx, `
+                SELECT EXISTS (
+                    SELECT 1 FROM pages parent, pages child
+                     WHERE parent.id = $1 AND child.id = $2
+                       AND parent.workspace_id = child.workspace_id
+                )`, newParent, id).Scan(&ok); err != nil {
+				return nil, fmt.Errorf("page: parent lookup: %w", err)
+			}
+			if !ok {
+				return nil, ErrParentNotFound
+			}
+		}
+	}
 	contentChanged := false
 	if v, ok := updates["content"]; ok {
 		if str, isStr := v.(string); isStr {
@@ -802,6 +838,15 @@ func (s *Store) Verify(ctx context.Context, pageID, verifierID string) error {
 // ErrNotFound signals a by-id op resolved to no row IN THE CALLER'S WORKSPACES — the handler
 // maps it to 404. Distinct from a raw DB error so a real failure is never masked as not-found.
 var ErrNotFound = errors.New("page: not found in an accessible workspace")
+
+// ErrParentNotFound refuses a parent_id that is not a page of the SAME workspace as the child.
+//
+// ⚠ ONE SENTINEL FOR TWO CAUSES, ON PURPOSE. "There is no such page" and "that page is another
+// tenant's" are the same answer here, because parent_id is caller-supplied and a refusal that
+// distinguished them would be an existence oracle for another workspace's page ids. It also
+// replaces what the missing-parent case used to return: the raw driver text, foreign-key
+// constraint name and SQLSTATE included, straight out of a 400.
+var ErrParentNotFound = errors.New("page: parent page not found in this workspace")
 
 // assertInWorkspaces returns ErrNotFound unless page id lives in one of wsIDs.
 // PageInWorkspaces reports whether page id lives in one of wsIDs — the scope check the collab

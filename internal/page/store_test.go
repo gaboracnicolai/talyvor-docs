@@ -88,9 +88,11 @@ func pageRow(id, title, slug string, depth int, parent *string) *pgxmock.Rows {
 func TestCreate_AutoSlugAndDepthAndVersion(t *testing.T) {
 	store, pool := newMockStore(t)
 	parent := "parent-page"
-	// Parent depth lookup.
+	// Parent depth lookup. The second argument is the CHILD's workspace: the parent must be a
+	// page of the same tenant, and the lookup that derives depth is the one place that can say so
+	// without a second round trip.
 	pool.ExpectQuery(`SELECT depth FROM pages WHERE id`).
-		WithArgs(parent).
+		WithArgs(parent, "ws-1").
 		WillReturnRows(pgxmock.NewRows([]string{"depth"}).AddRow(int(1)))
 	// INSERT — store derives slug "my-new-page" from title.
 	pool.ExpectQuery(`INSERT INTO pages`).
@@ -133,9 +135,10 @@ func TestCreate_AutoSlugAndDepthAndVersion(t *testing.T) {
 func TestCreate_RejectsDeepNesting(t *testing.T) {
 	store, pool := newMockStore(t)
 	parent := "deep"
-	// Parent is already at depth 5 → would make a depth-6 child.
+	// Parent is already at depth 5 → would make a depth-6 child. Same workspace, so the tenancy
+	// arm of this lookup is satisfied and depth is what refuses.
 	pool.ExpectQuery(`SELECT depth FROM pages WHERE id`).
-		WithArgs(parent).
+		WithArgs(parent, "ws-1").
 		WillReturnRows(pgxmock.NewRows([]string{"depth"}).AddRow(int(5)))
 	_, err := store.Create(context.Background(), model.Page{
 		SpaceID: "sp-1", WorkspaceID: "ws-1",
