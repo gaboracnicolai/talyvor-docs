@@ -367,8 +367,20 @@ func (s *Server) toolsList() []toolSpec {
 			),
 		},
 		{
-			Name:        "get_stale_pages",
-			Description: "List pages flagged as stale by the freshness engine — past their stale_after_days threshold or with linked Track issues completed since the last edit. Use this to find docs that need updating.",
+			Name: "get_stale_pages",
+			// ⚠ THE SECOND CRITERION THIS USED TO PROMISE WAS UNSATISFIABLE BY CONSTRUCTION,
+			// AND AN AGENT CANNOT TELL AN EMPTY LIST FROM AN ABSENT ONE. It read "past their
+			// stale_after_days threshold OR with linked Track issues completed since the last
+			// edit". The whole population is page.Store.GetStalePages, one SQL predicate over
+			// stale_after_days — the linked-issue signal is computed only for pages that
+			// predicate ALREADY returned, so it can annotate a row and can never add one.
+			// MEASURED on real Postgres with the links and the Track client genuinely wired
+			// (internal/freshness/stalereport_population_realpg_test.go): a page with
+			// stale_after_days = 0 and BOTH linked issues `done` is absent here while
+			// get_page reports suggest_review = true for that same page. The boundary is
+			// stated rather than implied, and get_page is named, because an agent that reads
+			// "or" and gets [] concludes no such document exists.
+			Description: "List pages past their stale_after_days threshold. Use this to find docs that need updating. LIMITS, so an empty list is not misread: a page with no stale_after_days set never appears here, and completed linked Track issues never add a page to this list — they only annotate one already past its threshold. For a single page's full freshness signal, including linked-issue activity, call get_page.",
 			InputSchema: schema(
 				required("workspace_id"),
 				prop("workspace_id", "string", "Workspace identifier"),

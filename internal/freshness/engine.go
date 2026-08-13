@@ -217,6 +217,30 @@ func (e *FreshnessEngine) GetStaleReport(ctx context.Context, workspaceID string
 // SendStaleDigest is its only caller and runs on a background context started from main.go, which
 // has no memberships and never will — filtering it per-caller would report an empty workspace to
 // an operator every day at 09:00.
+// staleReportAll builds a report per page in the workspace's stale set.
+//
+// ⚠⚠ THE POPULATION IS `GetStalePages` AND NOTHING WIDENS IT — buildReport ANNOTATES ROWS, IT
+// DOES NOT SELECT THEM. That one sentence is the whole contract of this route and both of its
+// consumers used to describe a different one. GetStalePages is a TTL-only SQL predicate
+// (stale_after_days > 0 AND updated_at/last_verified_at past it), so:
+//
+//   - `SuggestReview` / `LinkedIssuesClosed` can only ever DECORATE a page the TTL already
+//     caught. A page with stale_after_days = 0 — the column DEFAULT, i.e. every page nobody
+//     configured — is invisible here no matter how many linked Track issues are done.
+//   - Every row's Status is therefore `stale`. The SQL requires age > TTL and daysBetween
+//     FLOORS, so floor(age) >= TTL always holds; `warning`, `fresh` and `unknown` are
+//     unreachable through this function, which makes statusRank's branch in the sort below a
+//     tiebreak that cannot vary. Kept, because it is correct for any widened population.
+//
+// Both are MEASURED, not argued — stalereport_population_realpg_test.go drives the real
+// page.Store against real Postgres with a live link store and a live Track reader, and its
+// [CONTROL] tag is what makes those two absences a boundary rather than a dead fixture.
+//
+// ⚠ WIDENING IT IS A DECISION AND THE TWO HALVES DO NOT COST THE SAME. The warning band is
+// free (pure SQL, no network) but changes what SendStaleDigest emails and what the sidebar
+// counts. The linked-issue half is NOT computable here at any price today: page_links carries
+// no status column, so Docs holds no local copy of an issue's state and answering it
+// workspace-wide means one Track round trip per linked issue of every page, per request.
 func (e *FreshnessEngine) staleReportAll(ctx context.Context, workspaceID string) ([]FreshnessReport, error) {
 	pages, err := e.pages.GetStalePages(ctx, workspaceID)
 	if err != nil {
