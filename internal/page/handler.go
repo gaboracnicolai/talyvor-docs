@@ -11,7 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/talyvor/docs/internal/authz"
-	"github.com/talyvor/docs/internal/metrics"
 	"github.com/talyvor/docs/internal/model"
 	"github.com/talyvor/docs/internal/permission"
 )
@@ -184,7 +183,9 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "CREATE_FAILED", err.Error())
 		return
 	}
-	metrics.PagesCreated.Inc()
+	// docs_pages_created_total IS INCREMENTED IN Store.Create, NOT HERE. This was the only
+	// call site, and it is one of SIX doors into that store method — see the block above the
+	// INSERT in store.go, and pagescreated_metric_realpg_test.go.
 	writeJSON(w, http.StatusCreated, out)
 }
 
