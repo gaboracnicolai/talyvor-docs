@@ -758,16 +758,8 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	// for every move, so this is strictly better and still not atomic. The REFUSAL above is what
 	// carries the cap; this is the bookkeeping that keeps the next Create honest.
 	if rebaseDepth {
-		if _, err := s.pool.Exec(ctx, `
-            WITH RECURSIVE sub AS (
-                SELECT id, 0 AS rel FROM pages WHERE id = $1
-                UNION ALL
-                SELECT p.id, s.rel + 1 FROM pages p JOIN sub s ON p.parent_id = s.id
-            ) CYCLE id SET is_cycle USING path
-            UPDATE pages SET depth = $2 + d.rel
-              FROM (SELECT id, min(rel) AS rel FROM sub GROUP BY id) d
-             WHERE pages.id = d.id`, id, newDepth); err != nil {
-			return nil, fmt.Errorf("page: depth rebase: %w", err)
+		if err := s.rebaseSubtreeDepth(ctx, []string{id}, newDepth); err != nil {
+			return nil, err
 		}
 		// The row above was materialised by the UPDATE that moved the link, so it still carries
 		// the pre-move depth. Returning it would hand a caller the number this block just
@@ -839,6 +831,51 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	return out, nil
 }
 
+// rebaseSubtreeDepth rewrites `depth` for each page in roots and everything beneath it, putting
+// the roots themselves at base and each descendant one deeper per generation.
+//
+// ONE PLACE, TWO CALLERS, AND THEY ARE THE TWO WRITERS OF parent_id. Update moves a page; Delete
+// lifts the deleted page's children onto its parent. Both used to leave `depth` where it was,
+// in OPPOSITE directions — a move left pages claiming to be shallower than they are, which let
+// Create build past MaxDepth without bound; a delete leaves them claiming to be deeper, which
+// makes Create refuse levels that fit. Two callers of one expression rather than two copies,
+// because two copies of a derivation are two places for it to drift.
+//
+// ⚠⚠ IT MUST NOT TOUCH `updated_at`, AND NOTHING BUT THIS SENTENCE STOPS IT. Every row it writes
+// belongs to a page nobody edited. GetStalePages keys on pages.updated_at and feeds the SPA's
+// stale screen, the 09:00 UTC freshness digest, GET /workspaces/{wsID}/stale and the MCP
+// get_stale_pages tool; Delete's re-parent statement was the FOURTH copy of that seam in this
+// repository (see the block below and reparent_staleness_realpg_test.go), and this helper runs
+// one line away from it against the same rows. Pinned by [CLOCK] in both guards.
+//
+// ⚠ `CYCLE id SET is_cycle USING path`, and it is not decoration. The cycle predicate in Update
+// dedupes on `id` alone, which is what lets plain UNION terminate on a ring; this walk carries a
+// per-row counter, so every lap of a ring produces a row that is NEW BY VALUE and UNION would
+// never stop. Rings written before #118's guard are still on disk. `min(rel)` because a ring
+// member reached through CYCLE can appear on more than one path, and UPDATE … FROM picks
+// arbitrarily among duplicate rows — arbitrary is not a result.
+//
+// An empty roots slice writes nothing: `id = ANY('{}')` matches no row, so the recursive term
+// never fires. Pinned by [NO-CHILDREN], because "re-base everything under nothing" is one typo
+// away from "re-base the table".
+func (s *Store) rebaseSubtreeDepth(ctx context.Context, roots []string, base int) error {
+	if len(roots) == 0 {
+		return nil
+	}
+	if _, err := s.pool.Exec(ctx, `
+        WITH RECURSIVE sub AS (
+            SELECT id, 0 AS rel FROM pages WHERE id = ANY($1)
+            UNION ALL
+            SELECT p.id, s.rel + 1 FROM pages p JOIN sub s ON p.parent_id = s.id
+        ) CYCLE id SET is_cycle USING path
+        UPDATE pages SET depth = $2 + d.rel
+          FROM (SELECT id, min(rel) AS rel FROM sub GROUP BY id) d
+         WHERE pages.id = d.id`, roots, base); err != nil {
+		return fmt.Errorf("page: depth rebase: %w", err)
+	}
+	return nil
+}
+
 // ─── Delete + reparent ─────────────────────────────────────
 
 // Delete removes a page, reparenting its children to the deleted
@@ -850,9 +887,17 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 //     point at the deleted page's parent.
 //  3. DELETE the page itself.
 //
-// Depth is intentionally NOT recomputed for the entire subtree in
-// Phase 1 — the simplest correct option for now. A "rebalance depth"
-// helper can come later if anyone notices the off-by-one.
+// ⚠ THE OFF-BY-ONE THIS COMMENT SAID SOMEBODY MIGHT NOTICE IS FIXED, AND WHAT IT COST WAS NOT
+// COSMETIC. It used to read "Depth is intentionally NOT recomputed for the entire subtree in
+// Phase 1 — the simplest correct option for now. A 'rebalance depth' helper can come later if
+// anyone notices." The helper is rebaseSubtreeDepth above, shared with Update. The children
+// stayed one level too deep in the column, every page beneath them with them, and the FIRST
+// thing that reads the number back is the depth cap: a page truly at depth 4 reporting 5 was
+// told "page: max depth 5 exceeded" for a level that fits. Measured at b3a7d52 — see
+// deletedepth_realpg_test.go's [CREATE-REFUSED]. It also COMPOUNDS: each deleted ancestor adds
+// another level of error to everything under it. A refusal produced by somebody else deleting a
+// different document, on a page whose author did nothing — the same actor asymmetry the
+// staleness note below is about.
 //
 // ⚠ STATEMENT 2 MUST NOT TOUCH updated_at, AND IT USED TO — THE FOURTH COPY OF THE SEAM THE
 // RecordView BLOCK BELOW AND ai_spend.go's PriceAISpend BLOCK BOTH DESCRIBE. GetStalePages keys
@@ -884,13 +929,33 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	).Scan(&parent, &depth); err != nil {
 		return fmt.Errorf("page: delete lookup: %w", err)
 	}
-	_ = depth // documented above; kept for future rebalance hook.
-
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE pages SET parent_id = $1 WHERE parent_id = $2`,
+	// THE HOOK IS TAKEN, AND `depth` WAS ALREADY THE RIGHT NUMBER. The children are being moved
+	// onto this page's parent, so they land at exactly the depth THIS page occupied — and a page
+	// with no parent occupies 0, so the root case needs no branch, it falls out of the same
+	// expression. The RETURNING is what makes the re-base possible: after the statement runs
+	// there is no longer any way to ask which rows moved.
+	rows, err := s.pool.Query(ctx,
+		`UPDATE pages SET parent_id = $1 WHERE parent_id = $2 RETURNING id`,
 		parent, id,
-	); err != nil {
+	)
+	if err != nil {
 		return fmt.Errorf("page: reparent: %w", err)
+	}
+	var moved []string
+	for rows.Next() {
+		var childID string
+		if err := rows.Scan(&childID); err != nil {
+			rows.Close()
+			return fmt.Errorf("page: reparent scan: %w", err)
+		}
+		moved = append(moved, childID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("page: reparent: %w", err)
+	}
+	if err := s.rebaseSubtreeDepth(ctx, moved, depth); err != nil {
+		return err
 	}
 	// nosemgrep: docs-by-id-write-requires-workspace-scope -- Delete is a primitive reached only via DeleteInWorkspaces (store.go), which calls assertInWorkspaces(id, authz.WorkspaceIDs) first. Proven cross-tenant-404 by TestSEC4_CrossTenant_ByIDRoutes (real PG) with the Enforcer nil — the store gate alone carries it.
 	if _, err := s.pool.Exec(ctx, `DELETE FROM pages WHERE id = $1`, id); err != nil {
