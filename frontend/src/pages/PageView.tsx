@@ -66,11 +66,25 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
     if (page) setTitle(page.title);
   }, [page?.id, page?.title]);
 
-  // Record a view exactly once per page load, and remember it as
-  // a recent for the SearchModal's empty state.
+  // Remember this page as a recent for the SearchModal's empty state.
+  //
+  // ⚠ THIS EFFECT USED TO ALSO FIRE `pagesApi.recordView(space.id, page.id)` UNDER THE COMMENT
+  // "Record a view exactly once per page load". It never recorded one. That call passed no
+  // body, api/client.ts only sets `init.body` when a caller supplies one, and the route's
+  // handler (analytics/handler.go RecordView) decodes r.Body as its FIRST statement and
+  // answers 400 "bad json" on the io.EOF an empty body produces — so no page_views row, no
+  // view_count bump, on every document open. The `.catch(() => undefined)` beside it meant
+  // nobody would ever see the 400.
+  //
+  // It was dead a second way too, which is why it was removed rather than given a body: the
+  // server drops any view under `minDuration` (3s, analytics/store.go) BEFORE the insert, so a
+  // load-time record with duration 0 would be discarded even if it decoded — silently, behind
+  // a 200. The duration-bearing flush below is the one that records a view, and it is the only
+  // one that ever could. Both halves are pinned on real Postgres in
+  // internal/analytics/recordview_emptybody_realpg_test.go, and the wire shape this screen
+  // sends is pinned in PageView.viewrecord.wire.test.tsx.
   useEffect(() => {
     if (!page) return;
-    void pagesApi.recordView(space.id, page.id).catch(() => undefined);
     pushRecentPage({
       page_id: page.id,
       page_title: page.title,
