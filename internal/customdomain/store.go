@@ -235,6 +235,33 @@ func (s *Store) GetByDomain(ctx context.Context, domain string) (*CustomDomain, 
 	return scan(row)
 }
 
+// SpaceIsPublic answers, AT READ TIME, the question Create answers at write time: may this space
+// be served to the world?
+//
+// ⚠ CREATE'S CHECK CANNOT COVER THIS AND IT IS NOT A SECOND COPY OF IT. Create refuses to MAP a
+// private space. `private` is a live column: `PATCH /v1/spaces/{spaceID} {"private":true}` is a
+// shipped route on the allow-list (space/store.go's `updatable`), and it is the exact action a
+// user takes when they mean "stop showing this to the world". Measured on real Postgres in
+// privateflip_realpg_test.go: before this method, a space mapped while public and made private
+// afterwards kept serving its page TITLES from the index and its page BODIES from /{slug}, to an
+// unauthenticated request, indefinitely. A guard that runs once at write time is a guard against
+// the state at that instant, not against the state being served.
+//
+// FAIL-CLOSED in every direction: no pool, a missing space, or a query error → not public. A
+// domain that cannot establish its target's publishability serves nothing.
+func (s *Store) SpaceIsPublic(ctx context.Context, spaceID string) (found, public bool) {
+	if s.pool == nil || spaceID == "" {
+		return false, false
+	}
+	var private bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT private FROM spaces WHERE id = $1`, spaceID,
+	).Scan(&private); err != nil {
+		return false, false
+	}
+	return true, !private
+}
+
 func (s *Store) GetByWorkspace(ctx context.Context, wsIDs []string) ([]CustomDomain, error) {
 	if s.pool == nil {
 		return nil, nil
