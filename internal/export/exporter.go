@@ -154,9 +154,20 @@ func (e *Exporter) gatherPages(ctx context.Context, pageID string, wsIDs []strin
 	if e.access == nil {
 		return nil, ErrNoPageReadGate
 	}
+	// ⚠ THIS USED TO BE `if err != nil { return out, nil }` — THE ERROR DISCARDED AND THE ROOT
+	// RETURNED ALONE, UNDER A NIL ERROR. A timeout, a dropped connection or a cancelled statement
+	// on this one query produced a 200 carrying a document with its children missing and nothing
+	// saying so, which is the SAME false statement #134 closed, reached through a different door:
+	// that merge fixed which rows the query asks for, this is what happens when it does not answer.
+	// A root-only export is indistinguishable from the correct export of a childless page — no
+	// marker, no header, no status — so nothing downstream can detect the loss.
+	//
+	// handler.Export already maps a non-ErrNotFound error to 500, so the honest answer was wired
+	// and reachable the whole time; nothing was ever handed to it. Wrapped rather than returned
+	// bare so the cause survives into the operator's log (childlisterror_test.go [ERROR-WRAPPED]).
 	siblings, err := e.listChildren(ctx, root)
 	if err != nil {
-		return out, nil
+		return nil, fmt.Errorf("export: list children of %s: %w", root.ID, err)
 	}
 	var children []model.Page
 	for _, p := range siblings {
