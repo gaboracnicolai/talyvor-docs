@@ -286,6 +286,26 @@ func stripMarkdown(md string) string {
 // the title (from <title> or first <h1>), the encoded ProseMirror
 // JSON, and a plain-text projection. Unknown tags drop through to
 // their child content so the document doesn't lose data.
+//
+// ⚠⚠ THE TITLE IS READ FROM THE DOCUMENT, NOT FROM THE BLOCK WALKER, AND THAT SEPARATION IS
+// THE FIX RATHER THAN A STYLE CHOICE. htmlWalker collects CONTENT, so it skips the whole
+// <head> branch ("Skip non-content branches entirely") — and <title> LIVES IN <head>. Its
+// `case "title"` therefore never ran for any ordinary document: the walker returned at
+// <head> one level above it. MEASURED at 5591566 through ImportExport, with the three
+// sources telling different stories: <title>Deploy runbook</title> + <h1>Untitled draft</h1>
+// imported as "Untitled draft", and a page whose ONLY title-bearing element was <title>
+// imported as "123456789" — the FILENAME, which in a Confluence HTML space export is the
+// page id. Rung 1 of this chain was unreachable and rung 3 was catching rung 1's traffic.
+//
+// ⚠ NOTHING COULD FAIL FOR IT: the one case covering this path fed <title>Auth Flow</title>
+// beside <h1>Auth Flow</h1> and asserted "Auth Flow" — a string BOTH sources produce, so it
+// was green whichever one answered. titlesource_test.go makes them disagree.
+//
+// ⚠ AND THE `case "title"` WAS NOT LITERALLY DEAD, WHICH IS WHY A READER WOULD ACQUIT IT:
+// golang.org/x/net/html puts a head-declared <title> under /html/head but a body-declared one
+// under /html/body (probed both ways), so the walker reached the second placement and only
+// the second. firstTitleText asks the parsed document instead, so both placements answer the
+// same — and <head> stays skipped for CONTENT, so no style/script text enters the blocks.
 func htmlToProseMirror(body, filename string) (string, string, string, error) {
 	doc, err := html.Parse(strings.NewReader(body))
 	if err != nil {
@@ -293,7 +313,7 @@ func htmlToProseMirror(body, filename string) (string, string, string, error) {
 	}
 	w := htmlWalker{}
 	w.walk(doc)
-	title := w.title
+	title := firstTitleText(doc)
 	if title == "" {
 		title = w.firstH1
 	}
@@ -314,11 +334,34 @@ func htmlToProseMirror(body, filename string) (string, string, string, error) {
 	return title, string(docJSON), strings.TrimSpace(w.plain.String()), nil
 }
 
+// firstTitleText returns the text of the first <title> element anywhere in the parsed
+// document, or "" when there is none. Document-wide ON PURPOSE: the element's PLACEMENT is
+// the parser's decision, not the exporter's (head-declared → /html/head, body-declared →
+// /html/body), and a title source that depends on which branch a tree walker happens to
+// descend is the defect this replaced. See htmlToProseMirror.
+func firstTitleText(n *html.Node) string {
+	if n == nil {
+		return ""
+	}
+	if n.Type == html.ElementNode && n.Data == "title" {
+		return strings.TrimSpace(textContent(n))
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if t := firstTitleText(c); t != "" {
+			return t
+		}
+	}
+	return ""
+}
+
 // htmlWalker collects ProseMirror blocks as it descends an HTML
 // tree. We track the first <h1> separately so a missing <title>
 // still gives the page a reasonable name.
+//
+// ⚠ IT NO LONGER CARRIES A `title` FIELD. It never could fill one for a head-declared
+// <title> (it returns at <head>), and firstTitleText now answers for both placements — one
+// source, so there is nothing for the two to disagree about.
 type htmlWalker struct {
-	title   string
 	firstH1 string
 	blocks  []map[string]any
 	plain   strings.Builder
@@ -331,7 +374,9 @@ func (w *htmlWalker) walk(n *html.Node) {
 	if n.Type == html.ElementNode {
 		switch n.Data {
 		case "title":
-			w.title = strings.TrimSpace(textContent(n))
+			// A body-declared <title> is metadata, not prose: firstTitleText has already
+			// read it, and dropping it here keeps it out of the document's blocks. (A
+			// head-declared one never reaches this switch — <head> returns above.)
 			return
 		case "h1", "h2", "h3", "h4", "h5", "h6":
 			level := int(n.Data[1] - '0')
