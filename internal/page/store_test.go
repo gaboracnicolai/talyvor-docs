@@ -232,14 +232,19 @@ func TestUpdate_AppendsNewVersionOnContentChange(t *testing.T) {
 			pgxmock.AnyArg(), pgxmock.AnyArg(),
 		).
 		WillReturnRows(pageRow("pg-1", "New", "old", 0, nil))
-	// Lookup max version.
-	pool.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM page_versions`).
-		WithArgs("pg-1").
-		WillReturnRows(pgxmock.NewRows([]string{"max"}).AddRow(int(3)))
-	// Insert version 4 — now carries workspace_id (from the updated page). History is
-	// append-only: NO prune DELETE follows (removed; see TestVersions_AppendOnly_*_RealPG).
+	// ⚠ NO "lookup max version" QUERY IS EXPECTED ANY MORE, AND ITS ABSENCE IS THE ASSERTION.
+	// The snapshot used to be `SELECT COALESCE(MAX(version),0)` into a Go variable followed by an
+	// INSERT of that number, and a version carried across that gap is a version a second writer
+	// can take — which lost restore points for committed saves (versionrace_realpg_test.go). The
+	// version is now derived INSIDE the INSERT, so this ordered mock reds if the read comes back:
+	// the SELECT would be an unexpected query.
+	//
+	// FIVE ARGUMENTS, NOT SIX: the version is no longer one of them. pgxmock counts arguments, so
+	// reverting to a Go-computed version fails here loudly rather than passing as a
+	// silently-different statement. History stays append-only: NO prune DELETE follows (removed;
+	// see TestVersions_AppendOnly_*_RealPG).
 	pool.ExpectExec(`INSERT INTO page_versions \(page_id, workspace_id, version`).
-		WithArgs("pg-1", "ws-1", 4, "New", "{}", "editor").
+		WithArgs("pg-1", "ws-1", "New", "{}", "editor").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	if _, err := store.Update(context.Background(), "pg-1", map[string]any{
@@ -248,9 +253,10 @@ func TestUpdate_AppendsNewVersionOnContentChange(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
-	// The WithArgs above still cannot fail on its own — Update discards the Exec error — and
-	// what makes it fail is now on newMockStore, so EVERY expectation in this package is
-	// verified rather than only this one. #60 added the check here; it is not deleted, it is
+	// The WithArgs above still cannot fail on its own — appendVersion does not return the Exec
+	// error to Update (deliberately: a snapshot must not fail a save the user committed; it now
+	// logs at ERROR instead of vanishing) — and what makes it fail is on newMockStore, so EVERY
+	// expectation in this package is verified rather than only this one. #60 added the check here; it is not deleted, it is
 	// MOVED, and controls C6/D6 in scripts/w31-mock-expectation-controls.py are kept pointed at
 	// this test precisely to prove the coverage did not shrink in the move.
 }
