@@ -178,8 +178,11 @@ func TestGetBySlug_Lookup(t *testing.T) {
 
 func TestList_TreeOrderedByPosition(t *testing.T) {
 	store, pool := newMockStore(t)
+	// The fourth argument is the parent scope, and a nil *string is what "no scope asked for"
+	// looks like on the wire. Spelled with its type rather than a bare nil so the expectation
+	// says which parameter it is talking about.
 	pool.ExpectQuery(`FROM pages WHERE space_id`).
-		WithArgs("sp-1", 100, 0).
+		WithArgs("sp-1", 100, 0, (*string)(nil)).
 		WillReturnRows(pgxmock.NewRows(pageCols()).
 			AddRow(rowVals("a", "Page A", "page-a", 0, nil)...).
 			AddRow(rowVals("b", "Page B", "page-b", 1, ptrStr("a"))...))
