@@ -85,6 +85,9 @@ func (s *Store) Upsert(ctx context.Context, l PageLink) error {
 	return nil
 }
 
+// Delete unlinks an issue from a page ENTIRELY — every typed row for the pair. That is what the
+// route wants (DELETE /pages/{pageID}/links/{issueID} is the panel's "remove this issue"), and it
+// is NOT what SyncLinks wants: see deleteTyped.
 func (s *Store) Delete(ctx context.Context, pageID, issueID string) error {
 	if s.pool == nil {
 		return errors.New("pagelink: store has no pool")
@@ -92,6 +95,24 @@ func (s *Store) Delete(ctx context.Context, pageID, issueID string) error {
 	_, err := s.pool.Exec(ctx,
 		`DELETE FROM page_links WHERE page_id = $1 AND issue_id = $2`,
 		pageID, issueID,
+	)
+	return err
+}
+
+// deleteTyped removes ONE typed row for a (page, issue) pair and leaves the pair's other types
+// alone. UNIQUE (page_id, issue_id, link_type) is what makes several rows per pair possible, and
+// both producers ship: SyncLinks writes `embed` from the body's issue_embed nodes, and
+// POST /v1/pages/{pageID}/links writes `mention` (the handler's default for an unnamed type) from
+// the editor panel's "Link issue" affordance. Unexported on purpose — the only caller that must
+// scope by type is SyncLinks' removal pass, and a second exported deleter is a door onto the same
+// table for anyone who does not read the difference.
+func (s *Store) deleteTyped(ctx context.Context, pageID, issueID, linkType string) error {
+	if s.pool == nil {
+		return errors.New("pagelink: store has no pool")
+	}
+	_, err := s.pool.Exec(ctx,
+		`DELETE FROM page_links WHERE page_id = $1 AND issue_id = $2 AND link_type = $3`,
+		pageID, issueID, linkType,
 	)
 	return err
 }
@@ -276,14 +297,20 @@ func (s *Store) SyncLinks(ctx context.Context, pageID, workspaceID, content, cre
 			return err
 		}
 	}
-	// Remove embeds the user deleted from the content. We only touch
-	// embed-typed links here so "mention" / "spec" rows added via
-	// the UI survive a content edit.
+	// Remove embeds the user deleted from the content. We only touch embed-typed links here so
+	// "mention" / "spec" rows added via the UI survive a content edit.
+	//
+	// ⚠ THAT SENTENCE WAS A CLAIM ABOUT `Delete` THAT `Delete` DID NOT KEEP: it removes every row
+	// for the (page, issue) pair regardless of type, so reconciling one embed away also deleted the
+	// author's manual `mention` for the same issue — a row this file's own comment promised to
+	// leave alone, produced by the shipped panel, rendered by the shipped panel, and destroyed
+	// silently because page.Store.Update discards this function's error at its only call site.
+	// synclinktype_realpg_test.go holds both halves: the mention survives AND the embed goes.
 	for id := range existing {
 		if current[id] {
 			continue
 		}
-		if err := s.Delete(ctx, pageID, id); err != nil {
+		if err := s.deleteTyped(ctx, pageID, id, "embed"); err != nil {
 			return err
 		}
 	}

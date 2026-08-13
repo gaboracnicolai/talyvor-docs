@@ -98,7 +98,7 @@ func TestSyncLinks_AWholeExistingReadStillReconciles(t *testing.T) {
 		WithArgs("p-1", "ws-1", "i-3", "embed", "u").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 	pool.ExpectExec(`DELETE FROM page_links`).
-		WithArgs("p-1", "i-2").
+		WithArgs("p-1", "i-2", "embed").
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 
 	doc := `{"type":"doc","content":[{"type":"paragraph","content":[
