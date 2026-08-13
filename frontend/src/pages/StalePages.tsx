@@ -18,10 +18,28 @@ const TONE: Record<
   unknown: { label: "No expiry", bg: "border-border bg-surface", icon: <Clock size={11} className="text-muted" /> },
 };
 
-// StalePagesPage surfaces every page in the workspace that the
-// freshness engine flagged as stale or warning. Each row has a
-// quick "Verify" affordance so doc owners can knock these out
-// without opening every page individually.
+// StalePagesPage surfaces every page in the workspace that is PAST its
+// stale_after_days threshold. Each row has a quick "Verify" affordance so
+// doc owners can knock these out without opening every page individually.
+//
+// ⚠ THE TWO THINGS THIS SCREEN CANNOT SHOW, MEASURED RATHER THAN REASONED
+// (internal/freshness/stalereport_population_realpg_test.go). Its whole
+// population is one SQL predicate — page.Store.GetStalePages — and that
+// predicate reads stale_after_days and nothing else:
+//
+//   · A page with NO threshold set (stale_after_days = 0, the column
+//     DEFAULT) can never appear, however many of its linked Track issues
+//     are done. The header used to promise exactly that case.
+//   · A page in the engine's "warning" band (past warningRatio of a LIVE
+//     TTL) can never appear either, so of the four TONE entries below only
+//     `stale` is reachable HERE. The other three are kept, not deleted:
+//     TONE is indexed by report.status, and a widened population must not
+//     land on an undefined key.
+//
+// Both cases ARE flagged by the per-page route (GET .../freshness, rendered
+// by FreshnessPanel), so the disagreement is between two routes over one
+// page rather than an absence of signal. Widening this one is a DECISION,
+// not an oversight — see the guard's header for the measured cost.
 export function StalePagesPage({ workspaceID, onOpenPage }: StalePagesProps) {
   const qc = useQueryClient();
   const { data, isLoading } = useQuery({
@@ -34,14 +52,17 @@ export function StalePagesPage({ workspaceID, onOpenPage }: StalePagesProps) {
       <header>
         <h1 className="text-lg font-semibold">Needs review</h1>
         <p className="text-xs text-muted">
-          Pages flagged by freshness rules — past their stale_after_days
-          threshold, or with linked Track issues completed since last edit.
+          Pages past their stale_after_days threshold. Pages with no threshold
+          set, and pages flagged only by completed Track issues, are not listed
+          here — open a page to see its full freshness signal.
         </p>
       </header>
       {isLoading ? (
         <p className="text-xs text-muted">Loading…</p>
       ) : (data ?? []).length === 0 ? (
-        <p className="text-xs text-muted">All clear — nothing needs review.</p>
+        <p className="text-xs text-muted">
+          No page is past its stale_after_days threshold.
+        </p>
       ) : (
         <ul className="space-y-2">
           {data!.map((r) => (
