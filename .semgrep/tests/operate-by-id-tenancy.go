@@ -93,3 +93,64 @@ func sprintfWriteScoped(ctx context.Context, p pool, col, id string, ws []string
 	q := fmt.Sprintf(`UPDATE pages SET %s = $2 WHERE id = $1 AND workspace_id = ANY($3)`, col)
 	return p.Exec(ctx, q, id, "t", ws)
 }
+
+// ─── THE SQL LITERAL THAT IS NOT THE CALL'S ARGUMENT ────────────────────────────────────────
+//
+// The three shapes below are the by-id write with its SQL held in a NAME rather than written at
+// the call. docs-by-id-write-requires-workspace-scope binds $SQL to that name, so its
+// metavariable-regex reads an identifier and matches nothing; the Sprintf rule does not apply
+// because there is no Sprintf. MEASURED at 09d8c2e on the CI-pinned semgrep 1.165.0, BEFORE the
+// indirect-literal rule existed: all three were flagged by NOTHING in .semgrep/ — the whole
+// shipped rule set returned zero findings over a file containing exactly these.
+//
+// ⚠ WHY THE RULE IS ANCHORED ON THE ASSIGNMENT AND NOT THE CALL. The same choice the Sprintf rule
+// made, for the same reason: the SQL is the evidence, and a rule that has to follow it to a call
+// site is a dataflow problem that grows a blind spot per plumbing shape. Anchoring on the literal
+// means a fourth way of handing SQL to a pool is covered the day it is written.
+
+// ruleid: docs-by-id-write-requires-workspace-scope-indirect-literal
+const byIDWriteConstUnscoped = `DELETE FROM pages WHERE id = $1`
+
+// The scoped twin. A rule that flags this one is a rule every store method must suppress, which
+// is how a class guard becomes noise and then becomes ignored.
+// ok: docs-by-id-write-requires-workspace-scope-indirect-literal
+const byIDWriteConstScoped = `DELETE FROM pages WHERE id = $1 AND workspace_id = ANY($2)`
+
+// The positional index is $2 here DELIBERATELY. The sibling rule shipped a `\$1`-anchored regex and
+// a `$2`/`$3` by-id write slipped it (block.Update); this rule inherited the corrected `\$\d+` and
+// this case is what stops it from being narrowed back one character at a time.
+func byIDWriteVarUnscoped(ctx context.Context, p pool, id string) error {
+	// ruleid: docs-by-id-write-requires-workspace-scope-indirect-literal
+	q := `UPDATE pages SET title = $1 WHERE id = $2`
+	return p.Exec(ctx, q, "t", id)
+}
+
+func byIDWriteVarScoped(ctx context.Context, p pool, id string, ws []string) error {
+	// ok: docs-by-id-write-requires-workspace-scope-indirect-literal
+	q := `UPDATE pages SET title = $2 WHERE id = $1 AND workspace_id = ANY($3)`
+	return p.Exec(ctx, q, id, "t", ws)
+}
+
+// The concatenated form THIS REPO ALREADY WRITES — `SELECT ` + cols + ` FROM …` is the house
+// style in page, comment and space. Assigned to a name it is invisible; handed straight to the
+// call it is caught (measured both ways). That difference is not a property anybody chose.
+func byIDWriteConcatUnscoped(ctx context.Context, p pool, id string) error {
+	// ruleid: docs-by-id-write-requires-workspace-scope-indirect-literal
+	q := `UPDATE pages SET title = $2 WHERE id = $1 RETURNING ` + fixtureCols
+	return p.Exec(ctx, q, id, "t")
+}
+
+const fixtureCols = `id, title`
+
+// ⚠ THE MEASURED LIMIT, WRITTEN AS A FIXTURE SO IT IS A FACT RATHER THAN A HOPE. A statement
+// assembled so that NO SINGLE LITERAL holds both the write and its `WHERE id = $N` is invisible
+// to a literal-anchored rule, and the expect-silence annotation below is that limit stated out
+// loud. It is not "covered"; it is KNOWN. comment.Store.ListByPage builds a SELECT exactly this
+// way today, so the shape is house style rather than hypothetical — the day one of those becomes
+// an UPDATE, nothing here sees it.
+func byIDWriteFragmentedUnscoped(ctx context.Context, p pool, id string) error {
+	// ok: docs-by-id-write-requires-workspace-scope-indirect-literal
+	q := `UPDATE pages SET title = $2`
+	q += ` WHERE id = $1`
+	return p.Exec(ctx, q, id, "t")
+}
