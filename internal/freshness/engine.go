@@ -68,10 +68,11 @@ type trackReader interface {
 }
 
 type FreshnessEngine struct {
-	pages  pageReader
-	links  linkReader
-	track  trackReader
-	access pageVisibility
+	pages      pageReader
+	links      linkReader
+	track      trackReader
+	access     pageVisibility
+	workspaces workspaceEnumerator
 }
 
 // pageVisibility authorizes a READ of ONE page for the verified caller. *spaceauth.Authorizer
@@ -103,6 +104,49 @@ func (e *FreshnessEngine) WithPageRead(a pageVisibility) *FreshnessEngine {
 // ErrNoPageReadGate is what a request-scoped stale read returns when no gate was wired. It is a
 // server misconfiguration, reported as one.
 var ErrNoPageReadGate = errors.New("freshness: no page-read gate wired (cmd/docs/main.go must call freshEngine.WithPageRead)")
+
+// workspaceEnumerator answers WHICH workspaces the daily digest covers.
+//
+// ⚠ CONTENT-DERIVED, AND FOR THE DIGEST THAT IS THE RIGHT QUESTION rather than a compromise.
+// trackintegration/enumerate.go prefers asking Track "which workspaces EXIST" because a
+// content-derived set gave member sync a cold-start deadlock: a workspace with no content was
+// never enumerated, so it never got a roster, so it could never gain content. The stale digest
+// has no such blind spot — a workspace with no pages has nothing that can be stale — which is
+// the same argument Syncer.costWorkspaces already makes for COST. So this takes the union of
+// spaces and pages (membership.Store.DistinctWorkspaceIDs) and needs no Track credential.
+type workspaceEnumerator interface {
+	DistinctWorkspaceIDs(ctx context.Context) ([]string, error)
+}
+
+// WithWorkspaces attaches the enumerator the DAILY DIGEST needs.
+//
+// ⚠ THE DIGEST USED TO TAKE ONE PINNED WORKSPACE ID FROM CONFIGURATION, AND THAT NUMBER WAS
+// STRUCTURALLY ZERO. `freshEngine.Start(ctx, cfg.DefaultWorkspaceID)` ran the 09:00 UTC digest
+// against `DOCS_DEFAULT_WORKSPACE`, which defaults to the literal string "default" and appears in
+// no compose file and no README — while workspace ids are Track's, minted per identity at login.
+// MEASURED on real Postgres: two workspaces each holding one page stale by the shipped predicate,
+// and the digest main.go actually runs logged `workspace=default stale_pages=0 warning_pages=0`,
+// every day, forever, while the same method for each real workspace logged `stale_pages=1`.
+//
+// ⚠ THIS IS THE THIRD INSTANCE OF A CLASS THIS BINARY HAS ALREADY NAMED AND FIXED TWICE.
+// Syncer.costWorkspaces' own comment: "It used to be answered with a single pinned config value
+// while SyncMembers thirty lines below enumerated every workspace; two loops in one struct
+// disagreeing about how many tenants exist meant the cost-per-doc number was right for exactly one
+// of them." Both of those loops enumerate now. This one is in a different struct, wired forty
+// lines away in main.go, and was never looked at.
+//
+// ⚠ NIL ERRORS RATHER THAN FALLING BACK TO A PINNED ID. A fallback is what the defect looked
+// like: a plausible workspace name that matches nothing, producing a confident zero. An operator
+// reading a daily error line knows the digest did not run; an operator reading `stale_pages=0`
+// does not.
+func (e *FreshnessEngine) WithWorkspaces(w workspaceEnumerator) *FreshnessEngine {
+	e.workspaces = w
+	return e
+}
+
+// ErrNoWorkspaceEnumerator is what the digest returns when no enumerator was wired. See
+// WithWorkspaces for why this is not a fallback.
+var ErrNoWorkspaceEnumerator = errors.New("freshness: no workspace enumerator wired (cmd/docs/main.go must call freshEngine.WithWorkspaces)")
 
 func New(pages pageReader, links linkReader, track trackReader) *FreshnessEngine {
 	return newFreshnessEngine(pages, links, track)
@@ -205,35 +249,82 @@ func statusRank(s FreshnessStatus) int {
 	}
 }
 
-// SendStaleDigest is the daily-batch entry point. Phase 7 logs the
+// DigestSummary is one workspace's line of the daily digest. It is RETURNED as well as logged so
+// the digest can be asserted on: the log line was the only product of this batch, and a test that
+// scrapes a log string cannot say which workspaces were visited, only what the last one said.
+type DigestSummary struct {
+	WorkspaceID string
+	Stale       int
+	Warning     int
+}
+
+// SendStaleDigest is the per-workspace digest. Phase 7 logs the
 // summary; future phases ship Slack / email integrations.
 func (e *FreshnessEngine) SendStaleDigest(ctx context.Context, workspaceID string) error {
+	_, err := e.digestOne(ctx, workspaceID)
+	return err
+}
+
+// digestOne counts and logs one workspace. Shared by the per-workspace entry point and the
+// all-workspaces sweep, so the two cannot drift about what "stale" means or what is logged.
+func (e *FreshnessEngine) digestOne(ctx context.Context, workspaceID string) (DigestSummary, error) {
 	reports, err := e.staleReportAll(ctx, workspaceID)
 	if err != nil {
-		return err
+		return DigestSummary{}, err
 	}
-	stale := 0
-	warning := 0
+	out := DigestSummary{WorkspaceID: workspaceID}
 	for _, r := range reports {
 		switch r.Status {
 		case FreshnessStale:
-			stale++
+			out.Stale++
 		case FreshnessWarning:
-			warning++
+			out.Warning++
 		}
 	}
 	slog.Info("freshness: stale digest",
 		slog.String("workspace", workspaceID),
-		slog.Int("stale_pages", stale),
-		slog.Int("warning_pages", warning))
-	return nil
+		slog.Int("stale_pages", out.Stale),
+		slog.Int("warning_pages", out.Warning))
+	return out, nil
 }
 
-// Start runs SendStaleDigest at ~9am UTC daily until ctx cancels.
+// SendStaleDigestAll is the DAILY-BATCH ENTRY POINT: every workspace Docs holds content for, not
+// one pinned in configuration. See WithWorkspaces for the measurement that made this necessary.
+//
+// BEST-EFFORT AT THE LEVEL OF A WORKSPACE, mirroring Syncer.SyncPageCosts' documented posture: one
+// workspace's failure logs and the sweep continues, because catching up tomorrow beats reporting
+// nothing for every tenant. A failure of the ENUMERATION itself is different and is returned — an
+// empty list is handed to a loop, and "nothing to do" is silently the same shape as "everything is
+// fine" (enumerate.go's rule, applied here).
+func (e *FreshnessEngine) SendStaleDigestAll(ctx context.Context) ([]DigestSummary, error) {
+	if e == nil || e.workspaces == nil {
+		return nil, ErrNoWorkspaceEnumerator
+	}
+	wsIDs, err := e.workspaces.DistinctWorkspaceIDs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("freshness: enumerate workspaces for the daily digest: %w", err)
+	}
+	out := make([]DigestSummary, 0, len(wsIDs))
+	for _, ws := range wsIDs {
+		s, err := e.digestOne(ctx, ws)
+		if err != nil {
+			slog.Warn("freshness: digest failed for one workspace — the sweep continues",
+				slog.String("workspace", ws), slog.String("err", err.Error()))
+			continue
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// Start runs SendStaleDigestAll at ~9am UTC daily until ctx cancels.
 // The first tick fires at the next 09:00 UTC; subsequent ticks
 // fire every 24h. Best-effort: a digest error is logged but doesn't
 // stop the schedule.
-func (e *FreshnessEngine) Start(ctx context.Context, workspaceID string) {
+//
+// ⚠ IT TAKES NO WORKSPACE ID, DELIBERATELY. The previous signature took one and main.go handed it
+// cfg.DefaultWorkspaceID; the compiler is what now stops that call site coming back.
+func (e *FreshnessEngine) Start(ctx context.Context) {
 	go func() {
 		for {
 			delay := untilNext9amUTC(time.Now().UTC())
@@ -242,7 +333,7 @@ func (e *FreshnessEngine) Start(ctx context.Context, workspaceID string) {
 				return
 			case <-time.After(delay):
 			}
-			if err := e.SendStaleDigest(ctx, workspaceID); err != nil {
+			if _, err := e.SendStaleDigestAll(ctx); err != nil {
 				slog.Warn("freshness: digest failed", slog.String("err", err.Error()))
 			}
 		}

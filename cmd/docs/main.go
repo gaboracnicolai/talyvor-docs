@@ -279,7 +279,13 @@ func main() {
 	// phases will ship Slack / email.
 	freshEngine := freshness.New(pageStore, linkStore, trackClient)
 	freshHandler := freshness.NewHandler(freshEngine)
-	freshEngine.Start(ctx, cfg.DefaultWorkspaceID)
+	// THE DAILY DIGEST COVERS EVERY WORKSPACE DOCS HOLDS CONTENT FOR, not one pinned in
+	// configuration. It used to be Start(ctx, cfg.DefaultWorkspaceID) — see
+	// freshness.WithWorkspaces for the measurement: DOCS_DEFAULT_WORKSPACE defaults to the
+	// literal "default", which is in no compose file and matches no Track-minted workspace, so
+	// the 09:00 digest logged stale_pages=0 every day while every tenant's pages aged.
+	freshEngine.WithWorkspaces(membershipStore)
+	freshEngine.Start(ctx)
 
 	// Analytics store + handler. View recording is best-effort —
 	// failures are logged on the client side rather than retried.

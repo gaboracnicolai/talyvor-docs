@@ -53,6 +53,26 @@ func TestFreshness_MainWiresThePageReadGate(t *testing.T) {
 		t.Fatalf("[D-STRIP] comment stripping is not working — this guard would pass on prose alone")
 	}
 
+	// ⚠ THE DIGEST'S ENUMERATOR, SAME FILE, SAME COMMENT-STRIPPED BODY, DIFFERENT CALL. Its
+	// absence is loud in production (SendStaleDigestAll returns ErrNoWorkspaceEnumerator rather
+	// than digesting an empty world), so this is cheap rather than load-bearing — the same
+	// posture as [D-WIRED] below. What it CANNOT see is the enumerator being built over the
+	// wrong store; digestworkspaces_realpg_test.go holds the behaviour.
+	//
+	// The other half of that call site needs no tripwire at all: Start(ctx) takes no workspace
+	// id, so the pinned `Start(ctx, cfg.DefaultWorkspaceID)` cannot come back without a compile
+	// error. A guard is only worth writing where the compiler is silent.
+	if !strings.Contains(body, "freshEngine.WithWorkspaces(") {
+		t.Errorf(`[D-DIGEST-ENUM] cmd/docs/main.go no longer calls freshEngine.WithWorkspaces(...).
+
+The 09:00 UTC stale digest covers every workspace Docs holds content for. It used to be handed one
+pinned cfg.DefaultWorkspaceID, which defaults to the literal "default" — a string no Track-minted
+workspace matches — so it logged stale_pages=0 every day while every tenant's pages aged. Without
+this call the sweep refuses (ErrNoWorkspaceEnumerator) rather than returning to that zero.
+
+If the enumerator genuinely moved somewhere else, update this literal to name its new home.`)
+	}
+
 	if !strings.Contains(body, "freshEngine.WithPageRead(") {
 		t.Errorf(`[D-WIRED] cmd/docs/main.go no longer calls freshEngine.WithPageRead(...).
 
