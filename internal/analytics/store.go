@@ -62,6 +62,56 @@ type WorkspaceReadStats struct {
 	NeverRead      int         `json:"never_read_count"`
 }
 
+// withEmptyLists fills the nil slices on a ReadStats so the wire carries `[]` and not `null`.
+//
+// ⚠ A NIL SLICE IS NOT AN EMPTY ARRAY ON THE WIRE, AND THIS TYPE'S CONSUMER CANNOT TELL THEM
+// APART SAFELY. Both fields below are only ever `append`ed to, so a page with no views in the
+// window leaves them nil and `encoding/json` writes `null`. `api/analytics.ts` declares
+// `views_by_day: DayCount[]` and `top_viewers: ViewerStat[]` — REQUIRED, non-nullable — and
+// Analytics.tsx dereferences both bare (`.map`, `.length`). The SPA has no error boundary
+// anywhere, so React 18 unmounts the root and the whole application goes blank.
+//
+// Same idiom as page.scan (`if p.LinkedIssues == nil { p.LinkedIssues = []string{} }`) and
+// changelog.scanEntry — normalising at the read boundary, so the type's own invariant holds for
+// every caller rather than at one handler. Guarded by emptylists_realpg_test.go, which asserts on
+// the RAW response bytes: `json.Unmarshal` into []T makes `null` and `[]` indistinguishable, which
+// is exactly why the decoded-struct tests in this package were blind to it.
+func withEmptyLists(r *ReadStats) *ReadStats {
+	if r == nil {
+		return nil
+	}
+	if r.ViewsByDay == nil {
+		r.ViewsByDay = []DayCount{}
+	}
+	if r.TopViewers == nil {
+		r.TopViewers = []ViewerStat{}
+	}
+	return r
+}
+
+// withEmptyCohorts is the same statement for the roll-up, INCLUDING the ranked rows it carries.
+// A row built by the ranked query never touches ViewsByDay/TopViewers at all, so every row of a
+// populated cohort carried `null` for both — the empty-workspace case and the busy-workspace case
+// are the same defect on different fields.
+func withEmptyCohorts(w *WorkspaceReadStats) *WorkspaceReadStats {
+	if w == nil {
+		return nil
+	}
+	if w.MostReadPages == nil {
+		w.MostReadPages = []ReadStats{}
+	}
+	if w.LeastReadPages == nil {
+		w.LeastReadPages = []ReadStats{}
+	}
+	for i := range w.MostReadPages {
+		withEmptyLists(&w.MostReadPages[i])
+	}
+	for i := range w.LeastReadPages {
+		withEmptyLists(&w.LeastReadPages[i])
+	}
+	return w
+}
+
 type pgxDB interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
@@ -267,7 +317,7 @@ func (s *Store) GetReadStats(ctx context.Context, pageID string, days int) (*Rea
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("analytics: top viewers: %w", err)
 	}
-	return &out, nil
+	return withEmptyLists(&out), nil
 }
 
 // rollupCap is how many rows each ranked cohort carries. It used to be a SQL `LIMIT 10` on each
@@ -449,7 +499,7 @@ func (s *Store) GetWorkspaceStats(ctx context.Context, workspaceID string, days 
 		}
 	}
 
-	return &out, nil
+	return withEmptyCohorts(&out), nil
 }
 
 func minInt(a, b int) int {
