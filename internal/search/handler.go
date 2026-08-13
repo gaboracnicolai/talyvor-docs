@@ -190,18 +190,54 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		offset = 0
 	}
 
+	// ⚠ WHERE THE OFFSET IS APPLIED DEPENDS ON HOW MANY ORDERED SOURCES THERE ARE, AND THAT IS THE
+	// WHOLE RULE RATHER THAN A SPECIAL CASE.
+	//
+	// With ONE half running, that half's ORDER BY *is* the answer's order, so its `LIMIT/OFFSET`
+	// names exactly the rows of the caller's page — and it is the only thing that can reach past
+	// the window below, so single-type deep paging keeps working.
+	//
+	// With BOTH halves running, merge() RE-RANKS their rows into one answer, so row k of a half is
+	// not row k of the answer. Pushing the offset into each half's SQL then skips rows by their
+	// position IN THEIR OWN HALF, and the merged ranking had not yet shown them. MEASURED on real
+	// Postgres through this route (mergepaging_realpg_test.go): four full-text-only documents
+	// A B C D and two semantic-only X Y returned `X Y A B C D` unpaged, and a limit=2 walk
+	// returned `X Y`, then `C D`, then EMPTY — A and B, the two strongest full-text matches for
+	// the query, appeared on no page, and the walk terminated cleanly so nothing said so.
+	//
+	// It is the ordinary case, not a contrived one: merge() scores a row max(rank×0.6, sim×0.4),
+	// ts_rank on a short document is ~0.05 while a returned similarity is ≥0.75, so ANY semantic
+	// hit outranks ANY full-text hit and the merged order differs from either half's whenever the
+	// semantic side returns anything. type=all is the default here and in the SPA.
+	//
+	// So for type=all the window is fetched from row 0 and the offset is applied AFTER the merge
+	// and AFTER the access filter, below.
+	twoSources := kind == "all"
+	sqlOffset := offset
+	// window is how many MERGED rows have to exist before the caller's page can be cut out of
+	// them. For a single source that is one page; for two it is everything up to and including it.
+	window := limit
+	if twoSources {
+		sqlOffset = 0
+		window = offset + limit
+		// Clamped BEFORE the multiply so a caller-supplied offset cannot overflow the product.
+		if window > maxFetchRows {
+			window = maxFetchRows
+		}
+	}
+
 	// OVER-FETCH, BECAUSE THE ROWS THE CALLER MAY NOT READ ARE DROPPED AFTER THE SQL LIMIT.
 	//
 	// Measured: with limit=1 and one hidden page out-ranking a readable one, the store returns the
 	// hidden row alone, the access gate drops it, and the caller is told NOTHING MATCHED for a
 	// document they may open. Asking for a wider window makes that the exception rather than the
 	// rule. It is a mitigation, not a guarantee, and the residual case is stated on maxFetchFactor.
-	fetchLimit := limit * maxFetchFactor
+	fetchLimit := window * maxFetchFactor
 	if fetchLimit > maxFetchRows {
 		fetchLimit = maxFetchRows
 	}
 	if h.access == nil {
-		fetchLimit = limit
+		fetchLimit = window
 	}
 
 	var (
@@ -218,7 +254,7 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ft, ftEr = h.pages.SearchWithRank(r.Context(), wsID, q, spaceID, fetchLimit, offset)
+			ft, ftEr = h.pages.SearchWithRank(r.Context(), wsID, q, spaceID, fetchLimit, sqlOffset)
 		}()
 	}
 	if kind == "all" || kind == "semantic" {
@@ -229,10 +265,12 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 			// doesn't keep the whole request hanging.
 			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 			defer cancel()
-			// fetchLimit AND offset, the same pair the full-text half receives above. The
+			// fetchLimit AND sqlOffset, the same pair the full-text half receives above. The
 			// semantic query took no offset at all, so every page of a semantic search was
-			// page 1 — see the note on SemanticSearch.Search.
-			sem, semEr = h.semantic.Search(ctx, wsID, q, spaceID, fetchLimit, offset)
+			// page 1 — see the note on SemanticSearch.Search. On type=semantic this is still the
+			// caller's offset and still the only thing that pages that half; on type=all it is 0
+			// because the merge decides where a page begins (see the note above).
+			sem, semEr = h.semantic.Search(ctx, wsID, q, spaceID, fetchLimit, sqlOffset)
 		}()
 	}
 	wg.Wait()
@@ -249,32 +287,53 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Drop rows the caller may not VIEW, BEFORE the limit truncation — a page they cannot read
-	// must not consume one of their result slots.
-	merged := h.visibleTo(r.Context(), merge(ft, sem))
-	if len(merged) > limit {
-		merged = merged[:limit]
+	// Drop rows the caller may not VIEW, BEFORE the offset and the limit truncation — a page they
+	// cannot read must not consume one of their result slots, and must not shift the page
+	// boundary either.
+	rows := h.visibleTo(r.Context(), merge(ft, sem))
+	// The offset the two-source path did not apply in SQL. Applied here, on the RE-RANKED and
+	// already-filtered rows, which is the only place a position in the answer exists.
+	if twoSources {
+		if offset >= len(rows) {
+			rows = rows[:0]
+		} else {
+			rows = rows[offset:]
+		}
+	}
+	if len(rows) > limit {
+		rows = rows[:limit]
 	}
 	writeJSON(w, http.StatusOK, response{
-		Results: merged,
-		Total:   len(merged),
+		Results: rows,
+		Total:   len(rows),
 		Query:   q,
 		TookMS:  time.Since(start).Milliseconds(),
 	})
 }
 
 // visibleTo drops every row whose page the caller may not read, asking the same engine the REST
-// page routes ask (one AuthorizePageRead per row, at most `limit` ≤ 50 of them).
+// page routes ask — one AuthorizePageRead per row.
+//
+// ⚠ THE ROW COUNT IS NOT `limit`, AND THIS COMMENT SAID IT WAS. It is what merge() produced from
+// the two fetched halves: each is clamped to maxFetchRows (50) by its own store, so the bound is
+// 100 minus whatever the two halves had in common — never the caller's `limit`, which is applied
+// after this and, on the two-source path, after the offset too. The number mattered enough to
+// state because each row here is a round trip to the access engine.
 //
 // ⚠ IT APPLIES TO BOTH HALVES, AND THE SEMANTIC HALF IS NOT THE SMALLER ONE. A semantic-only row
 // carries no title and no headline, so the leak there is narrower — a page id, a URL and a cosine
 // similarity — but "this private document is about what you just asked" is still an answer about a
 // document the caller cannot open, and it comes from the same unfiltered pool.
 //
-// ⚠ A FILTERED PAGE IS A SHORT PAGE, SAID PLAINLY. The LIMIT/OFFSET ran in SQL before this, so a
-// caller asking for 10 can receive 7 while more visible rows exist further down. Fixing that means
+// ⚠ A FILTERED PAGE IS A SHORT PAGE, SAID PLAINLY. The SQL LIMIT ran before this, so a caller
+// asking for 10 can receive 7 while more visible rows exist further down. Fixing that means
 // over-fetching and re-paging against a count this endpoint does not have; `total` has always been
 // len(results) rather than a corpus count, so nothing here newly misreports a total.
+//
+// ⚠ SHORT IS NOT THE SAME FAILURE AS STRANDED, and only one of them was ever survivable. The SQL
+// OFFSET no longer runs before this on the two-source path — it is applied to the rows this
+// function returns — because a row dropped HERE used to shift the page boundary underneath the
+// caller's next request. See the note in Search and mergepaging_realpg_test.go.
 //
 // nil access ⇒ unfiltered, and that is why cmd/docs/main.go's wiring has its own guard.
 func (h *Handler) visibleTo(ctx context.Context, rows []Result) []Result {
