@@ -35,9 +35,26 @@ type Config struct {
 	// unconfigured cost-sync. Server-side only; never browser-reachable.
 	TrackMemberSyncSecret string
 
-	// DefaultWorkspaceID is the tenant the cost syncer operates
-	// against. Phase 4 supports a single workspace per Docs
-	// instance; Phase 5 will iterate workspaces from the DB.
+	// DefaultWorkspaceID is trackintegration.Syncer's LAST-RESORT enumeration fallback, and
+	// nothing else. Both sentences that used to be here were false:
+	//
+	//   "the tenant the cost syncer operates against" — the cost sweep enumerates
+	//   (Syncer.costWorkspaces asks Track, then Docs' own content) and reaches this pinned value
+	//   only when NEITHER a member-sync source NOR a content store was wired. cmd/docs/main.go
+	//   always calls WithMemberSync, so production never reaches it.
+	//
+	//   "Phase 4 supports a single workspace per Docs instance; Phase 5 will iterate workspaces
+	//   from the DB" — member sync, the cost sweep and (as of the change that rewrote this
+	//   comment) the daily stale digest all iterate. Nothing in this binary is single-workspace.
+	//
+	// ⚠ ITS DEFAULT IS A TRAP AND THAT IS WHY THE DIGEST STOPPED USING IT: "default" is not a
+	// workspace id in any deployment — ids are Track's, minted per identity at login — and
+	// DOCS_DEFAULT_WORKSPACE appears in no compose file and no README, so anything pinned to this
+	// value reports on an empty set while looking like it reported on a tenant. The stale digest
+	// did exactly that, daily, until freshness.WithWorkspaces.
+	//
+	// Kept rather than deleted because Syncer genuinely still takes it, and removing an
+	// environment variable is a deploy-surface change rather than a code cleanup.
 	DefaultWorkspaceID string
 
 	// AI/Search rate limits — the ONLY per-tenant LLM control in this repository.
