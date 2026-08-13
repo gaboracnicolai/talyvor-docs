@@ -311,7 +311,7 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
 			return nil, fmt.Errorf("page: parent lookup: %w", err)
 		}
 		if parentDepth+1 > MaxDepth {
-			return nil, fmt.Errorf("page: max depth %d exceeded", MaxDepth)
+			return nil, ErrMaxDepth
 		}
 		p.Depth = parentDepth + 1
 	}
@@ -562,7 +562,31 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	// nil is an UNPARENT and is not a lookup. A non-string value is left to the existing
 	// behaviour rather than given a new refusal here: every allowlisted column takes its body
 	// value untyped, and that is one finding with one fix, not this one.
+	//
+	// ⚠⚠ AND `depth`: THE CAP IS ENFORCED AT Create AGAINST A NUMBER THIS METHOD USED TO LEAVE
+	// WRONG. `depth` was derived in Create and nowhere else, so a move left the page reporting
+	// the depth it had somewhere else — and Create then read THAT number to decide whether the
+	// next child was legal. MEASURED at ceb9dab on real Postgres: PATCH under a depth-5 parent
+	// accepted, page reports 0 at a TRUE depth of 6; five Creates later the chain is 11 deep
+	// still reporting 5; a second PATCH and five more Creates reach TRUE depth 17. One PATCH buys
+	// MaxDepth more levels, without bound, and no reader can see it because the column never
+	// exceeds the cap. `MaxDepth`'s own sentence ("so a malicious caller can't build a
+	// deeply-recursive tree that breaks rendering") was false in exactly the direction it is
+	// about. See parentdepth_realpg_test.go.
+	//
+	// rebaseDepth/newDepth carry the decision from the gate down to the rewrite below the write.
+	var (
+		rebaseDepth bool
+		newDepth    int
+	)
 	if v, present := updates["parent_id"]; present {
+		// nil is an unparent: every page in the subtree lands at or above where it already is,
+		// so it can never be the operation that breaks the cap and is never refused for depth.
+		// It is also the ONLY repair available for the trees the defect already wrote to disk —
+		// see [DISMANTLE]. It still re-bases them, which is the half that used to be missing.
+		if v == nil {
+			rebaseDepth, newDepth = true, 0
+		}
 		if newParent, isStr := v.(string); isStr {
 			var sameWorkspace, wouldCycle bool
 			// ⚠ `UNION`, NOT `UNION ALL`, AND THE DIFFERENCE IS WHETHER THIS QUERY RETURNS. A
@@ -598,6 +622,31 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 			if wouldCycle {
 				return nil, ErrParentCycle
 			}
+			// THE MOVE IS JUDGED BY WHERE ITS DEEPEST PAGE WOULD LAND, NOT BY THE MOVED PAGE.
+			// A check written only about the page in the URL passes a move whose own new depth
+			// is 5 and whose grandchild's is 7 — [SUBTREE-CAP] is that move.
+			//
+			// ⚠ `CYCLE id SET is_cycle USING path`, AND IT IS NOT DECORATION. The walk above
+			// dedupes on `id` alone, which is what lets plain UNION terminate on a ring; this
+			// one carries a per-row counter, so every lap of a ring produces a row that is NEW
+			// by value and UNION would never stop. Rings written before #118's guard are still
+			// on disk, and re-parenting a ring member is both reachable and the operation that
+			// REPAIRS one — pinned by [NO-HANG].
+			var parentDepth, subtreeHeight int
+			if err := s.pool.QueryRow(ctx, `
+                WITH RECURSIVE sub AS (
+                    SELECT id, 0 AS rel FROM pages WHERE id = $2
+                    UNION ALL
+                    SELECT p.id, s.rel + 1 FROM pages p JOIN sub s ON p.parent_id = s.id
+                ) CYCLE id SET is_cycle USING path
+                SELECT (SELECT depth FROM pages WHERE id = $1), (SELECT max(rel) FROM sub)`,
+				newParent, id).Scan(&parentDepth, &subtreeHeight); err != nil {
+				return nil, fmt.Errorf("page: parent depth lookup: %w", err)
+			}
+			if parentDepth+1+subtreeHeight > MaxDepth {
+				return nil, ErrMaxDepth
+			}
+			rebaseDepth, newDepth = true, parentDepth+1
 		}
 	}
 	contentChanged := false
@@ -687,6 +736,43 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	out, err := scan(s.pool.QueryRow(ctx, sql, args...))
 	if err != nil {
 		return nil, fmt.Errorf("page: update: %w", err)
+	}
+
+	// THE DEPTH RE-BASE. The link has moved; every page under it is now somewhere else too, and
+	// the column that says where is what Create reads to enforce MaxDepth.
+	//
+	// ⚠⚠ IT MUST NOT TOUCH `updated_at`, AND NOTHING BUT THIS SENTENCE STOPS IT. These rows
+	// belong to pages nobody edited — GetStalePages keys on pages.updated_at and feeds the SPA's
+	// stale screen, the 09:00 UTC freshness digest, GET /workspaces/{wsID}/stale and the MCP
+	// get_stale_pages tool. Delete's re-parent was the FOURTH copy of that seam (see the block
+	// above Delete, and reparent_staleness_realpg_test.go); a bulk write here would be the fifth
+	// and it would arrive inside the fix for something else. The moved page itself DOES bump the
+	// column — that is pre-existing, deliberate and untouched, it is the page the caller acted
+	// on. Pinned by [CLOCK].
+	//
+	// ⚠ `min(rel)` because a ring member reached through CYCLE can appear on more than one path;
+	// UPDATE … FROM picks arbitrarily among duplicate rows, and arbitrary is not a result.
+	//
+	// ⚠ THE TWO STATEMENTS ARE NOT ONE TRANSACTION, SAID PLAINLY RATHER THAN IMPLIED. A failure
+	// between them leaves the link moved and the depths stale — which is exactly today's state
+	// for every move, so this is strictly better and still not atomic. The REFUSAL above is what
+	// carries the cap; this is the bookkeeping that keeps the next Create honest.
+	if rebaseDepth {
+		if _, err := s.pool.Exec(ctx, `
+            WITH RECURSIVE sub AS (
+                SELECT id, 0 AS rel FROM pages WHERE id = $1
+                UNION ALL
+                SELECT p.id, s.rel + 1 FROM pages p JOIN sub s ON p.parent_id = s.id
+            ) CYCLE id SET is_cycle USING path
+            UPDATE pages SET depth = $2 + d.rel
+              FROM (SELECT id, min(rel) AS rel FROM sub GROUP BY id) d
+             WHERE pages.id = d.id`, id, newDepth); err != nil {
+			return nil, fmt.Errorf("page: depth rebase: %w", err)
+		}
+		// The row above was materialised by the UPDATE that moved the link, so it still carries
+		// the pre-move depth. Returning it would hand a caller the number this block just
+		// corrected — [DEPTH-REWRITTEN] asks the materialised row, not only the table.
+		out.Depth = newDepth
 	}
 
 	if contentChanged || titleChanged {
@@ -876,6 +962,13 @@ var ErrParentNotFound = errors.New("page: parent page not found in this workspac
 // being CREATED has no id yet and no children, so neither self-parenting nor a descendant loop
 // is expressible at that door.
 var ErrParentCycle = errors.New("page: a page cannot be its own ancestor")
+
+// ErrMaxDepth refuses a parent link that would put a page — or anything under it — deeper than
+// MaxDepth. ONE sentinel for BOTH doors, and the message is Create's, verbatim: the two doors
+// were answering different questions (Create refused, Update did not check) and are now
+// answering the same one, so a caller cannot tell which door it knocked on. The text is
+// unchanged so the 400 body Create has always returned is unchanged too.
+var ErrMaxDepth = fmt.Errorf("page: max depth %d exceeded", MaxDepth)
 
 // assertInWorkspaces returns ErrNotFound unless page id lives in one of wsIDs.
 // PageInWorkspaces reports whether page id lives in one of wsIDs — the scope check the collab
