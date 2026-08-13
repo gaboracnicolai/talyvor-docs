@@ -241,6 +241,20 @@ func (s *Store) SyncLinks(ctx context.Context, pageID, workspaceID, content, cre
 		existing[id] = true
 	}
 	rows.Close()
+	// ⚠ THE DIFF BELOW IS ONLY AS COMPLETE AS THIS READ WAS, AND `rows.Next()` RETURNS FALSE
+	// WHETHER THE ROWS RAN OUT OR THE STREAM BROKE. A truncated read makes `existing` a PREFIX,
+	// and the removal pass then deletes from a set that is missing entries — so a link the
+	// author just removed from the content survives, and it is not inert: `IssueIDsForPage`
+	// above reads these same embed rows for trackintegration's cost roll-up into
+	// pages.ai_cost_usd, and it already ends `return out, rows.Err()`.
+	//
+	// The "best-effort" note above is about a WRITE failing mid-batch, which the next save
+	// reconciles. This is different: nothing failed as far as the caller could tell. rowstream_test.go
+	// holds it, and the caller still discards the error — what changes is that the function no
+	// longer reports a reconcile that did not happen, and computes no diff from a partial set.
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("pagelink: sync read: %w", err)
+	}
 
 	current := map[string]bool{}
 	for _, id := range ParseEmbeds(content) {

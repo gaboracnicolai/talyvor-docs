@@ -228,6 +228,17 @@ func (s *Store) GetReadStats(ctx context.Context, pageID string, days int) (*Rea
 		out.ViewsByDay = append(out.ViewsByDay, d)
 	}
 	rows.Close()
+	// ⚠ `rows.Next()` RETURNS FALSE FOR TWO REASONS AND ONLY ONE OF THEM MEANS "THAT WAS ALL".
+	// Without this, a stream that broke part-way left a SHORT series in a 200 response and the
+	// Analytics screen drew it as the page's readership. MEASURED on real Postgres with the pgx
+	// v5 this repo ships: `SET statement_timeout='150ms'` over a streaming read delivers 2 of 20
+	// rows, `Query` has already returned nil and every `Scan` has already succeeded, and the
+	// failure exists ONLY here (SQLSTATE 57014). A Scan failure is a different failure with a
+	// different cause — the branch above handles that one and cannot stand in for this one.
+	// rowstream_test.go holds both, and 33 of this repository's 36 read loops already did this.
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("analytics: by day: %w", err)
+	}
 
 	// Top viewers (5).
 	rows, err = s.pool.Query(ctx,
@@ -250,6 +261,11 @@ func (s *Store) GetReadStats(ctx context.Context, pageID string, days int) (*Rea
 			return nil, err
 		}
 		out.TopViewers = append(out.TopViewers, v)
+	}
+	// The same check on the second stream — a SEPARATE loop, so the one above does not cover it.
+	// "Who read this document" is a list a missing name is invisible in.
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("analytics: top viewers: %w", err)
 	}
 	return &out, nil
 }
