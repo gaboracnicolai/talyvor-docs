@@ -181,8 +181,11 @@ func TestSyncLinks_AddsAndRemovesEmbeds(t *testing.T) {
 	pool.ExpectExec(`INSERT INTO page_links`).
 		WithArgs("p-1", "ws-1", "i-3", "embed", "u").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	// THE THIRD ARGUMENT IS THE POINT, not plumbing: the removal pass deletes the `embed` row for
+	// i-2 and nothing else typed on the same pair. pgxmock counts arguments, so dropping the
+	// link_type scope again fails here loudly instead of passing as a silently wider DELETE.
 	pool.ExpectExec(`DELETE FROM page_links`).
-		WithArgs("p-1", "i-2").
+		WithArgs("p-1", "i-2", "embed").
 		WillReturnResult(pgxmock.NewResult("DELETE", 1))
 
 	doc := `{"type":"doc","content":[{"type":"paragraph","content":[
