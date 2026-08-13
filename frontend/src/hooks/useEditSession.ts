@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { editSessionApi, type EditSession } from "~/api/editsession";
 
@@ -43,8 +43,32 @@ export function useEditSession(
   opts: UseEditSessionOptions = {},
 ) {
   const qc = useQueryClient();
-  const memberID =
+  // WHO AM I, ASKED OF THE SERVER RATHER THAN OF localStorage.
+  //
+  // `holder` is a workspace_members row id the server resolves from the GATEWAY-VERIFIED
+  // identity (editsession/handler.go `actorFor`; the body is never read for authority).
+  // `docs_member_id` was the only thing compared against it, and NOTHING IN THIS SPA EVER
+  // WRITES THAT KEY — the sole localStorage.setItem in the tree is useSearch's recent-pages
+  // list. So in every browser that has not been hand-seeded it is "", which makes heldByMe
+  // permanently false and heldByOther permanently true: the screen locked the holder out of
+  // the page it had just acquired, named that holder's own id in the banner, and never
+  // started the heartbeat, so the slot died at the backend's 30s TTL mid-edit.
+  //
+  // Acquire / Heartbeat / Takeover each RETURN the Session, and a 2xx from any of them means
+  // the slot is the CALLER's — a live foreign session is a 423, which apiRequest throws on, so
+  // nothing is ever learned from someone else's row. That response's `holder` therefore IS this
+  // browser's verified member id, already on the wire and needing no new endpoint. `get` is
+  // deliberately NOT a source: it reports whoever holds the slot, which is the question, not
+  // the answer.
+  //
+  // The localStorage value stays as the fallback for the window before the first claim lands.
+  // What identity the REST of the SPA should use (usePageLock, useComments, Sidebar,
+  // ApprovalInbox, the analytics viewer id, the presence id all read the same unset key) is a
+  // product decision, not this hook's to make.
+  const [learnedSelf, setLearnedSelf] = useState("");
+  const storedMemberID =
     typeof window !== "undefined" ? localStorage.getItem("docs_member_id") || "" : "";
+  const memberID = learnedSelf || storedMemberID;
 
   const query = useQuery({
     queryKey: ["edit-session", pageID],
@@ -53,13 +77,25 @@ export function useEditSession(
   });
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["edit-session", pageID] });
+  // learnSelf records the verified holder off a SUCCESSFUL claim. `s` can be undefined: on a
+  // network failure apiRequest queues the write and resolves `undefined as T`, and an unheld
+  // slot is not something a 2xx claim can return.
+  const learnSelf = (s: EditSession | null | undefined) => {
+    if (s?.holder) setLearnedSelf(s.holder);
+  };
   const acquire = useMutation({
     mutationFn: () => editSessionApi.acquire(spaceID, pageID),
-    onSuccess: invalidate,
+    onSuccess: (s) => {
+      learnSelf(s);
+      invalidate();
+    },
   });
   const takeover = useMutation({
     mutationFn: () => editSessionApi.takeover(spaceID, pageID),
-    onSuccess: invalidate,
+    onSuccess: (s) => {
+      learnSelf(s);
+      invalidate();
+    },
   });
   const release = useMutation({
     mutationFn: () => editSessionApi.release(spaceID, pageID),
@@ -72,7 +108,7 @@ export function useEditSession(
   useEffect(() => {
     if (!flags.heldByMe) return;
     const id = setInterval(() => {
-      void editSessionApi.heartbeat(spaceID, pageID).catch(() => {});
+      void editSessionApi.heartbeat(spaceID, pageID).then(learnSelf).catch(() => {});
     }, HEARTBEAT_MS);
     return () => clearInterval(id);
   }, [flags.heldByMe, spaceID, pageID]);
