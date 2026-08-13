@@ -105,20 +105,46 @@ func TestSec_RecordView_ViewerIsVerifiedNotBody(t *testing.T) {
 		t.Fatalf("record view = %d, want 200. body=%s", rr.Code, rr.Body.String())
 	}
 
-	// Which handler served it? analytics.RecordView inserts a page_views row; the page
-	// package's RecordView does not.
+	// THE VIEW MUST HAVE BEEN RECORDED, AND THIS ASSERTION USED TO BE A `t.Skip`.
+	//
+	// It was written when POST /spaces/{s}/pages/{p}/view had TWO registrations —
+	// analytics' and page's — so `views == 0` had an innocent reading: the other handler
+	// won, and it resolves the viewer from the verified identity, so no forgery was
+	// possible either way. Skipping was the honest response to a genuine ambiguity.
+	//
+	// ⚠⚠ THAT AMBIGUITY NO LONGER EXISTS, AND THE SKIP OUTLIVED IT. `page.Handler`'s
+	// registration is gone (see internal/page/handler.go — "deliberately NOT registered
+	// here"), and `page.Store.RecordView` / `RecordViewInWorkspaces` were DELETED outright
+	// (internal/page/store.go:987 and :1125). There is no second writer left to win. So
+	// `views == 0` now has exactly one meaning: the recording path is broken.
+	//
+	// ⚠⚠ AND THIS IS THE ONLY TEST IN THE REPOSITORY THAT DRIVES THE HTTP /view ROUTE, so
+	// it is the only thing that can see a handler-level regression at all. MEASURED at
+	// 08e0958 by deleting ONE field from the handler's PageView literal (`Duration:
+	// in.Duration` → 0), which stops every view in the product from being recorded while
+	// still answering 200: the FULL repo suite came back **green, exit 0, zero FAILs**, and
+	// this test reported **SKIP**. The store-level tests cannot see it — they call the
+	// store directly and never traverse the handler. So the guard against readership
+	// forgery switched itself off at precisely the moment the readership pipeline died,
+	// and took the whole analytics surface (total_views, unique_viewers, top-viewers,
+	// never_read_count) silently to a structural zero with it.
+	//
+	// A precondition that a test SKIPS on is a precondition that cannot fail the build.
+	// This one is now a hard failure, which is what makes the forgery assertions below
+	// reachable-or-red rather than reachable-or-quiet.
 	var views int
 	if err := d.Pool.QueryRow(ctx, `SELECT count(*) FROM page_views WHERE page_id=$1`, pageID).Scan(&views); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("ROUTE COLLISION: page_views rows after POST .../view = %d "+
-		"(>0 ⇒ analytics.RecordView is live and page.RecordView is shadowed dead code)", views)
-
 	if views == 0 {
-		// page.RecordView won: it resolves the viewer from the verified identity, so
-		// there is no forgery surface — but then analytics records nothing at all.
-		t.Skip("analytics.RecordView is shadowed by page.RecordView — no page_views row written; " +
-			"see the reconciliation note in BUILD_STATE")
+		t.Fatalf("[VIEW-RECORDED] POST .../view returned 200 and wrote NO page_views row. " +
+			"analytics.RecordView is the sole owner of this route (page.Store.RecordView is " +
+			"deleted), so this is a broken recording path, not a route collision: every " +
+			"readership number this service reports is now a structural zero. The forgery " +
+			"assertions below did not run.")
+	}
+	if views != 1 {
+		t.Fatalf("[VIEW-RECORDED] page_views rows = %d, want exactly 1 for one POST", views)
 	}
 
 	var viewer string
