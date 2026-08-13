@@ -276,10 +276,17 @@ func TestDelete_ReparentsChildren(t *testing.T) {
 		WithArgs("pg-mid").
 		WillReturnRows(pgxmock.NewRows([]string{"parent_id", "depth"}).
 			AddRow(ptrStr("pg-root"), int(1)))
-	// Reparent children: parent_id = the deleted page's parent;
-	// depth shifts down by 1.
-	pool.ExpectExec(`UPDATE pages SET parent_id`).
+	// Reparent children: parent_id = the deleted page's parent. It is a QUERY, not an Exec,
+	// because the statement now RETURNs the moved ids — after it runs there is no way left to
+	// ask which rows moved, and the depth re-base needs exactly that set. The expectation moved
+	// from ExpectExec to ExpectQuery on that arity change and on nothing else.
+	pool.ExpectQuery(`UPDATE pages SET parent_id`).
 		WithArgs(ptrStr("pg-root"), "pg-mid").
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).AddRow("pg-kid-a").AddRow("pg-kid-b"))
+	// Re-base the moved children to the depth the deleted page occupied (1 here), and their
+	// descendants one deeper per generation. rebaseSubtreeDepth, shared with Update.
+	pool.ExpectExec(`WITH RECURSIVE sub AS`).
+		WithArgs([]string{"pg-kid-a", "pg-kid-b"}, 1).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 2))
 	// Delete the page.
 	pool.ExpectExec(`DELETE FROM pages WHERE id`).
