@@ -116,7 +116,10 @@ func (h *Handler) PageStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if stats == nil {
-		stats = &ReadStats{PageID: chi.URLParam(r, "pageID")}
+		// The no-pool fallback builds its own value, so it needs the same normalisation the
+		// store return already has — a zero ReadStats has nil lists and would put `null` back
+		// on the wire down exactly this branch. See withEmptyLists.
+		stats = withEmptyLists(&ReadStats{PageID: chi.URLParam(r, "pageID")})
 	}
 	writeJSON(w, http.StatusOK, stats)
 }
@@ -134,7 +137,7 @@ func (h *Handler) WorkspaceStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if stats == nil {
-		stats = &WorkspaceReadStats{}
+		stats = withEmptyCohorts(&WorkspaceReadStats{})
 	}
 	writeJSON(w, http.StatusOK, stats)
 }
