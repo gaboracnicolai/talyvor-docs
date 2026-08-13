@@ -144,12 +144,23 @@ func TestGetWorkspaceStats_TopAndBottomPagesAndNeverRead(t *testing.T) {
 
 	// The whole ranked window — ONE statement for both cohorts, and NO `LIMIT` in it. The cap is
 	// applied in Go after filtering, because a filter after a SQL LIMIT returns short lists.
+	// ⚠ SIX COLUMNS, NOT THREE, AND THE THREE NEW ONES CARRY DISTINCT VALUES PER ROW ON PURPOSE.
+	// This statement used to select `page_id, title, COUNT(*)` and scan them into a `ReadStats`
+	// with SIX reportable figures, so every ranked row served the zero value of `unique_viewers`
+	// and `avg_duration_sec` and omitted `last_viewed_at` — a fabricated zero beside an honest
+	// absence. This test owns the PROJECTION, so it is where the column list is pinned; the
+	// figures being TRUE is rollupfigures_realpg_test.go's job, on real Postgres against the real
+	// aggregates. Distinct values per row are what make a transposed or mis-ordered scan visible
+	// here rather than only there.
+	lastSeen := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	pool.ExpectQuery(`(?i)page_id.*group by.*order by count.*desc`).
 		WithArgs("ws-1", 30).
-		WillReturnRows(pgxmock.NewRows([]string{"page_id", "title", "view_count"}).
-			AddRow("pg-1", "Top", int(50)).
-			AddRow("pg-2", "Second", int(30)).
-			AddRow("pg-9", "Cold", int(1)))
+		WillReturnRows(pgxmock.NewRows([]string{
+			"page_id", "title", "view_count", "unique_viewers", "avg_duration_sec", "last_viewed",
+		}).
+			AddRow("pg-1", "Top", int(50), int(7), int(41), lastSeen).
+			AddRow("pg-2", "Second", int(30), int(5), int(33), lastSeen.Add(-time.Hour)).
+			AddRow("pg-9", "Cold", int(1), int(1), int(12), lastSeen.Add(-48*time.Hour)))
 
 	// Distinct viewers, restricted to the pages that survived the filter.
 	pool.ExpectQuery(`(?i)count\(distinct viewer_id\).*page_id = any`).
@@ -182,6 +193,21 @@ func TestGetWorkspaceStats_TopAndBottomPagesAndNeverRead(t *testing.T) {
 	}
 	if got.NeverRead != 3 {
 		t.Fatalf("never read = %d", got.NeverRead)
+	}
+	// The three columns that used to be absent from the projection must land on the right fields
+	// of the right row — the round-trip claim this test owns.
+	top := got.MostReadPages[0]
+	if top.UniqueViewers != 7 || top.AvgDurationSec != 41 {
+		t.Fatalf("ranked row lost its figures: unique=%d avg=%d, want 7 and 41 (a zero here is the defect this projection was widened for)",
+			top.UniqueViewers, top.AvgDurationSec)
+	}
+	if top.LastViewedAt == nil || !top.LastViewedAt.Equal(lastSeen) {
+		t.Fatalf("ranked row last_viewed_at = %v, want %v", top.LastViewedAt, lastSeen)
+	}
+	// …and NOT the same figures on every row, which a scan that read one row into all three would
+	// produce.
+	if cold := got.LeastReadPages[0]; cold.UniqueViewers != 1 || cold.AvgDurationSec != 12 {
+		t.Fatalf("the coldest row carries unique=%d avg=%d, want 1 and 12", cold.UniqueViewers, cold.AvgDurationSec)
 	}
 }
 

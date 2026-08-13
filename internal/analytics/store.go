@@ -399,8 +399,30 @@ func (s *Store) GetWorkspaceStats(ctx context.Context, workspaceID string, days 
 	// THAN IN GO FOR THE SAME REASON THE VISIBILITY FILTER IS NOT: a template dropped after
 	// `visible[:rollupCap]` would shorten the dashboard instead of narrowing it. Here the row
 	// never enters the ranking, so the cap still fills from content. [SHORT-LIST] holds it.
+	// ⚠ THE THREE AGGREGATES AFTER COUNT(*) ARE NOT NEW FIGURES — THEY ARE THE ONES THIS ROW
+	// ALREADY CLAIMED TO CARRY. A `ReadStats` has six reportable numbers and this query used to
+	// fill three, so every ranked row served the ZERO VALUE of `unique_viewers` and
+	// `avg_duration_sec` and omitted `last_viewed_at`. `LastViewedAt` is a `*time.Time` with
+	// `omitempty`, so an untouched one is ABSENT and says "not reported" honestly; the other two
+	// are bare ints, and an untouched int serialises as `0`, which is a MEASUREMENT. "Nobody
+	// distinct read this page" and "this surface did not count" were the same bytes — the exact
+	// distinction search.Result's own comment draws for its three cost fields.
+	//
+	// MEASURED before the change, one page, four views by three viewers inside the window: the
+	// roll-up row said `unique_viewers:0, avg_duration_sec:0` while GET
+	// /spaces/{sp}/pages/{pg}/analytics said 3 and 12 for THAT SAME PAGE over THAT SAME WINDOW.
+	// Two routes, one page, two answers.
+	//
+	// They are free: this statement already GROUPs exactly these rows over exactly this window,
+	// so the columns were in the group and missing from the SELECT list — the same shape as the
+	// `space_id`/`title` fix on SemanticResult. Making the row TRUE beats making it silent, and
+	// it is what makes the two routes agree. rollupfigures_realpg_test.go pins the agreement
+	// itself rather than a constant.
 	rows, err := s.pool.Query(ctx,
-		`SELECT pv.page_id, MAX(p.title), COUNT(*)::int
+		`SELECT pv.page_id, MAX(p.title), COUNT(*)::int,
+                COUNT(DISTINCT pv.viewer_id)::int,
+                COALESCE(AVG(pv.duration_sec)::int, 0),
+                MAX(pv.created_at)
         FROM page_views pv
         JOIN pages p ON p.id = pv.page_id
         WHERE pv.workspace_id = $1
@@ -415,10 +437,21 @@ func (s *Store) GetWorkspaceStats(ctx context.Context, workspaceID string, days 
 	}
 	var ranked []ReadStats
 	for rows.Next() {
-		var r ReadStats
-		if err := rows.Scan(&r.PageID, &r.Title, &r.TotalViews); err != nil {
+		var (
+			r          ReadStats
+			lastViewed sql.NullTime
+		)
+		if err := rows.Scan(&r.PageID, &r.Title, &r.TotalViews,
+			&r.UniqueViewers, &r.AvgDurationSec, &lastViewed); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		// A group always has at least one row, so MAX(created_at) cannot be NULL here — scanned
+		// through NullTime anyway so the nil/zero distinction stays the type's, matching
+		// GetReadStats. A zero time.Time behind a non-nil pointer would be a fabricated date.
+		if lastViewed.Valid {
+			tv := lastViewed.Time
+			r.LastViewedAt = &tv
 		}
 		ranked = append(ranked, r)
 	}
