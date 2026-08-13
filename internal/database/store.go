@@ -21,8 +21,21 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// MaxColumns + MaxRows match the spec constraints. Bounded so a
-// runaway user (or agent) can't blow up a page render.
+// MaxColumns + MaxRows are the spec constraints. ⚠ ONLY ONE OF THEM IS ENFORCED, AND THIS COMMENT
+// USED TO CLAIM BOTH WERE: it read "Bounded so a runaway user (or agent) can't blow up a page
+// render", which is true of MaxColumns and false of MaxRows.
+//
+//	MaxColumns IS enforced — validateSchema, reached from Create and UpdateSchema (below).
+//	MaxRows is NOT enforced anywhere. CreateRow performs no count check; the constant's only
+//	other mention in the tree is ListRows' comment, which CITES it as the reason that read is
+//	safe to leave unpaginated. MEASURED on real Postgres through the shipped store
+//	(maxrows_realpg_test.go): CreateRow accepts row 10_001 without error and ListRows then
+//	returns all 10_001 in one fetch.
+//
+// So MaxRows currently documents an intention, not a behaviour. Whether to make it real is a
+// PRODUCT call and not a plumbing one — enforcing it decides what happens to a customer who
+// already holds more than 10_000 rows — which is why this comment was corrected rather than the
+// code. Do not "fix" this by adding the check without answering that question first.
 const (
 	MaxColumns = 50
 	MaxRows    = 10_000
@@ -351,10 +364,16 @@ func (s *Store) DeleteRow(ctx context.Context, databaseID, id string, wsIDs []st
 }
 
 // ListRows fetches every row for the database, then applies the
-// view's filters + sort in Go. We do the post-fetch processing
-// rather than building dynamic WHERE clauses against JSONB because
-// the row counts are bounded (MaxRows = 10K) and the rule engine
-// stays unit-testable.
+// view's filters + sort in Go, rather than building dynamic WHERE
+// clauses against JSONB — which keeps the rule engine unit-testable.
+//
+// ⚠ THE OTHER HALF OF THAT JUSTIFICATION WAS FALSE AND IS DELETED. It read "because the row counts
+// are bounded (MaxRows = 10K)". Nothing bounds them: MaxRows is declared and enforced at no site,
+// CreateRow has no count check, and MEASURED through this very method on real Postgres
+// (maxrows_realpg_test.go) a database of 10_001 rows comes back whole — all 10_001 into memory, in
+// one query, on a shipped route. The fetch-everything shape is therefore a deliberate trade with
+// an OPEN upper bound, not a bounded one; see the note on the const block for why closing it is a
+// product decision rather than a missing `if`.
 //
 // ⚠ `ORDER BY position ASC, created_at ASC, id ASC` — THE TIEBREAK IS NOT DECORATION, AND TIES ARE
 // THE ORDINARY CASE HERE. `position` is a client-supplied FLOAT and the SPA computes it as
