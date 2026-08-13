@@ -179,8 +179,32 @@ footer{margin-top:4em;padding-top:1em;border-top:1px solid #eee;color:#999;font-
 `
 
 func renderHTMLShell(w http.ResponseWriter, title, body string) {
+	renderHTMLShellStatus(w, http.StatusOK, title, body)
+}
+
+// unpublished is what every public route renders once the mapped space is private. 404 rather than
+// 200, so a monitor, a crawler and a cache all read "this is not here" — a 200 saying "not
+// published" is the same page a search engine keeps.
+func (h *Handler) unpublished(w http.ResponseWriter) {
+	renderHTMLShellStatus(w, http.StatusNotFound, "Not published",
+		`<h1>Not published</h1><p>This documentation is not publicly available.</p>`)
+}
+
+// servable reports whether the space this domain maps to may be shown to an unauthenticated
+// reader. See Store.SpaceIsPublic — the create-time check governs the mapping, this one governs
+// every response.
+func (h *Handler) servable(ctx context.Context, spaceID string) bool {
+	if h.store == nil {
+		return false
+	}
+	found, public := h.store.SpaceIsPublic(ctx, spaceID)
+	return found && public
+}
+
+func renderHTMLShellStatus(w http.ResponseWriter, status int, title, body string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Powered-By", "Talyvor Docs")
+	w.WriteHeader(status)
 	fmt.Fprintf(w,
 		`<!doctype html><html lang="en"><head><meta charset="utf-8"><title>%s</title><style>%s</style></head><body>%s<footer>Powered by Talyvor Docs</footer></body></html>`,
 		html.EscapeString(title), publicCSS, body,
@@ -191,6 +215,12 @@ func (h *Handler) publicIndex(w http.ResponseWriter, r *http.Request) {
 	spaceID := SpaceFromContext(r.Context())
 	if spaceID == "" || h.pages == nil {
 		renderHTMLShell(w, "Docs", "<h1>Docs</h1><p>No space configured for this domain.</p>")
+		return
+	}
+	// The mapped space's privacy is re-read on every request, not trusted from the moment the
+	// mapping was made. `PATCH /v1/spaces/{spaceID} {"private":true}` is a shipped route.
+	if !h.servable(r.Context(), spaceID) {
+		h.unpublished(w)
 		return
 	}
 	pages, err := h.pages.ListBySpace(r.Context(), spaceID)
@@ -219,6 +249,10 @@ func (h *Handler) publicPage(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if !h.servable(r.Context(), spaceID) {
+		h.unpublished(w)
+		return
+	}
 	slug := chi.URLParam(r, "slug")
 	p, err := h.pages.GetBySlug(r.Context(), spaceID, slug)
 	if err != nil || p == nil {
@@ -240,6 +274,14 @@ func (h *Handler) publicSearch(w http.ResponseWriter, r *http.Request) {
 	// Public search is deliberately out-of-scope for this minimal
 	// surface — the spec leaves the depth to the operator. We
 	// surface a "search disabled" page so the URL is still valid.
+	//
+	// It returns no page data, so it is not a disclosure — but an unpublished domain answering 200
+	// on one of its three routes is a liveness signal about a space that is meant to be gone, and
+	// the next hand that gives this stub a real implementation would inherit an ungated route.
+	if spaceID := SpaceFromContext(r.Context()); spaceID != "" && !h.servable(r.Context(), spaceID) {
+		h.unpublished(w)
+		return
+	}
 	renderHTMLShell(w, "Search", `<h1>Search</h1><p>Public search is not configured.</p>`)
 }
 
