@@ -172,9 +172,14 @@ func (h *Handler) ServeWS(w http.ResponseWriter, r *http.Request) {
 	// Two goroutines per session: one writes the engine's outbound
 	// queue to the socket, the other reads inbound frames and
 	// dispatches them into the engine. The pair exits on the first
-	// io error. canEdit is resolved once at connect and gates every
-	// `change` frame; cursor + presence flow regardless (read-only
+	// io error. cursor + presence flow regardless of tier (read-only
 	// members still see live collaboration).
+	//
+	// The canEdit resolved here is the CONNECT-TIME answer, and dispatch no longer trusts it for
+	// the life of the socket: it re-resolves per `change` frame, because a grant can be revoked
+	// while the session is open (see dispatch, and revoked_midsession_realpg_test.go). This value
+	// survives only as the fail-closed fallback for the no-resolver case — which cannot happen,
+	// since `!inScope` above already refused that connection.
 	ctx, cancel := context.WithCancel(r.Context())
 	go h.writePump(ctx, conn, client, cancel)
 	h.readPump(ctx, conn, pageID, client, canEdit, cancel)
@@ -245,11 +250,34 @@ func (h *Handler) dispatch(ctx context.Context, pageID string, c *CollabClient, 
 		if env.Change == nil {
 			return true
 		}
-		// TIER gate. canEdit was resolved once at connect (SessionResolver): the caller holds
-		// >= AccessEdit on this page. A view-only member may stay connected for cursor + presence
-		// but must not mutate — refuse the change at the boundary so the engine never sees it, and
-		// the autosaver never persists it. Fail-closed: canEdit is false unless the tier resolved to
-		// edit, so a broken/absent resolver denies. Same non-disconnecting shape as the lock guard.
+		// TIER gate, RE-RESOLVED ON THIS FRAME — the connect-time answer is a statement about one
+		// instant, and a `permissions` row is revocable at any moment after it.
+		//
+		// This used to read the `canEdit` bool resolved once, before the upgrade, and hold it for
+		// the life of the socket. MEASURED on real Postgres through the shipped ServeWS
+		// (revoked_midsession_realpg_test.go): revoke a mid-session member's edit grant and their
+		// NEXT change frame was still ACKed, still broadcast, and still reached pages.content via
+		// the autosaver. A connection has no lifetime bound — writePump pings every 30s and every
+		// Pong resets readWait — so "until they reconnect" means "indefinitely". It is the TIME
+		// axis of the same separation #114/#115 fixed on the SCOPE axis: the thing authorized and
+		// the thing served were different objects, here separated by time rather than by id.
+		//
+		// The re-resolve is the CURRENT truth, not the captured one ANDed with it, so a grant that
+		// is UPGRADED mid-session also takes effect without a reconnect. Fail-closed twice over:
+		// ResolveSession yields canEdit=false on any resolution failure, and with no resolver wired
+		// this falls back to the connect-time value, which ServeWS leaves false in exactly that case
+		// (it also refuses the connection, so this branch is unreachable in a wired deployment).
+		//
+		// COST, MEASURED RATHER THAN ASSUMED, because a `change` frame is NOT debounced: the SPA
+		// calls sendChange on every editor change event (Editor.tsx handleChange — the 2000ms timer
+		// there debounces the REST autosave alone), so this runs per keystroke. See the numbers in
+		// the test file header.
+		if h.access != nil {
+			_, _, canEdit = h.access.ResolveSession(ctx, pageID)
+		}
+		// A view-only member may stay connected for cursor + presence but must not mutate — refuse
+		// the change at the boundary so the engine never sees it, and the autosaver never persists
+		// it. Same non-disconnecting shape as the lock guard.
 		if !canEdit {
 			rejected, _ := json.Marshal(map[string]any{
 				"type":   "change_rejected",
