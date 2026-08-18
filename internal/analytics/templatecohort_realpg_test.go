@@ -28,17 +28,23 @@ package analytics_test
 //
 // ⚠⚠ AND THE LIVE PATH IS THE FLIP, NOT THE FIXTURE — `is_template` IS IN `Update`'S ALLOWLIST.
 // Measured on the same tree: a 9-view document `PATCH`ed to `is_template = true` leaves
-// `SearchWithRank` (1 hit → 0) and leaves `WorkspacePageIDs`, the AI-cost syncer's enumerator
-// (2 ids → 1) — and does NOT leave the ranking: still most_read[0], still in "Needs attention",
-// its 9 views still in "Views (30d)". Marking a page as boilerplate removes it from every reader
-// in this repository EXCEPT the dashboard that ranks it.
+// `SearchWithRank` (1 hit → 0) — and does NOT leave the ranking: still most_read[0], still in
+// "Needs attention", its 9 views still in "Views (30d)". Marking a page as boilerplate removes
+// it from every reader in this repository EXCEPT the dashboard that ranks it.
 //
 // ⚠ THE CENSUS THAT SAYS WHICH HALF IS THE OUTLIER, so this is not one comment's word against
-// another's. Every non-test reader of `pages` that mentions templates EXCLUDES them:
-// `page.SearchWithRank` (store.go), `search/semantic.go` ×2, `page.WorkspacePageIDs`,
-// `analytics` never-read; `customdomain.Handler` filters `p.IsTemplate` in Go. Six sites, one
-// direction. The ranked cohort is the only reader that ignores the column, and it ignores it by
-// OMISSION — no comment anywhere defends counting templates.
+// another's. Every non-test READER of `pages` that mentions templates EXCLUDES them:
+// `page.SearchWithRank` (store.go), `search/semantic.go` ×2, `analytics` never-read;
+// `customdomain.Handler` filters `p.IsTemplate` in Go. Five sites, one direction. The ranked
+// cohort is the only reader that ignores the column, and it ignores it by OMISSION — no comment
+// anywhere defends counting templates.
+//
+// ⚠ THE SIXTH SITE THIS CENSUS USED TO NAME WAS `page.WorkspacePageIDs` (2 ids → 1 across the
+// same flip), AND IT WAS THE ONE MEMBER OF THE LIST THAT IS NOT A READER. It is the AI-cost
+// syncer's ENUMERATOR — a writer's input — and there the identical predicate does not withhold a
+// row from an answer, it leaves `pages.ai_cost_usd` unmaintained on a row `GetByID` still serves.
+// The predicate is gone as of internal/trackintegration/templatecost_realpg_test.go; the census
+// above is the reader-only half, which is what it was always an argument about.
 //
 // ⚠⚠ WHY THE FOUR FIGURES MOVE TOGETHER FROM ONE PREDICATE, AND WHY THAT IS THIS FILE'S OWN RULE
 // RATHER THAN MY CHOICE: `total_views` is summed from the SURVIVING ranked rows and
@@ -146,7 +152,7 @@ func TestWorkspaceStats_TemplatesAreNotContent_RealPG(t *testing.T) {
 
 // [FLIP] is the live path: `is_template` is in page.Update's allowlist, so a document that has
 // been read for months can become boilerplate with one PATCH. Measured before the fix: the page
-// left SearchWithRank and WorkspacePageIDs and stayed at the top of the ranking.
+// left SearchWithRank and stayed at the top of the ranking.
 func TestWorkspaceStats_FlipToTemplateLeavesTheRanking_RealPG(t *testing.T) {
 	d := testutil.New(t)
 	f := newAnalyticsFixture(t, d)
@@ -170,7 +176,7 @@ func TestWorkspaceStats_FlipToTemplateLeavesTheRanking_RealPG(t *testing.T) {
 	after := f.rollup(t, "alice@example.com", f.alice)
 	if rowsHave(after.MostReadPages, doc) || rowsHave(after.LeastReadPages, doc) {
 		t.Errorf("[FLIP] the page was marked as a template and still ranks: most_read=%v least_read=%v — "+
-			"the same PATCH removed it from SearchWithRank and from WorkspacePageIDs",
+			"the same PATCH removed it from SearchWithRank",
 			rowsHave(after.MostReadPages, doc), rowsHave(after.LeastReadPages, doc))
 	}
 	if after.TotalViews != 2 {
