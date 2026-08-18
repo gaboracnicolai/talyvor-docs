@@ -352,19 +352,40 @@ var groupTitles = map[EntryType]string{
 	EntrySecurity:    "🔒 Security",
 }
 
+// lookupIssue is the ONE issue read behind both the generated body and the entry's type badge.
+//
+// ⚠ IT TAKES ctx AND workspaceID BECAUSE buildContent USED TO PASS NEITHER. It called
+// `track.GetIssue(nil, "", id)` — a nil context and an empty workspace id — while
+// GenerateFromIssues, in the same call tree, resolved the SAME issues with the correct ctx and
+// workspace to pick the badge. `http.NewRequestWithContext` refuses a nil context, so the body's
+// lookup failed before a request was ever built: MEASURED, zero requests reached Track, every
+// issue degraded to its bare id under "🔧 Improvements", and the entry was badged from the
+// lookup that worked. The badge said `breaking` over a body that named nothing breaking.
+//
+// ⚠ NOTHING COULD REPORT IT. Client.GetIssue swallows every failure into (nil, nil) — correct
+// for a rendered embed, and its own comment says so — and both call sites read it as `ref, _ :=`.
+// Two silencers in series: the call cannot say it failed and the caller does not ask.
+//
+// Single-sourcing the read is what stops the two from drifting apart again; the client caches
+// per (workspaceID|issueID), so the badge pass is served warm rather than re-fetched.
+func lookupIssue(ctx context.Context, track issueLookup, workspaceID, issueID string) *trackintegration.IssueRef {
+	if track == nil || !track.IsConfigured() {
+		return nil
+	}
+	ref, _ := track.GetIssue(ctx, workspaceID, issueID)
+	return ref
+}
+
 // buildContent emits a ProseMirror JSON doc from the issue list.
 // Issues are bucketed by label-derived type; each group renders
 // as a heading-2 followed by a bullet list of identifier + title.
 // When Track is unconfigured, ref will be nil and we emit a
 // fallback "From issues" group with just the IDs.
-func buildContent(track issueLookup, issueIDs []string) string {
+func buildContent(ctx context.Context, track issueLookup, workspaceID string, issueIDs []string) string {
 	// bucket: ordered map from EntryType → list of "[ENG-1]: Title"
 	bucket := map[EntryType][]string{}
 	for _, id := range issueIDs {
-		var ref *trackintegration.IssueRef
-		if track != nil && track.IsConfigured() {
-			ref, _ = track.GetIssue(nil, "", id)
-		}
+		ref := lookupIssue(ctx, track, workspaceID, id)
 		t := issueType(ref)
 		line := id
 		if ref != nil {
@@ -426,30 +447,34 @@ func buildContent(track issueLookup, issueIDs []string) string {
 	return string(out)
 }
 
+// dominantType picks the entry's single "type" badge — most teams ship a mix and want one
+// badge, so this is the highest-rank bucket present, falling back to improvement.
+//
+// ⚠ IT MUST READ THE SAME LOOKUP buildContent READS, WITH THE SAME ARGUMENTS. When it did not,
+// the badge and the body were computed from two different answers to one question and the badge
+// was the authoritative-looking half. It shares lookupIssue for that reason, and
+// TestGenerateFromIssues_BadgeAndBodyAgree is the tripwire on them diverging again.
+func dominantType(ctx context.Context, track issueLookup, workspaceID string, issueIDs []string) EntryType {
+	counts := map[EntryType]int{}
+	for _, id := range issueIDs {
+		counts[issueType(lookupIssue(ctx, track, workspaceID, id))]++
+	}
+	// Breaking > Security > Feature > Bugfix > Improvement > Deprecated.
+	for _, t := range []EntryType{EntryBreaking, EntrySecurity, EntryFeature, EntryBugfix, EntryImprovement, EntryDeprecated} {
+		if counts[t] > 0 {
+			return t
+		}
+	}
+	return EntryImprovement
+}
+
 // GenerateFromIssues creates an entry from a list of issue IDs.
 // Track-down case: still creates an entry, just with the bare IDs
 // and the improvement bucket — the spec asks for graceful
 // degradation, not a hard failure.
 func (s *Store) GenerateFromIssues(ctx context.Context, workspaceID, pageID, createdBy string, issueIDs []string, version string) (*ChangelogEntry, error) {
-	content := buildContent(s.track, issueIDs)
-	// The overall entry's "type" is the dominant bucket — most
-	// teams ship a mix and want one badge. Pick the highest-rank
-	// bucket present, falling back to improvement.
-	pickedType := EntryImprovement
-	if s.track != nil && s.track.IsConfigured() {
-		counts := map[EntryType]int{}
-		for _, id := range issueIDs {
-			ref, _ := s.track.GetIssue(ctx, workspaceID, id)
-			counts[issueType(ref)]++
-		}
-		// Breaking > Security > Feature > Bugfix > Improvement > Deprecated.
-		for _, t := range []EntryType{EntryBreaking, EntrySecurity, EntryFeature, EntryBugfix, EntryImprovement, EntryDeprecated} {
-			if counts[t] > 0 {
-				pickedType = t
-				break
-			}
-		}
-	}
+	content := buildContent(ctx, s.track, workspaceID, issueIDs)
+	pickedType := dominantType(ctx, s.track, workspaceID, issueIDs)
 	if issueIDs == nil {
 		issueIDs = []string{}
 	}

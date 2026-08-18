@@ -52,10 +52,30 @@ func entryCols() []string {
 type fakeTrack struct {
 	configured bool
 	issues     map[string]*trackintegration.IssueRef
+	// unscoped counts lookups that arrived with no context or no workspace id — the shape
+	// production shipped. Asserted in TestGenerateFromIssues_BuildContentGroupsHeadings.
+	unscoped int
 }
 
 func (f *fakeTrack) IsConfigured() bool { return f.configured }
-func (f *fakeTrack) GetIssue(_ context.Context, _, id string) (*trackintegration.IssueRef, error) {
+
+// GetIssue answers only a lookup the REAL client could have made.
+//
+// ⚠ IT USED TO READ `func (f *fakeTrack) GetIssue(_ context.Context, _, id string)` — discarding
+// the context and the workspace id and keying on the issue id alone. That is exactly why this
+// package's grouping test was green while production called `GetIssue(nil, "", id)`: the fixture
+// answered a lookup `*trackintegration.Client` refuses, so no assertion over it could tell the
+// two apart. A stub that ignores an argument cannot fail for a caller that passes a wrong one.
+//
+// The refusals below are the real client's own, not invented strictness: a nil ctx fails inside
+// http.NewRequestWithContext before a request exists, and an empty workspace id builds
+// `/v1/workspaces//issues/{id}`, which is not a route Track serves. Both surface as (nil, nil)
+// there — GetIssue swallows the error — so they surface as (nil, nil) here.
+func (f *fakeTrack) GetIssue(ctx context.Context, workspaceID, id string) (*trackintegration.IssueRef, error) {
+	if ctx == nil || workspaceID == "" {
+		f.unscoped++
+		return nil, nil
+	}
 	return f.issues[id], nil
 }
 
@@ -230,7 +250,7 @@ func TestGenerateFromIssues_BuildContentGroupsHeadings(t *testing.T) {
 			"i-2": {ID: "i-2", Identifier: "ENG-2", Title: "Dark mode", Labels: []string{"feature"}},
 		},
 	}
-	content := buildContent(track, []string{"i-1", "i-2"})
+	content := buildContent(context.Background(), track, "ws-1", []string{"i-1", "i-2"})
 	// Content should contain group headings for both buckets.
 	if !strings.Contains(content, "Bug Fixes") {
 		t.Fatalf("missing bugfix heading: %q", content)
@@ -241,6 +261,13 @@ func TestGenerateFromIssues_BuildContentGroupsHeadings(t *testing.T) {
 	// Bullets should reference the Track identifiers.
 	if !strings.Contains(content, "ENG-1") || !strings.Contains(content, "ENG-2") {
 		t.Fatalf("missing identifiers in body: %q", content)
+	}
+	// ⚠ AND THE LOOKUP MUST HAVE BEEN SCOPED. Without this line the three assertions above pass
+	// on a fixture that answers an unscoped lookup, which is how this test stayed green over
+	// `GetIssue(nil, "", id)` for the whole life of the generator.
+	if track.unscoped != 0 {
+		t.Errorf("buildContent made %d lookup(s) with no context or no workspace id — "+
+			"the caller's scope did not reach Track", track.unscoped)
 	}
 }
 
