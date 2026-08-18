@@ -1492,16 +1492,44 @@ func (s *Store) CompareVersionsInWorkspaces(ctx context.Context, pageID string, 
 
 // ─── Track integration helpers ────────────────────────────
 
-// WorkspacePageIDs returns every page ID in a workspace. Used by
-// the AI-cost syncer to enumerate pages in one pass instead of
-// paging through List(). Excludes templates so the sync loop
-// doesn't churn on un-released specs.
+// WorkspacePageIDs returns every page ID in a workspace. Used by the AI-cost syncer to enumerate
+// pages in one pass instead of paging through List().
+//
+// ⚠⚠ IT USED TO END `AND is_template = false` — "so the sync loop doesn't churn on un-released
+// specs" — AND THAT PREDICATE DOES SOMETHING DIFFERENT HERE THAN AT EVERY OTHER SITE THAT WRITES
+// IT. The five others (SearchWithRank, search/semantic ×2, analytics' never-read cohort,
+// customdomain.Handler in Go) are READERS: excluding a template removes a row from an ANSWER, and
+// the row is simply not there. This is a WRITER. Excluding a template here does not withhold
+// anything — it leaves `pages.ai_cost_usd` on a row that `GetByID` still serves (that query names
+// no template predicate), that PageView still renders and that the MCP `get_page` tool still
+// emits. The number does not go absent; it goes WRONG, and stays wrong.
+//
+// ⚠ THE CLAIM THE OLD PREDICATE FALSIFIED IS IN THE SCHEMA. migrations/0018:
+// `COMMENT ON COLUMN pages.ai_cost_usd` — "DERIVED — recomputed from a complete set of links on
+// every sweep and overwritten … Do not add to this column: the next sweep overwrites it." For a
+// template there was no next sweep, ever. That same sentence is the stated reason the column is
+// absent from Create's INSERT (see the note there) and off Update's allowlist — two guards held
+// shut on the grounds that the sweep owns the column, over a cohort the sweep never visited.
+//
+// ⚠ AND THE COHORT IS ONE PATCH AWAY, MEASURED: `is_template` IS in Update's allowlist, so a
+// document priced at $12.34 and then marked as a template kept $12.34 on screen for good,
+// whatever happened to the issues it embeds. internal/analytics/templatecohort_realpg_test.go
+// measured that same flip from the other end ("2 ids → 1" through this enumerator) — it is the
+// live path, not a fixture. Both directions are pinned by
+// internal/trackintegration/templatecost_realpg_test.go.
+//
+// ⚠ WHAT THE OLD COMMENT WAS RIGHT ABOUT, AND THE PRICE, STATED: templates now cost Track calls
+// on every tick like any other page. That is the same per-embed round-trip the sweep already
+// makes for the rest of the workspace, and pageTotal's completeness rule applies to them
+// unchanged. The alternative — keep skipping them and stop SERVING the column for templates —
+// is a contract change across the page JSON, the SPA and the MCP tool for a cohort that already
+// carries the field; making the served number true is one predicate.
 func (s *Store) WorkspacePageIDs(ctx context.Context, workspaceID string) ([]string, error) {
 	if s.pool == nil {
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT id FROM pages WHERE workspace_id = $1 AND is_template = false`,
+		`SELECT id FROM pages WHERE workspace_id = $1`,
 		workspaceID,
 	)
 	if err != nil {

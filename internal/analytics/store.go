@@ -336,10 +336,12 @@ const rollupCap = 10
 // (lowest read)", and put its views in "Views (30d)" and its reader in "Unique visitors", while
 // an unread template was absent from "Never read". ⚠ THE LIVE PATH IS THE FLIP, not a fixture:
 // `is_template` is in page.Update's allowlist, and a 9-view document PATCHed to a template left
-// `SearchWithRank` (1 hit → 0) and `WorkspacePageIDs` (2 ids → 1) and did NOT leave the ranking.
-// Every other reader of `pages` in this repository excludes templates — SearchWithRank, both
-// semantic queries, WorkspacePageIDs, this file's never-read cohort, and customdomain.Handler in
-// Go — so the ranked cohort was the one reader ignoring the column, by omission.
+// `SearchWithRank` (1 hit → 0) and did NOT leave the ranking. Every other READER of `pages` in
+// this repository excludes templates — SearchWithRank, both semantic queries, this file's
+// never-read cohort, and customdomain.Handler in Go — so the ranked cohort was the one reader
+// ignoring the column, by omission. (`page.WorkspacePageIDs` used to be counted in that list and
+// no longer is: it is the AI-cost syncer's ENUMERATOR, a writer's input, where the same predicate
+// leaves a served money column unmaintained instead of withholding a row. See its own note.)
 //
 // ⚠ `total_views` AND `unique_viewers` FOLLOW FROM THE ONE PREDICATE rather than being narrowed
 // separately: both are derived from the SURVIVING ranked rows (see the filter below), so the four
