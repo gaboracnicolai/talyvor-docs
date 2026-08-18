@@ -602,7 +602,17 @@ func (s *Server) toolWorkspace(ctx context.Context, name string, args map[string
 // pageWorkspace returns the workspace a page belongs to (to authorize a page-keyed tool). A
 // missing/nonexistent page (or a lookup error) yields "" → deny — never a full-table leak.
 func (s *Server) pageWorkspace(ctx context.Context, pageID string) (string, error) {
-	if pageID == "" {
+	// AN UNWIRED STORE IS THE MOST UNRESOLVABLE AN OBJECT GETS, SO IT TAKES THE RULE THIS
+	// FUNCTION ALREADY STATES: "" → deny. #141 made mcp.New leave these interfaces genuinely nil
+	// and armed the one dead guard it found (get_page's space-name enrichment); the two
+	// chokepoint resolvers deref their store BARE and were never covered, so a nil store
+	// panicked INSIDE the authorization step, before any tool body ran.
+	//
+	// ⚠ THE COST, STATED RATHER THAN HIDDEN: a misconfigured server now answers 'forbidden'
+	// rather than 'misconfigured' on the tools routed through here. That is the direction this
+	// chokepoint already chose for every other unresolvable case, and the alternative reports
+	// server configuration state down an authorization path.
+	if s.deps.pages == nil || pageID == "" {
 		return "", nil
 	}
 	p, err := s.deps.pages.GetByID(ctx, pageID)
@@ -614,7 +624,13 @@ func (s *Server) pageWorkspace(ctx context.Context, pageID string) (string, erro
 
 // spaceWorkspace returns the workspace a space belongs to (to authorize a space-keyed tool).
 func (s *Server) spaceWorkspace(ctx context.Context, spaceID string) (string, error) {
-	if spaceID == "" {
+	// Same rule as pageWorkspace above, and read its note for why deny rather than error.
+	//
+	// ⚠ THIS ONE ALSO COVERS get_page's SECOND ARM, WHICH IS WHY #141's GREEN TEST DID NOT CLOSE
+	// THE CLASS: toolWorkspace sends get_page here whenever it is called with space_id instead of
+	// page_id, so the tool typednil_deps_realpg_test.go declares safe with a nil *space.Store had
+	// an unguarded path into that same store all along.
+	if s.deps.spaces == nil || spaceID == "" {
 		return "", nil
 	}
 	sp, err := s.deps.spaces.GetByID(ctx, spaceID)
@@ -1186,6 +1202,17 @@ func (s *Server) toolGetSpaceTree(ctx context.Context, args map[string]any) (any
 	wsID := stringArg(args, "workspace_id", "")
 	scopeSpaceID := stringArg(args, "space_id", "")
 
+	// AN ABSENT STORE IS AN ERROR, NOT AN EMPTY TREE. This tool is workspace-keyed, so it clears
+	// the chokepoint above and reaches its own body — a different door into the same nil store,
+	// and the third site #141's single guard did not reach. Falling through would have answered
+	// with `[]`: the positive claim "this workspace has no spaces", which is the shape
+	// get_stale_pages' empty list and ask_docs' empty answer already were.
+	//
+	// BOTH stores are named because both are dereferenced below (spaces.List here, pages.List in
+	// the loop) and either being nil produces the same crash.
+	if s.deps.spaces == nil || s.deps.pages == nil {
+		return nil, &rpcError{Code: errInternal, Message: "the page or space store is not wired; the space tree is unavailable"}
+	}
 	spaces, err := s.deps.spaces.List(ctx, wsID)
 	if err != nil {
 		return nil, err
