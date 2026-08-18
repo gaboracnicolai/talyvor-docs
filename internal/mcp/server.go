@@ -107,11 +107,13 @@ func (s *Server) WithAccess(a AccessController) *Server {
 // documents say nothing"). Both are errors now. Turning a dead guard live without fixing what it
 // guards would have made this class worse, not better.
 //
-// ⚠ MEASURED AND NOT FIXED HERE: deps.analytics has NO guard at any call site, so this
-// normalisation neither helps nor hurts it. get_page_analytics with a nil *analytics.Store PANICS
-// both before and after (probed on real Postgres: "invalid memory address or nil pointer
-// dereference") — GetReadStats checks s.pool and cannot check its own receiver. That is a
-// missing guard rather than a dead one, which is a different finding and wants its own merge.
+// ⚠ deps.analytics WAS THE ONE THIS BLOCK COULD NOT HELP — it had NO guard at any call site, so
+// get_page_analytics with a nil *analytics.Store panicked both before and after this
+// normalisation. THAT IS NOW FIXED AT ITS CALL SITE (toolGetPageAnalytics), which is where the
+// guard had to go: the recommendation left here — a nil-RECEIVER check on analytics.Store — was
+// MEASURED INERT, because this block makes the interface itself nil and the call panics at
+// dispatch without ever entering the method. Read the note at toolGetPageAnalytics before
+// answering a "just add a receiver check" review comment on any other dep.
 func New(pages *page.Store, spaces *space.Store, analyticsStore *analytics.Store, aiEngine *ai.Engine, fresh *freshness.FreshnessEngine, version string) *Server {
 	d := deps{version: version}
 	if pages != nil {
@@ -1119,19 +1121,47 @@ func (s *Server) toolGetPageAnalytics(ctx context.Context, args map[string]any) 
 	if err := requireStrings(args, "page_id"); err != nil {
 		return nil, err
 	}
+	// AN ABSENT ANALYTICS STORE IS AN ERROR, NOT A READERSHIP OF ZERO. This is the MISSING guard
+	// the New comment above named as measured-and-not-fixed; the handover is taken here.
+	//
+	// ⚠ THE FIX THAT COMMENT RECOMMENDED — "a nil-receiver check on analytics.Store … the one
+	// that also protects every other caller" — IS INERT FOR THIS ARM, AND THAT WAS MEASURED, NOT
+	// REASONED. Since New normalises a nil *analytics.Store into a genuinely nil INTERFACE, the
+	// call below panics at METHOD DISPATCH and never enters GetReadStats, so a receiver check
+	// there never runs. Probed by adding `if s == nil` to GetReadStats and re-running
+	// TestMCP_NilAnalyticsStore_GetPageAnalyticsDoesNotPanic: STILL PANICKED, same message. The
+	// guard has to be on the interface, at the call site, which is where freshness and ai already
+	// have theirs (toolGetStalePages, toolAskDocs).
+	if s.deps.analytics == nil {
+		return nil, &rpcError{Code: errInternal, Message: "the analytics store is not wired; page readership is unavailable"}
+	}
 	days := intArg(args, "days", 7)
 	stats, err := s.deps.analytics.GetReadStats(ctx, stringArg(args, "page_id", ""), days)
 	if err != nil {
 		return nil, err
 	}
-	out := pageAnalyticsOut{}
-	if stats != nil {
-		out.TotalViews = stats.TotalViews
-		out.UniqueViewers = stats.UniqueViewers
-		out.AvgDurationSec = stats.AvgDurationSec
-		if stats.LastViewedAt != nil {
-			out.LastViewedAt = stats.LastViewedAt.UTC().Format(time.RFC3339)
-		}
+	// ⚠ AND THE SECOND ARM, WHICH THE INTERFACE GUARD ABOVE CANNOT SEE: a store built by
+	// NewStore(nil) is a NON-nil interface over a POOL-LESS Store, and GetReadStats answers that
+	// with (nil, nil) — its ONLY nil-nil return, and it is exactly the `if s.pool == nil` arm.
+	// The block that followed then rendered three zeroes: {"total_views":0,"unique_viewers":0,
+	// "avg_duration_sec":0}, the positive claim "nobody has read this page", made by a service
+	// that could not read. Same shape as get_stale_pages' `[]` and ask_docs' `answer: ""`, and
+	// the same answer: absent and unreachable are one thing to the caller.
+	//
+	// ⚠ SCOPED TO THIS SURFACE ON PURPOSE: analytics.Handler.PageStats takes the same (nil, nil)
+	// and normalises it to an empty ReadStats with a comment saying why (withEmptyLists, so the
+	// SPA gets `[]` and not `null`). Whether the HTTP surface should error instead is a change to
+	// a shipped screen's contract and is NOT made here.
+	if stats == nil {
+		return nil, &rpcError{Code: errInternal, Message: "the analytics store is not wired; page readership is unavailable"}
+	}
+	out := pageAnalyticsOut{
+		TotalViews:     stats.TotalViews,
+		UniqueViewers:  stats.UniqueViewers,
+		AvgDurationSec: stats.AvgDurationSec,
+	}
+	if stats.LastViewedAt != nil {
+		out.LastViewedAt = stats.LastViewedAt.UTC().Format(time.RFC3339)
 	}
 	return toolContent(out)
 }
