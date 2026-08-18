@@ -15,10 +15,20 @@ docs-no-url-param-workspace-scope exists to catch.
       exclusion is ever genuinely needed, this check is the thing that must be argued with.
 
   (2) THE UNFIXTURED RULES ARE NAMED, NOT MERELY ABSENT. A rule with no fixture cannot be
-      red-first, so its narrowing is invisible until the defect it stopped catching ships. Four
-      rules are in that state today. They are listed below WITH the reason, so a fifth cannot
-      join them silently — adding a rule without a fixture fails here until someone writes the
-      fixture or writes down why not.
+      red-first, so its narrowing is invisible until the defect it stopped catching ships. The
+      list below is EMPTY today: every rule in .semgrep/ has a fixture case. It stays here, and
+      it stays enforced in both directions, so a new rule cannot join a silent tail — adding one
+      without a fixture fails here until someone writes the fixture or writes down why not.
+
+      ⚠ IT WAS NOT EMPTY, AND EMPTYING IT IS WHERE THE LAST DEFECT CAME FROM. The four rules in
+      body-supplied-authority.yml sat here with reasons that read as costs ("needs two
+      near-identical handlers", "a fixture would restate the pattern rather than test it").
+      Writing the fixture anyway measured that docs-no-inverted-identity-fallback could only ever
+      fire against the two helpers docs-no-ambiguous-actor-helpers already rejects: six of the
+      eight resolvers its regex names return (string, bool), and a two-value call cannot stand in
+      the single-value assignment its pattern requires. The rule was incapable of producing a
+      finding its sibling did not already produce. A declared reason is a promise that the rule
+      still works, and nothing was checking it.
 
 Run from the repo root. Exits non-zero, printing the offending rule ids, on any violation.
 """
@@ -34,20 +44,13 @@ import yaml
 RULES_DIR = pathlib.Path(".semgrep")
 
 # Rules that have no fixture, and why. Keep the reason honest: "hard" is a reason, "later" is not.
-DECLARED_UNFIXTURED = {
-    "docs-no-body-supplied-authority":
-        "needs a handler shape (decode → store call, no approved resolver in the same function); "
-        "the pattern-not-inside clauses make a one-function fixture misleading rather than absent",
-    "docs-no-body-supplied-authority-field":
-        "same file; its pattern-not-inside on an assignment needs two near-identical handlers to "
-        "pin both directions",
-    "docs-no-inverted-identity-fallback":
-        "needs the if-empty-then-verified shape against each of the six verified-identity helpers "
-        "its metavariable-regex names",
-    "docs-no-ambiguous-actor-helpers":
-        "exact, not an approximation: two patterns over two symbols, and every call site is "
-        "already migrated, so a fixture would restate the pattern rather than test it",
-}
+#
+# EMPTY, and that is a measured state rather than a default. Each of the four entries that used to
+# be here named a real cost, and each was wrong about what the fixture would show: two
+# near-identical handlers in one file pin both directions of a pattern-not-inside perfectly well,
+# and a fixture over an "exact" rule is what stops it being narrowed later. See the module
+# docstring for what writing them actually found.
+DECLARED_UNFIXTURED: dict[str, str] = {}
 
 
 def main() -> int:
