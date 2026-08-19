@@ -86,10 +86,29 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, out)
 }
 
+// Update applies a PARTIAL update — the verb this route is registered with, and the thing the
+// decode below now makes true.
+//
+// ⚠ THE FIELDS ARE POINTERS BECAUSE A VALUE STRUCT CANNOT TELL "ABSENT" FROM "ZERO", AND BOTH
+// ZEROES HERE ARE DESTRUCTIVE. Before this, `struct{ Content string; Position float64 }` decoded a
+// body that named only one field and the store wrote BOTH: `{"position":9}` — the request a
+// drag-and-drop reorder sends — wrote `content = ""`, destroying the block's whole ProseMirror
+// document and leaving a value that is not even valid JSON in a column whose schema default is
+// '{}'; `{"content":…}` wrote `position = 0`, moving the block to the top of a page that is read
+// `ORDER BY position`. Both returned 200 with a body that looked like a successful edit. Measured
+// on real Postgres through this chain — see patchsemantics_realpg_test.go.
+//
+// nil ⇒ the column is left alone, resolved in the UPDATE itself (Store.Update), not by reading
+// the row first: a SELECT-then-UPDATE loses a concurrent edit in the window between them, which is
+// the same reason Store.Create folds its parent check into the INSERT.
+//
+// A body naming NEITHER field is a 200 that changes nothing but updated_at. That is deliberate:
+// nothing in this repo reads blocks.updated_at, and refusing would invent an error code no client
+// has ever seen for a request that asks for nothing.
 func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Content  string  `json:"content"`
-		Position float64 `json:"position"`
+		Content  *string  `json:"content"`
+		Position *float64 `json:"position"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_JSON", err.Error())
