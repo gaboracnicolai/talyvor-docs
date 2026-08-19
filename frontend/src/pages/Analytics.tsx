@@ -174,7 +174,17 @@ function PageList({ title, items, empty }: { title: string; items: ReadStats[]; 
 
 // ViewsLineChart renders the views-by-day series as a hand-rolled SVG.
 // We deliberately avoid recharts to keep the bundle small — the
-// chart is read-only and the data has at most 30 points.
+// chart is read-only and the series is at most 30 points long.
+//
+// ⚠ THE SERIES IS SPARSE, NOT ONE POINT PER DAY, AND THAT IS WHY x COMES FROM `date` AND NOT
+// FROM THE ARRAY INDEX. `analytics.Store.GetReadStats` builds it with `GROUP BY DATE_TRUNC('day',
+// created_at)`, so a day with no views produces no row and nothing on the wire marks the hole.
+// Spacing by index therefore drew EVERY gap the same width whatever its real length — measured
+// through this component: Aug 1 / Aug 2 / Aug 29 landed at cx 12, 300, 588, so a one-day gap and
+// a twenty-seven-day gap were 288px each, on the screen whose job is finding unread documents.
+// Analytics.chartgaps.test.tsx holds it, and records what this does NOT fix: the domain is first
+// point → last point rather than the requested ?days= window (the series does not carry the
+// window), and a segment spanning a gap still interpolates through heights no day had.
 function ViewsLineChart({ points }: { points: DayCount[] }) {
   if (points.length === 0) {
     return <div className="rounded border border-border bg-surface p-3 text-xs text-muted">No data yet.</div>;
@@ -183,7 +193,17 @@ function ViewsLineChart({ points }: { points: DayCount[] }) {
   const height = 120;
   const padX = 12;
   const padY = 12;
-  const xs = points.map((_, i) => padX + (i * (width - padX * 2)) / Math.max(points.length - 1, 1));
+  // Rows arrive `ORDER BY 1` — ascending by day — so the first and last carry the domain.
+  const times = points.map((p) => new Date(p.date).getTime());
+  const span = times[times.length - 1] - times[0];
+  // span === 0 is the honest degenerate case (a single day, or every row on one day): there is no
+  // time axis to spread across, so the run sits at the left pad, which is where index spacing put
+  // a lone point too. A `date` that will not parse leaves NaN here and the browser drops the
+  // circle — a visibly broken chart is the right answer to unusable timestamps, and better than a
+  // plausible position computed from an ordinal the data never claimed.
+  const xs = times.map((t) =>
+    span > 0 ? padX + ((t - times[0]) * (width - padX * 2)) / span : padX,
+  );
   const max = Math.max(1, ...points.map((p) => p.count));
   const ys = points.map(
     (p) => padY + (height - padY * 2) * (1 - p.count / max),
