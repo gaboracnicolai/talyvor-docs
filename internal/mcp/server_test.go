@@ -31,6 +31,12 @@ type fakePages struct {
 	created *model.Page
 	updated *model.Page
 	stale   []model.Page
+	// listErr, when set, makes List fail for the space ids in listErrFor (or for EVERY space
+	// when listErrFor is empty). A store that fails is a state no other fake could produce, and
+	// spacetree_pageread_test.go is what needs it: see that file for why an unreadable space
+	// must not render as an empty one.
+	listErr    error
+	listErrFor map[string]bool
 }
 
 func (f *fakePages) GetByID(_ context.Context, id string) (*model.Page, error) {
@@ -65,7 +71,14 @@ func (f *fakePages) Update(_ context.Context, id string, updates map[string]any)
 	f.updated = p
 	return p, nil
 }
-func (f *fakePages) List(_ context.Context, _ page.PageFilter) ([]model.Page, error) {
+
+// List returns f.list unfiltered — every existing caller relies on that — and only gains the
+// ability to FAIL. The error is per-space so a fixture can make one space unreadable while its
+// sibling reads fine, which is the shape that tells a partial answer from a total one.
+func (f *fakePages) List(_ context.Context, filter page.PageFilter) ([]model.Page, error) {
+	if f.listErr != nil && (len(f.listErrFor) == 0 || f.listErrFor[filter.SpaceID]) {
+		return nil, f.listErr
+	}
 	return f.list, nil
 }
 func (f *fakePages) Verify(_ context.Context, _ /*pageID*/, _ /*verifierID*/ string) error {
