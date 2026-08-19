@@ -118,9 +118,21 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, c)
 }
 
+// replyBody carries NO author_id, for the same reason createBody does not: the author is the
+// gateway-verified caller (actorFor), never a client claim.
+//
+// ⚠ IT CARRIED ONE UNTIL b98933b, AND NOTHING COULD SEE IT. Reply has passed actorFor(r) since
+// the root fix, so the field was decoded and read NOWHERE — and a field with no read is
+// invisible to both .semgrep/body-supplied-authority.yml rules by construction: rule A fires on
+// a decoded struct reaching a store, rule B on an identity field READ off the body. The whole
+// gauntlet was green with it declared. It also told every client the endpoint took an author:
+// the SPA duly sent one on create AND reply (frontend/src/hooks/useComments.ts), and the server
+// had been ignoring both for as long as createBody's comment has said "the field is gone".
+// One `actorFor(r)` -> `in.AuthorID` edit would have restored the defect this package SHIPPED —
+// a two-workspace member posting comments authored as anyone, with Store.Delete gating on
+// "only the author can delete". Now censused by internal/bodyfieldcensus.
 type replyBody struct {
 	Content    string `json:"content"`
-	AuthorID   string `json:"author_id"`
 	AuthorName string `json:"author_name"`
 }
 

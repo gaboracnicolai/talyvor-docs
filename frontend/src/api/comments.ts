@@ -31,13 +31,18 @@ export const commentsApi = {
       })}`,
     );
   },
+  // ⚠ NO author_id / resolved_by ON ANY OF THESE THREE. The server derives the acting member
+  // from the gateway-verified caller and has ignored a body-supplied one since the
+  // client-supplied-authority fix: createBody dropped the field, replyBody dropped it at
+  // b98933b, and resolveBody has always been an empty struct. This client went on DECLARING and
+  // SENDING all three, which is a client believing it chooses the author. author_name stays —
+  // it is display text, not identity.
   create(
     spaceID: string,
     pageID: string,
     body: {
       content: string;
       block_id?: string;
-      author_id?: string;
       author_name?: string;
     },
   ) {
@@ -50,17 +55,17 @@ export const commentsApi = {
     spaceID: string,
     pageID: string,
     commentID: string,
-    body: { content: string; author_id?: string; author_name?: string },
+    body: { content: string; author_name?: string },
   ) {
     return apiRequest<Comment>(
       `/v1/spaces/${spaceID}/pages/${pageID}/comments/${commentID}/reply`,
       { method: "POST", body },
     );
   },
-  resolve(spaceID: string, pageID: string, commentID: string, resolvedBy?: string) {
+  resolve(spaceID: string, pageID: string, commentID: string) {
     return apiRequest<{ ok: boolean }>(
       `/v1/spaces/${spaceID}/pages/${pageID}/comments/${commentID}/resolve`,
-      { method: "POST", body: resolvedBy ? { resolved_by: resolvedBy } : {} },
+      { method: "POST", body: {} },
     );
   },
   unresolve(spaceID: string, pageID: string, commentID: string) {
