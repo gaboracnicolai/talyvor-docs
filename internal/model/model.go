@@ -144,17 +144,13 @@ type PageVersion struct {
 	CreatedAt   time.Time `json:"created_at"   db:"created_at"`
 }
 
-// Comment is a page-level or inline (BlockID set) discussion thread.
-// Resolved comments stay in the table so the audit trail is intact;
-// the UI filters them by default.
-type Comment struct {
-	ID         string    `json:"id"                    db:"id"`
-	PageID     string    `json:"page_id"               db:"page_id"`
-	BlockID    *string   `json:"block_id,omitempty"    db:"block_id"`
-	AuthorID   string    `json:"author_id"             db:"author_id"`
-	Content    string    `json:"content"               db:"content"`
-	Resolved   bool      `json:"resolved"              db:"resolved"`
-	ResolvedBy *string   `json:"resolved_by,omitempty" db:"resolved_by"`
-	CreatedAt  time.Time `json:"created_at"            db:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"            db:"updated_at"`
-}
+// ⚠ THE `Comment` THAT WAS DECLARED HERE IS DELETED. It carried nine json-tagged fields and had
+// ZERO references in the tree — no store scanned into it, no handler wrote it, no test named it.
+// The comment wire is `internal/comment`.Comment: it adds thread_id, parent_id, author_name,
+// resolved_at and Replies, which is what makes the thread a tree rather than a flat list.
+//
+// It was not inert while it sat here. api/types.ts#Comment mirrored THIS struct field for field,
+// and three functions on `pagesApi` typed the real comment routes against that mirror — so a
+// dead declaration on the Go side kept a narrower-than-the-wire type alive on the SPA side, and
+// the two agreed with each other about a shape the server never sends. Deleted in the same merge
+// so the mirror has nothing left to reflect.
