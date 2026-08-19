@@ -171,7 +171,9 @@ func (s *Store) Unresolve(ctx context.Context, commentID string) error {
 // ListByPage returns top-level comments with their replies nested.
 // Walks every row for the page in (thread, created_at) order then
 // buckets in Go — easier to read than a recursive CTE and fast for
-// the row counts a single page generates.
+// the row counts a single page generates. The nesting is ONE level
+// deep by design (Replies []Comment), so a reply written at any
+// depth is filed under the head of the thread it belongs to.
 func (s *Store) ListByPage(ctx context.Context, pageID string, includeResolved bool) ([]Comment, error) {
 	if s.pool == nil {
 		return nil, nil
@@ -186,30 +188,83 @@ func (s *Store) ListByPage(ctx context.Context, pageID string, includeResolved b
 		return nil, fmt.Errorf("comment: list: %w", err)
 	}
 	defer rows.Close()
-	threads := map[string]*Comment{}
-	var heads []*Comment
+
+	// ⚠ REPLIES ARE FILED BY thread_id, NOT BY WALKING parent_id — AND THE TWO ARE DIFFERENT
+	// QUESTIONS THE MOMENT A REPLY HAS A REPLY.
+	//
+	// This used to bucket into a map that holds HEADS ONLY and look each reply up by its
+	// *c.ParentID. A depth-2 reply's parent is a reply, which is never in that map, so every
+	// depth-2 row missed and was SURFACED AS ITS OWN TOP-LEVEL THREAD. Measured through the
+	// shipped route on real Postgres (replydepth_realpg_test.go): a page holding two
+	// conversations listed THREE top-level entries beside a `GetStats` count of TWO — the count
+	// is `parent_id IS NULL`, which correctly excluded the promoted row. The panel contradicted
+	// itself, and the promoted row was rendered with a "Resolve" button that resolves the whole
+	// thread it was still (invisibly) part of.
+	//
+	// The API accepts a reply to a reply: ReplyInWorkspaces authorizes via assertInPage, which
+	// asks only that {id} is a comment on the authorized page. Store.Reply then INHERITS
+	// thread_id from the parent, so the row was already filed correctly ON DISK — the read was
+	// the only thing that disagreed with the schema's own model ("thread_id groups top-level +
+	// replies", 0011_comments.sql). Keying on thread_id is what makes this listing agree with
+	// GetStats, with Resolve/Unresolve (both `WHERE thread_id = …`), and with `Replies []Comment`
+	// being one level deep.
+	//
+	// TWO PASSES, so nothing depends on a head being scanned before its replies. The ORDER BY
+	// does put them in that order today (a head is created first), but that made the correctness
+	// of the bucketing rest on a tie-break in created_at.
+	all := make([]*Comment, 0, 16)
 	for rows.Next() {
 		c, err := scan(rows)
 		if err != nil {
 			return nil, err
 		}
-		if c.ParentID == nil {
-			threads[c.ID] = c
-			heads = append(heads, c)
-		} else {
-			parent, ok := threads[*c.ParentID]
-			if ok {
-				parent.Replies = append(parent.Replies, *c)
-			} else {
-				// Orphaned reply (parent missing in this query —
-				// could be resolved + filtered out). Surface it as
-				// a top-level thread so the user can still see it.
-				heads = append(heads, c)
-			}
-		}
+		all = append(all, c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	threads := map[string]*Comment{}
+	var heads []*Comment
+	for _, c := range all {
+		if c.ParentID != nil {
+			continue
+		}
+		heads = append(heads, c)
+		if c.ThreadID != nil {
+			threads[*c.ThreadID] = c
+		}
+		// A head is ALSO indexed by its own id. For every row this code path can create these
+		// are the same key — Create writes thread_id = id in one INSERT — so this is not a
+		// second namespace but the pre-0011 shape: a legacy head whose thread_id the 0011
+		// backfill did not reach is still found by a reply pointing straight at it.
+		threads[c.ID] = c
+	}
+	for _, c := range all {
+		if c.ParentID == nil {
+			continue
+		}
+		if c.ThreadID != nil {
+			if head, ok := threads[*c.ThreadID]; ok {
+				head.Replies = append(head.Replies, *c)
+				continue
+			}
+		}
+		if head, ok := threads[*c.ParentID]; ok {
+			head.Replies = append(head.Replies, *c)
+			continue
+		}
+		// FAIL-SAFE, AND ITS OLD JUSTIFICATION WAS FALSE. The comment here used to read "parent
+		// missing in this query — could be resolved + filtered out". It cannot be: `resolved` is
+		// written in exactly two statements in this package, Resolve and Unresolve, and BOTH are
+		// `WHERE thread_id = (SELECT thread_id …)` — thread-wide — so a head and its replies
+		// always share `resolved` and the `AND resolved = false` predicate above can never drop a
+		// parent while keeping a child. Deleting a head cannot orphan one either: parent_id is
+		// `ON DELETE CASCADE`. So the branch was reachable by depth-2 replies and by nothing
+		// else, and it explained a case that cannot happen while silently mis-rendering the one
+		// that can. It is kept because dropping a member's comment is worse than showing it in
+		// the wrong place, not because a way to reach it is known.
+		heads = append(heads, c)
 	}
 	out := make([]Comment, 0, len(heads))
 	for _, h := range heads {
