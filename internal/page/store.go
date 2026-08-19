@@ -1163,7 +1163,7 @@ func (s *Store) GetVersionsInWorkspaces(ctx context.Context, pageID string, wsID
 	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
 		return nil, err
 	}
-	return s.GetVersions(ctx, pageID)
+	return s.GetVersions(ctx, pageID, wsIDs)
 }
 
 // RestoreVersionInWorkspaces restores only if the page lives in one of the caller's workspaces.
@@ -1171,7 +1171,7 @@ func (s *Store) RestoreVersionInWorkspaces(ctx context.Context, pageID string, v
 	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
 		return nil, err
 	}
-	return s.RestoreVersion(ctx, pageID, version)
+	return s.RestoreVersion(ctx, pageID, version, wsIDs)
 }
 
 // RecordViewInWorkspaces was here. It had ZERO callers — no route, no other package, no test —
@@ -1388,14 +1388,32 @@ func (s *Store) Search(ctx context.Context, workspaceID, query string, limit int
 
 // ─── Versions ──────────────────────────────────────────────
 
-func (s *Store) GetVersions(ctx context.Context, pageID string) ([]model.PageVersion, error) {
+// THE VERSION READS SCOPE ON workspace_id, AND UNTIL versionworkspacescope_realpg_test.go THEY
+// DID NOT — migration 0015 said they did.
+//
+// 0015 added page_versions.workspace_id and idx_page_versions_ws (workspace_id, page_id, version
+// DESC) and described the result as "defense-in-depth plus the direct-scope filter the new get-one
+// / compare reads use". Measured: the column appeared in two statements, both INSERTs, and every
+// read here scoped on page_id alone — so the filter did not exist, the index's leading column was
+// never bound by the queries it was built for, and the depth was one layer (assertInWorkspaces),
+// which is the JOIN-to-pages posture 0015 says it replaced.
+//
+// The scope is a PARAMETER rather than a wrapper's job on purpose: there is now no form of these
+// reads that can be written without a caller's verified workspace set, so the second layer cannot
+// be dropped by adding a call site the way it was by adding a read.
+//
+// ⚠ IT HIDES NO LEGITIMATE HISTORY, and that is measured rather than assumed: both INSERTs take
+// workspace_id from the page row the write returned (never from a request), `workspace_id` is not
+// in updatableFields, and no production statement UPDATEs pages.workspace_id — so a page never
+// changes tenant and a version's recorded tenant always equals its page's.
+func (s *Store) GetVersions(ctx context.Context, pageID string, wsIDs []string) ([]model.PageVersion, error) {
 	if s.pool == nil {
 		return nil, nil
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, page_id, workspace_id, version, title, content, created_by, created_at
-        FROM page_versions WHERE page_id = $1 ORDER BY version DESC`,
-		pageID,
+        FROM page_versions WHERE workspace_id = ANY($2) AND page_id = $1 ORDER BY version DESC`,
+		pageID, wsIDs,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("page: versions: %w", err)
@@ -1421,7 +1439,16 @@ func (s *Store) GetVersions(ctx context.Context, pageID string) ([]model.PageVer
 // left its own snapshot — which is why Update versions a title-only save. While it did not,
 // restoring the newest version wrote a stale title over the live one and the discarded name was
 // in no row anywhere.
-func (s *Store) RestoreVersion(ctx context.Context, pageID string, version int) (*model.Page, error) {
+// ⚠ RESTORE IS THE READ THAT WRITES, WHICH IS WHY ITS MISSING SCOPE WAS THE WORST OF THE FOUR.
+// Measured before the workspace predicate below existed: a version row recorded to another tenant
+// was not merely readable through this path — its title and content were COPIED ONTO THE LIVE
+// PAGE by the Update at the bottom of this function. A refused restore must write nothing, so the
+// scope belongs on the lookup, before Update is reached.
+//
+// A version that is not in the caller's workspaces is ErrNotFound, not a wrapped pgx.ErrNoRows.
+// The sibling reads already answer that way and the handler maps it to 404; leaving this one to
+// return an opaque error made "you may not see that" and "the database failed" the same 400.
+func (s *Store) RestoreVersion(ctx context.Context, pageID string, version int, wsIDs []string) (*model.Page, error) {
 	if s.pool == nil {
 		return nil, errors.New("page: store has no pool")
 	}
@@ -1429,10 +1456,15 @@ func (s *Store) RestoreVersion(ctx context.Context, pageID string, version int) 
 		title   string
 		content string
 	)
-	if err := s.pool.QueryRow(ctx,
-		`SELECT title, content FROM page_versions WHERE page_id = $1 AND version = $2`,
-		pageID, version,
-	).Scan(&title, &content); err != nil {
+	err := s.pool.QueryRow(ctx,
+		`SELECT title, content FROM page_versions
+        WHERE workspace_id = ANY($3) AND page_id = $1 AND version = $2`,
+		pageID, version, wsIDs,
+	).Scan(&title, &content)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
 		return nil, fmt.Errorf("page: restore lookup: %w", err)
 	}
 	return s.Update(ctx, pageID, map[string]any{
@@ -1442,17 +1474,20 @@ func (s *Store) RestoreVersion(ctx context.Context, pageID string, version int) 
 	})
 }
 
-// GetVersion returns a single version's snapshot. Unscoped primitive — callers must
-// authorize the page first (GetVersionInWorkspaces does).
-func (s *Store) GetVersion(ctx context.Context, pageID string, version int) (*model.PageVersion, error) {
+// GetVersion returns a single version's snapshot, scoped to the caller's verified workspaces.
+// Callers must ALSO authorize the page (GetVersionInWorkspaces does) — this is the second layer,
+// not a replacement for the first: it answers "is this ROW the caller's tenant's", while the page
+// gate answers "is this PAGE the caller's", and the two are different questions on different
+// tables. See the note on GetVersions for what 0015 claimed and what was measured.
+func (s *Store) GetVersion(ctx context.Context, pageID string, version int, wsIDs []string) (*model.PageVersion, error) {
 	if s.pool == nil {
 		return nil, errors.New("page: store has no pool")
 	}
 	var v model.PageVersion
 	err := s.pool.QueryRow(ctx,
 		`SELECT id, page_id, workspace_id, version, title, content, created_by, created_at
-        FROM page_versions WHERE page_id = $1 AND version = $2`,
-		pageID, version,
+        FROM page_versions WHERE workspace_id = ANY($3) AND page_id = $1 AND version = $2`,
+		pageID, version, wsIDs,
 	).Scan(&v.ID, &v.PageID, &v.WorkspaceID, &v.Version, &v.Title, &v.Content, &v.CreatedBy, &v.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -1469,21 +1504,26 @@ func (s *Store) GetVersionInWorkspaces(ctx context.Context, pageID string, versi
 	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
 		return nil, err
 	}
-	return s.GetVersion(ctx, pageID, version)
+	return s.GetVersion(ctx, pageID, version, wsIDs)
 }
 
-// CompareVersionsInWorkspaces returns two version snapshots (from, to) for diffing, only if
-// the page lives in one of the caller's workspaces. The tenancy check is done ONCE for the
-// page — both versions belong to the same page, so authorizing the page authorizes both.
+// CompareVersionsInWorkspaces returns two version snapshots (from, to) for diffing, only if the
+// page lives in one of the caller's workspaces AND each row is recorded to one of them.
+//
+// ⚠ THE PAGE CHECK IS DONE ONCE AND THAT IS NOT THE WHOLE GUARD — the sentence that used to be
+// here ("authorizing the page authorizes both") was the reasoning that left the rows unscoped.
+// It is true of the PAGE and says nothing about the ROWS: both snapshots are fetched by page_id,
+// so a row whose own workspace_id is another tenant's satisfies it. Each side is scoped
+// independently now; see the note on GetVersions.
 func (s *Store) CompareVersionsInWorkspaces(ctx context.Context, pageID string, from, to int, wsIDs []string) (*model.PageVersion, *model.PageVersion, error) {
 	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
 		return nil, nil, err
 	}
-	fromV, err := s.GetVersion(ctx, pageID, from)
+	fromV, err := s.GetVersion(ctx, pageID, from, wsIDs)
 	if err != nil {
 		return nil, nil, err
 	}
-	toV, err := s.GetVersion(ctx, pageID, to)
+	toV, err := s.GetVersion(ctx, pageID, to, wsIDs)
 	if err != nil {
 		return nil, nil, err
 	}

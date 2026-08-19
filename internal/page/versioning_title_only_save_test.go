@@ -92,7 +92,7 @@ func TestTitleOnlySave_AppendsARestorePoint_RealPG(t *testing.T) {
 		t.Fatalf("title-only save: %v", err)
 	}
 
-	vers, err := store.GetVersions(ctx, pID)
+	vers, err := store.GetVersions(ctx, pID, []string{ws})
 	if err != nil {
 		t.Fatalf("versions: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestSaveOfBothColumns_TakesExactlyOneSnapshot_RealPG(t *testing.T) {
 			t.Fatalf("save %d: %v", i+1, err)
 		}
 	}
-	vers, err := store.GetVersions(ctx, pID)
+	vers, err := store.GetVersions(ctx, pID, []string{ws})
 	if err != nil {
 		t.Fatalf("versions: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestIconOnlySave_TakesNoSnapshot_RealPG(t *testing.T) {
 		t.Fatalf("icon-only save: %v", err)
 	}
 
-	vers, err := store.GetVersions(ctx, pID)
+	vers, err := store.GetVersions(ctx, pID, []string{ws})
 	if err != nil {
 		t.Fatalf("versions: %v", err)
 	}
