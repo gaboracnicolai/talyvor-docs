@@ -34,6 +34,35 @@ package analytics
 // 36 loops, 33 consult `rows.Err()`. The three that did not are the two here and
 // `pagelink.SyncLinks` — whose neighbour twenty lines up, `IssueIDsForPage`, reads the SAME
 // table for the SAME roll-up and ends `return out, rows.Err()`.
+//
+// ⚠ THAT CENSUS IS CLOSED AND RE-MEASURED AT d35f640: **37 loops, 37 consult `rows.Err()`** —
+// zero omissions repo-wide. So what follows is not a second copy of the defect above. It is the
+// other half of THIS FILE.
+//
+// ⚠⚠ THIS FILE COVERED THE PER-PAGE ROUTE AND NEITHER LOOP OF THE WORKSPACE ROLL-UP, AND THE
+// UNCOVERED HALF IS THE ONE WHERE A TRUNCATION MOVES A FIGURE. `GetWorkspaceStats` iterates two
+// streams — the ranked window and the never-read ids — and both DO consult `rows.Err()` today.
+// Nothing asserted it. MEASURED by mutation over the FULL suite on real Postgres
+// (~/talyvor-queue/w31-mutation-sweep-6d81.py), each check replaced by `if false`:
+//
+//	GetReadStats      day-bucket loop   -> CAUGHT (TestGetReadStats_ATruncatedDayStreamIsNotAChart)
+//	GetReadStats      top-viewers loop  -> CAUGHT (…ATruncatedViewerStreamIsNotARoster)
+//	GetWorkspaceStats ranked loop       -> NOT CAUGHT — whole suite green
+//	GetWorkspaceStats never-read loop   -> NOT CAUGHT — whole suite green
+//
+// 2 of 4, in the file whose own subject is exactly this failure. The same shape this repository
+// has now learned three times: a guard written against one instance of a class, over a surface
+// that had two.
+//
+// ⚠ AND THE ROLL-UP HALF IS STRICTLY WORSE THAN THE HALF THAT WAS COVERED. Above, a truncated
+// stream shortens a CHART and a ROSTER — a list, where an absence at least has somewhere to be
+// noticed. In `GetWorkspaceStats` the ranked stream is what `out.TotalViews` is SUMMED FROM
+// (`out.TotalViews += r.TotalViews`, one line per surviving row), and the never-read stream is
+// what `out.NeverRead` is COUNTED FROM. A prefix therefore does not shorten a list: it produces a
+// LOWER NUMBER, and Analytics.tsx paints those two numbers as the tiles "Views (30d)" and
+// "Never read". A workspace with 81 views reported as 8 is byte-identical, in a 200, to a
+// workspace that had 8 — which is the distinction this package's own `withEmptyLists` note and
+// search.Result's three cost fields both exist to hold.
 
 import (
 	"context"
@@ -237,5 +266,117 @@ func TestGetReadStats_TruncationDoesNotBorrowTheScanCheck(t *testing.T) {
 	if errors.Is(err, errStreamBroke) || strings.Contains(err.Error(), "57014") {
 		t.Errorf("[SCAN-IS-A-DIFFERENT-FAILURE] a Scan failure surfaced as the stream error — "+
 			"the two must not be conflated: %v", err)
+	}
+}
+
+// ─── the workspace roll-up: the half this file did not cover ──────────────────────────────
+//
+// TestGetWorkspaceStats_ATruncatedRankedStreamIsNotARollUp drives the ranked window to a prefix.
+//
+// The ranked stream is the FIRST of the roll-up's three statements and the one `out.TotalViews`
+// is summed from, so a prefix understates the headline tile by exactly the rows that never
+// arrived.
+//
+// ⚠ NO EXPECTATION IS REGISTERED FOR THE TWO STATEMENTS AFTER IT, AND THAT IS AN ASSERTION —
+// the same one the day-bucket test above makes. A read that discovered its own stream was
+// truncated must stop, not carry on and assemble a roll-up out of what it managed to collect.
+//
+// ⚠⚠ HOW THIS TAG READS RED IS `errors.Is`, NOT `err == nil`, AND THE DISTINCTION IS THE WHOLE
+// LESSON OF THIS FILE (see TruncationDoesNotBorrowTheScanCheck). With the check removed, the loop
+// sails past the truncation into the unique-viewers statement, which the mock has no expectation
+// for — so an error DOES come back, from the HARNESS, naming the wrong cause ("analytics: unique
+// viewers: call to method Query() was not expected"). A test that only asked "was there an error"
+// would be GREEN over the defect. Measured, not reasoned: control C1 in
+// ~/talyvor-queue/w31-rollupstream-controls-6d81.py reddens exactly this tag and reddens it on
+// the identity assertion.
+func TestGetWorkspaceStats_ATruncatedRankedStreamIsNotARollUp(t *testing.T) {
+	store, pool := newMockStore(t)
+	store.WithPageRead(allowAllPages{})
+	lastSeen := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+
+	// Two rows delivered, then the stream fails. 50 + 30 = 80 is the total a caller would be
+	// handed; nothing downstream can tell it from a workspace that genuinely saw 80 views.
+	pool.ExpectQuery(`(?i)page_id.*group by.*order by count.*desc`).
+		WithArgs("ws-1", 30).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"page_id", "title", "view_count", "unique_viewers", "avg_duration_sec", "last_viewed",
+		}).
+			AddRow("pg-1", "Top", int(50), int(7), int(41), lastSeen).
+			AddRow("pg-2", "Second", int(30), int(5), int(33), lastSeen.Add(-time.Hour)).
+			CloseError(errStreamBroke))
+
+	got, err := store.GetWorkspaceStats(context.Background(), "ws-1", 30)
+
+	// ── [RANKED-STREAM-TRUNCATION-IS-AN-ERROR] ────────────────────────────────────────
+	if err == nil {
+		t.Fatalf("[RANKED-STREAM-TRUNCATION-IS-AN-ERROR] GetWorkspaceStats returned nil error "+
+			"with total_views = %d after the ranked stream broke — the SPA paints that number as "+
+			"\"Views (30d)\", and an understated one is a measurement, not an absence",
+			got.TotalViews)
+	}
+	if !errors.Is(err, errStreamBroke) {
+		t.Errorf("[RANKED-STREAM-TRUNCATION-IS-AN-ERROR] err = %v, want it to wrap the stream "+
+			"failure — the ranked loop must not carry on into the unique-viewers statement and "+
+			"then blame it", err)
+	}
+	if got != nil {
+		t.Errorf("[RANKED-STREAM-TRUNCATION-IS-AN-ERROR] stats = %+v, want nil — a truncated "+
+			"roll-up must not hand back the prefix it managed to sum", got)
+	}
+}
+
+// TestGetWorkspaceStats_ATruncatedNeverReadStreamIsNotACount is the same failure two statements
+// later, and it is a SEPARATE loop with a SEPARATE check — one fix does not stand in for the
+// other. The ranked and unique-viewer streams are WHOLE here, so this cannot pass on the fix above.
+//
+// ⚠ THIS ONE READS RED ON `err == nil` FOR REAL, and it is the only place in this file where that
+// is true. The never-read stream is the LAST statement, so there is nothing after it for the mock
+// to manufacture an error out of: with the check removed the method returns a fully-formed
+// `*WorkspaceReadStats` and a nil error — the actual 200 a caller receives. The tag therefore
+// prints the fabricated figure, which is the finding stated in the units the screen uses.
+//
+// ⚠ `never_read_count` IS THE TILE THE UI MARKS `tone="warning"` (Analytics.tsx). Truncation
+// pushes it DOWN — toward "nothing needs attention" — so the failure is silent in the direction a
+// reader is least likely to question.
+func TestGetWorkspaceStats_ATruncatedNeverReadStreamIsNotACount(t *testing.T) {
+	store, pool := newMockStore(t)
+	store.WithPageRead(allowAllPages{})
+	lastSeen := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+
+	pool.ExpectQuery(`(?i)page_id.*group by.*order by count.*desc`).
+		WithArgs("ws-1", 30).
+		WillReturnRows(pgxmock.NewRows([]string{
+			"page_id", "title", "view_count", "unique_viewers", "avg_duration_sec", "last_viewed",
+		}).AddRow("pg-1", "Top", int(50), int(7), int(41), lastSeen))
+
+	pool.ExpectQuery(`(?i)count\(distinct viewer_id\).*page_id = any`).
+		WithArgs("ws-1", 30, []string{"pg-1"}).
+		WillReturnRows(pgxmock.NewRows([]string{"unique_viewers"}).AddRow(int(15)))
+
+	// Two ids delivered, then the stream fails. The workspace's real never-read cohort is
+	// unknowable from here — which is the point: 2 is not it, and 2 is what gets counted.
+	pool.ExpectQuery(`(?i)select p\.id from pages p.*left join page_views`).
+		WithArgs("ws-1").
+		WillReturnRows(pgxmock.NewRows([]string{"id"}).
+			AddRow("pg-a").
+			AddRow("pg-b").
+			CloseError(errStreamBroke))
+
+	got, err := store.GetWorkspaceStats(context.Background(), "ws-1", 30)
+
+	// ── [NEVER-READ-STREAM-TRUNCATION-IS-AN-ERROR] ────────────────────────────────────
+	if err == nil {
+		t.Fatalf("[NEVER-READ-STREAM-TRUNCATION-IS-AN-ERROR] GetWorkspaceStats returned nil error "+
+			"with never_read_count = %d after the id stream broke — that tile is rendered as a "+
+			"warning, and a truncated stream moves it DOWN, toward \"nothing needs attention\"",
+			got.NeverRead)
+	}
+	if !errors.Is(err, errStreamBroke) {
+		t.Errorf("[NEVER-READ-STREAM-TRUNCATION-IS-AN-ERROR] err = %v, want it to wrap the stream "+
+			"failure", err)
+	}
+	if got != nil {
+		t.Errorf("[NEVER-READ-STREAM-TRUNCATION-IS-AN-ERROR] stats = %+v, want nil — a roll-up "+
+			"whose last read broke must not answer with numbers", got)
 	}
 }
