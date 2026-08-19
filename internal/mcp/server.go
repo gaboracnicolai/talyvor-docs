@@ -1233,7 +1233,26 @@ func (s *Server) toolGetSpaceTree(ctx context.Context, args map[string]any) (any
 		if !s.canViewSpace(ctx, sp.ID) {
 			continue
 		}
-		pages, _ := s.deps.pages.List(ctx, page.PageFilter{SpaceID: sp.ID, Limit: 200})
+		// A FAILED PAGE READ IS NOT AN EMPTY SPACE, AND THIS USED TO BE `pages, _ :=`. The rule is
+		// the one stated at the top of this function for the nil store, and it applies with more
+		// force here: falling through rendered `{"space_id":…,"name":…,"pages":null}` — MEASURED
+		// BYTE-IDENTICAL to the payload a genuinely empty space produces — so "this space has no
+		// pages" and "I could not read this space's pages" were ONE answer to an agent that
+		// cannot open the database to check. The three sibling reads in this file already refuse
+		// exactly this (ask_docs' `hits, _ :=`, get_stale_pages' empty report, the nil stores
+		// above); this was the last one left, inside the function that documents the rule.
+		//
+		// THE WHOLE CALL FAILS rather than the one space being dropped: `spaces.List` above
+		// already fails the call, and dropping the space would trade a false "no pages" for a
+		// false "no such space" — the same class of claim, one level up. Fixed message, cause
+		// logged, following ask_docs: the store's error carries SQLSTATE text and relation names
+		// and the caller here is an MCP client.
+		pages, err := s.deps.pages.List(ctx, page.PageFilter{SpaceID: sp.ID, Limit: 200})
+		if err != nil {
+			slog.Error("mcp: get_space_tree page read failed — reporting the failure rather than an empty space",
+				slog.String("workspace_id", wsID), slog.String("space_id", sp.ID), slog.Any("err", err))
+			return nil, &rpcError{Code: errInternal, Message: "the page read failed; the space tree is unavailable"}
+		}
 		// Bucket pages by parent for a 2-level nested view.
 		byParent := map[string][]model.Page{}
 		for _, p := range pages {
