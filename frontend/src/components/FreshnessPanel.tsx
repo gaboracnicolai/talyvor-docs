@@ -21,9 +21,17 @@ const EXPIRY_PRESETS: { label: string; days: number }[] = [
 
 // FreshnessPanel is the popover that opens when the user clicks the
 // FreshnessBadge. It shows the full report + lets owners change the
-// TTL or mark the page as verified. Verifying creates a new page
-// version server-side; the popover relies on the existing /verify
-// endpoint via pagesApi.
+// TTL or mark the page as verified. The popover relies on the
+// existing /verify endpoint via pagesApi.
+//
+// ⚠ VERIFYING DOES NOT CREATE A PAGE VERSION, AND THIS COMMENT SAID IT DID. page.Store.Verify is
+// a bare UPDATE of last_verified_at + verified_by; it touches page_versions nowhere. Pinned by
+// page.TestVerify_WritesNoPageVersion_RealPG so the corrected text cannot drift back, and so that
+// a later change which DID make verifying snapshot would red rather than quietly make this true.
+//
+// ⚠ NOR DOES IT CHANGE THE PAGE'S EDIT TIMESTAMP — verifying is the claim that nothing changed.
+// It used to: the same UPDATE set `updated_at = NOW()`, which is what the footer of PageView
+// prints as "Last edited … ". Removed in page/store.go; see verify_editclock_realpg_test.go.
 export function FreshnessPanel({ spaceID, pageID, report, isLoading, onClose }: PanelProps) {
   const qc = useQueryClient();
   const updatePage = useUpdatePage(spaceID, pageID);
