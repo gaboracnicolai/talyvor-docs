@@ -328,21 +328,56 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
 	// Dropped from the INSERT rather than zeroed in the handler because all SIX callers of
 	// Create reach it, and a census found none of them sets AICostUSD. own_ai_cost_usd and
 	// view_count were already absent here for the same reason. Pinned by sec_aicost_create_test.go.
-	out, err := scan(s.pool.QueryRow(ctx,
-		`INSERT INTO pages
+	//
+	// ⚠ THE SLUG IS DISAMBIGUATED HERE, AND THE SECOND "New page" CLICK IS WHY. `pages` carries
+	// UNIQUE (space_id, slug) (0002_pages.sql:36) and the slug is derived from the title thirty
+	// lines above with, until this loop, no uniqueness handling at all — so a title already used in
+	// the space made this INSERT fail. That is not an edge case reached by a user typing a duplicate:
+	// the SPA's "New page" button posts a HARDCODED {"title":"Untitled"} (SpaceView.tsx), and a
+	// template's page title is the TEMPLATE'S NAME, fixed by the library. Measured through the
+	// shipped routes, the second click and the second use of any template both returned
+	// `400 {"error":"page: insert: ERROR: duplicate key value violates unique constraint
+	// \"pages_space_id_slug_key\" (SQLSTATE 23505)","code":"CREATE_FAILED"}` — a constraint name,
+	// shown to the user, for the most ordinary action this product has.
+	//
+	// ⚠ IN THE STORE RATHER THAN IN THE CALLERS, for the reason the block above already gives about
+	// the metric: `INSERT INTO pages` exists in exactly ONE place in this repository and SIX callers
+	// reach it. A census of all six found that NOT ONE sets Page.Slug — in production the slug is
+	// ALWAYS derived — so every door had this collision and one loop closes all of them.
+	//
+	// ⚠ THE TITLE IS NEVER TOUCHED. Only the address is disambiguated; renaming somebody's page to
+	// make an INSERT succeed would be a worse answer than the failure.
+	//
+	// The shape is this file's existing retry-on-unique-violation (see appendVersion), with one
+	// difference that matters: it matches on the CONSTRAINT NAME, not on SQLSTATE 23505 alone.
+	// `pages` has exactly two unique constraints — this one and the primary key on `id`, whose
+	// gen_random_uuid() default must NEVER be retried into a second attempt that quietly papers over
+	// a broken id source. A code-only test would retry both.
+	base := p.Slug
+	var out *model.Page
+	for attempt := 1; ; attempt++ {
+		out, err = scan(s.pool.QueryRow(ctx,
+			`INSERT INTO pages
             (space_id, workspace_id, parent_id, title, slug,
              content, content_text, icon, cover_url, position, depth,
              is_template, created_by, updated_by,
              linked_issues, stale_after_days, page_type)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         RETURNING `+columns,
-		p.SpaceID, p.WorkspaceID, p.ParentID, p.Title, p.Slug,
-		p.Content, p.ContentText, p.Icon, p.CoverURL, p.Position, p.Depth,
-		p.IsTemplate, p.CreatedBy, p.CreatedBy,
-		p.LinkedIssues, p.StaleAfterDays, p.PageType,
-	))
-	if err != nil {
-		return nil, fmt.Errorf("page: insert: %w", err)
+			p.SpaceID, p.WorkspaceID, p.ParentID, p.Title, p.Slug,
+			p.Content, p.ContentText, p.Icon, p.CoverURL, p.Position, p.Depth,
+			p.IsTemplate, p.CreatedBy, p.CreatedBy,
+			p.LinkedIssues, p.StaleAfterDays, p.PageType,
+		))
+		if err == nil {
+			break
+		}
+		if !isSlugTaken(err) || attempt >= maxSlugAttempts {
+			return nil, fmt.Errorf("page: insert: %w", err)
+		}
+		// Re-derived from `base` every time, never from the last attempt's value, so the suffix
+		// cannot compound into untitled-2-3-4 as the space fills up.
+		p.Slug = fmt.Sprintf("%s-%d", base, attempt+1)
 	}
 
 	// ⚠ THE PAGE-CREATION METRIC IS INCREMENTED HERE, BESIDE THE INSERT, AND IT USED TO BE
@@ -477,6 +512,29 @@ func (s *Store) appendVersion(ctx context.Context, pageID, workspaceID, title, c
 // uniqueViolation is Postgres's SQLSTATE for a duplicate key — the contested-version case
 // appendVersion retries.
 const uniqueViolation = "23505"
+
+// slugConstraint is the UNIQUE (space_id, slug) on `pages` (0002_pages.sql:36). Named rather than
+// inferred from the SQLSTATE: `pages` has exactly two unique constraints and the other is the
+// primary key on `id`, which must never be retried — a duplicate uuid means the id source is
+// broken, and a retry loop would hide that as a slow success.
+const slugConstraint = "pages_space_id_slug_key"
+
+// maxSlugAttempts bounds Create's slug disambiguation: the plain derived slug, then `-2` … `-5`.
+// Matched to maxVersionAttempts, the sibling retry in this file, for the same reason — the bound is
+// on how many pages in ONE space share ONE title at the moment of the insert, not on retries of one
+// create. Exhausting it returns the constraint error rather than inventing a random suffix, so a
+// space that genuinely holds five identically-titled pages fails visibly instead of accumulating
+// addresses nobody can guess.
+const maxSlugAttempts = 5
+
+// isSlugTaken reports whether err is the (space_id, slug) uniqueness violation — the ONE outcome
+// Create disambiguates. Anything else, including a duplicate primary key, is returned to the caller.
+func isSlugTaken(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == uniqueViolation &&
+		pgErr.ConstraintName == slugConstraint
+}
 
 // ─── Get* ──────────────────────────────────────────────────
 
