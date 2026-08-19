@@ -49,11 +49,23 @@ function sanitiseHeadline(html: string): string {
 //
 // ⚠ THREE STATES, NOT TWO, AND THE THIRD IS WHY THIS IS A COMPONENT AND NOT AN EXPRESSION.
 // `internal/search/handler.go` emits the costs as `*float64` with `omitempty`: a SEMANTIC-ONLY
-// hit is built from a vector match with NO `pages` row read, so all three are absent. That is
-// "not reported", which is a different fact from "measured and zero" — the pointers on the
-// wire exist to keep them apart. `?? 0` here would render "$0.00" for a document nobody
-// looked at: a fabricated zero, and the exact failure a renderer written by analogy to
-// PageView produces. Absent renders as an em-dash marker instead.
+// hit carries none of the three, so all three are absent. That is "not reported", which is a
+// different fact from "measured and zero" — the pointers on the wire exist to keep them apart.
+// `?? 0` here would render "$0.00" for a document nobody looked at: a fabricated zero, and the
+// exact failure a renderer written by analogy to PageView produces. Absent renders as an
+// em-dash marker instead.
+//
+// ⚠ WHY THEY ARE ABSENT IS NOT WHAT THIS COMMENT USED TO SAY, AND THE OLD REASON REACHED THE
+// USER. It said the row "is built from a vector match with NO `pages` row read". MEASURED, and
+// the measurement is in the server file this comment cites: `SemanticSearch.Search`'s SQL is
+// `FROM page_embeddings pe JOIN pages p ON p.id = pe.page_id JOIN spaces sp ON sp.id =
+// p.space_id`, so a pages row IS read — the query filters `p.workspace_id`, `p.is_template` and
+// `p.space_id` on it, and the row's title and space name are taken from that very join. The
+// costs are LEFT ABSENT DELIBERATELY: whether a number never rendered on this row should start
+// appearing is a product question about a money surface, and `internal/search/handler.go` says
+// it "is not settled by discovering it would be cheap". The distinction is load-bearing rather
+// than pedantic — that open question turns on exactly this fact, so a stale premise here points
+// the decision the wrong way. Guarded by SearchModal.costreason.test.ts, both directions.
 //
 // ⚠ NO FALLBACK TO `ai_cost_usd` WHEN THE TOTAL IS ABSENT, DELIBERATELY. The server sets all
 // three or none (merge()), so a total-less-but-track-ful row is a shape it never produces —
@@ -69,7 +81,7 @@ function CostBadge({ r }: { r: SearchResult }) {
     return (
       <span
         data-testid="search-cost-unknown"
-        title="AI cost not reported for this match — it was found by meaning, and its page row was not read"
+        title="AI cost not reported for this match — it was found by meaning, and cost is not carried on those rows"
         aria-label="AI cost not reported"
         className="text-muted"
       >

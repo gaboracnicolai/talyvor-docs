@@ -128,8 +128,12 @@ type Result struct {
 	// `FROM page_embeddings pe JOIN pages p ON p.id = pe.page_id`, so a pages row IS read — the
 	// query filters `p.workspace_id`, `p.is_template` and `p.space_id` on it. `space_id`,
 	// `title`, `ai_cost_usd` and `own_ai_cost_usd` are ALL columns of that already-joined table;
-	// only `space_name` (a second join onto spaces) and `headline` (ts_headline over the
-	// full-text query) are genuinely absent. So "should a semantic hit pay for a page read?" is a
+	// only `headline` (ts_headline over the full-text query this document did not match) is
+	// genuinely absent. ⚠ THIS SENTENCE NAMED `space_name` TOO AND HAS GONE STALE IN ITS TURN:
+	// the semantic query now carries `JOIN spaces sp ON sp.id = p.space_id` and merge() fills
+	// SpaceName from it, because a hit drawn as `{space_name} · {page_title}` with neither is a
+	// blank line. Corrected here rather than left, since this comment is what the frontend cites.
+	// So "should a semantic hit pay for a page read?" is a
 	// question about a read that already happens. The URL's space was taken because a url without
 	// it is unroutable; the costs are LEFT ABSENT DELIBERATELY, because whether a number that has
 	// never been rendered on this row should start appearing is a product question about a money

@@ -5,6 +5,7 @@
     "src/api/search.wire-census.test.ts": 4,
     "src/components/EditingBanner.test.tsx": 4,
     "src/components/SearchModal.cost.test.tsx": 6,
+    "src/components/SearchModal.costreason.test.ts": 3,
     "src/components/VersionHistory.rename.test.tsx": 3,
     "src/components/VersionHistory.test.tsx": 5,
     "src/components/database/DatabaseBlock.hiddencols.test.tsx": 9,
@@ -29,6 +30,6 @@
     "src/sw/register.test.ts": 8,
     "src/sw/sw.test.ts": 7
   },
-  "totalFiles": 28,
-  "totalTests": 135
+  "totalFiles": 29,
+  "totalTests": 138
 }
