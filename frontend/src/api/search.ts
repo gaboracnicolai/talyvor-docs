@@ -21,9 +21,18 @@ export interface SearchResult {
   //
   // ⚠ ALL THREE ARE OPTIONAL BECAUSE THE WIRE GENUINELY OMITS THEM, not to be lenient.
   // `internal/search/handler.go` declares them `*float64` with `omitempty` (`8b3e1be`): a
-  // SEMANTIC-ONLY row is built from a vector hit with no `pages` row read, so no cost is
-  // KNOWN for it and all three keys are absent. undefined means NOT REPORTED; 0 means
-  // measured and zero. A renderer that reads `?? 0` collapses those two facts back together.
+  // SEMANTIC-ONLY row carries none of the three, so all three keys are absent. undefined means
+  // NOT REPORTED; 0 means measured and zero. A renderer that reads `?? 0` collapses those two
+  // facts back together.
+  //
+  // ⚠ THE REASON THEY ARE ABSENT IS A DECISION, NOT A MISSING READ, AND THIS COMMENT HAD IT
+  // WRONG. It said the row is "built from a vector hit with no `pages` row read". MEASURED:
+  // `internal/search/semantic.go`'s query is `FROM page_embeddings pe JOIN pages p ... JOIN
+  // spaces sp ...` — a pages row IS read, and this row's title and space name come from it. The
+  // costs are omitted deliberately because starting to render a number on a money surface is a
+  // product call. Guarded by `components/SearchModal.costreason.test.ts`, which reads the SQL
+  // and fails in EITHER direction, so the correct sentence tracks the query rather than the
+  // most recent edit.
   //
   // This type declared `ai_cost_usd` alone until `SearchModal.cost.test.tsx` was written: the
   // other two arrived on every full-text hit and were dropped HERE, at the type boundary,
