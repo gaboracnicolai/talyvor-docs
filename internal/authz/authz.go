@@ -69,9 +69,19 @@ func WorkspaceIDs(ctx context.Context) []string {
 	return out
 }
 
-// SingleWorkspace returns the caller's workspace WHEN they belong to exactly one — the Docs
-// common case (one workspace per instance). ok=false for zero or multiple, so a caller that
-// needs an unambiguous create-target must handle the ambiguous case explicitly.
+// SingleWorkspace returns the caller's workspace WHEN they belong to exactly one.
+//
+// ⚠ DO NOT CALL THIS FROM A HANDLER. `.semgrep/body-supplied-authority.yml`'s
+// docs-no-ambiguous-actor-helpers rejects `authz.SingleWorkspace(...)` outright, and this
+// docstring used to end "the Docs common case (one workspace per instance) ... a caller that
+// needs an unambiguous create-target must handle the ambiguous case explicitly" — an invitation
+// to the exact shape seven packages in this repository each shipped and each had to fix.
+// Discarding the ok reproduces WorkspaceOrEmpty inline; honouring it 403s every MULTI-WORKSPACE
+// member on a route their membership entitles them to. Derive the workspace from the resource
+// the route authorized (permission.WorkspaceFromContext) or authorize the claimed one
+// (AuthorizeWorkspace) — both are correct for any membership count.
+//
+// It survives as WorkspaceOrEmpty's implementation and has no other caller in the tree.
 func SingleWorkspace(ctx context.Context) (string, bool) {
 	ms, ok := Memberships(ctx)
 	if !ok || len(ms) != 1 {
@@ -95,8 +105,17 @@ func MemberIDForWorkspace(ctx context.Context, wsID string) (string, bool) {
 	return "", false
 }
 
-// SingleMemberID returns the caller's member id WHEN they belong to exactly one workspace —
-// convenience for attributing an action in the common single-workspace Docs case.
+// SingleMemberID returns the caller's member id WHEN they belong to exactly one workspace.
+//
+// ⚠ DO NOT CALL THIS FROM A HANDLER — same ban, same rule, same reason as SingleWorkspace above.
+// This docstring used to read "convenience for attributing an action in the common
+// single-workspace Docs case", and MEASURED at 11c234b that convenience was invisible: a real
+// handler attributing created_by from `actor, _ := authz.SingleMemberID(ctx)` passed gofmt,
+// go vet, the pinned semgrep scan and the whole real-Postgres suite. Use
+// permission.ActorFromContext on a gated route, or AuthorizeWorkspace's Membership.MemberID on
+// a workspace-level one.
+//
+// It survives as ActorOrEmpty's implementation and has no other caller in the tree.
 func SingleMemberID(ctx context.Context) (string, bool) {
 	ms, ok := Memberships(ctx)
 	if !ok || len(ms) != 1 {
@@ -106,15 +125,36 @@ func SingleMemberID(ctx context.Context) (string, bool) {
 }
 
 // WorkspaceOrEmpty returns the caller's single workspace, or "" if they have none or several.
-// Handler convenience for "override a client-supplied workspace with the verified one when we
-// have an unambiguous one" — the secure default for create-style routes.
+//
+// ⚠ BANNED, AND ITS DOCSTRING USED TO SAY THE OPPOSITE: "Handler convenience for 'override a
+// client-supplied workspace with the verified one when we have an unambiguous one' — the secure
+// default for create-style routes." It is the reverse of secure. `if ws := WorkspaceOrEmpty(ctx);
+// ws != "" { in.WorkspaceID = ws }` is a SILENT NO-OP for every multi-workspace member, so the
+// override that block exists to perform never happens and the request BODY names the tenant.
+// docs-no-ambiguous-actor-helpers rejects every call. Zero callers in the tree.
+//
+// ⚠ AND THAT IS TRUE OF ALL FOUR: measured at 11c234b, no file outside this one calls
+// SingleWorkspace, SingleMemberID, WorkspaceOrEmpty or ActorOrEmpty — every other occurrence in
+// the repository is a comment, a test's comment, or the semgrep fixture's deliberate violation —
+// and the two roots are called only from the two wrappers, which are called from nothing. So the
+// set is reachable from no shipped code path. Whether it should be DELETED rather than banned at
+// the call site is left as a decision: removing exported API is wider than the guard blindness
+// this merge repairs, and the fixture cases that hold the rule open are written against these
+// names.
 func WorkspaceOrEmpty(ctx context.Context) string {
 	ws, _ := SingleWorkspace(ctx)
 	return ws
 }
 
-// ActorOrEmpty returns the caller's single member id, or "" if none/ambiguous — the verified
-// actor that replaces the spoofable X-Member-Id in attribution.
+// ActorOrEmpty returns the caller's single member id, or "" if none/ambiguous.
+//
+// ⚠ BANNED, same rule, and its docstring used to call it "the verified actor that replaces the
+// spoofable X-Member-Id in attribution" — which is what made it dangerous to read. For a
+// multi-workspace member it returns "", and the handlers that fell back to the body when it did
+// were forging identity for exactly those callers: internal/comment (a two-workspace member
+// posted a comment authored as anyone, and Store.Delete gates on "only the author can delete")
+// and internal/pagelock (the same member unlocked another member's lock by naming them). Both
+// records are in those packages' own comments. Zero callers in the tree.
 func ActorOrEmpty(ctx context.Context) string {
 	m, _ := SingleMemberID(ctx)
 	return m

@@ -121,20 +121,42 @@ rules:
       # rejects a non-member.
       - pattern-not-inside: authz.AuthorizeWorkspace(..., $IN.$FIELD, ...)
 
-  # ── D. The ROOT primitive itself. The shape rules above are approximations; this one is
-  #       exact, and it is the reason the class existed at all. Every call site has been
-  #       migrated, so any NEW use is a regression.
+  # ── D. The ROOT primitives. The shape rules above are approximations; this one is exact,
+  #       and it is the reason the class existed at all. Every call site has been migrated,
+  #       so any NEW use is a regression.
+  #
+  # ⚠ THIS RULE WAS NAMED FOR THE ROOTS AND MATCHED ONLY THE TWO WRAPPERS. Until the last two
+  # patterns below were added it bound `authz.ActorOrEmpty` / `authz.WorkspaceOrEmpty` and
+  # NOT `authz.SingleMemberID` / `authz.SingleWorkspace` — the two its own message names as
+  # the thing that "created this whole bug class", both exported from internal/authz, both
+  # one `v, _ :=` away from being the wrapper. That is not a theoretical gap: MEASURED at
+  # 11c234b, changelog.Create rewritten to attribute created_by from
+  # `actor, _ := authz.SingleMemberID(r.Context())` — the defect this class exists for,
+  # with permission.WorkspaceFromContext left in place so rule A stays satisfied — passed
+  # `gofmt -l`, `go vet`, `semgrep --config .semgrep/ --error` (EXIT 0, ZERO findings) and
+  # `go test -race -count=1 ./...` on real Postgres (37 packages ok). The whole gauntlet
+  # green on the shape seven packages in this repository each shipped and each fixed.
+  #
+  # THE `ok` IS NOT A DEFENCE, WHICH IS WHY THE BAN IS OUTRIGHT RATHER THAN SHAPE-CONDITIONAL.
+  # Discarding it (`v, _ :=`) reproduces the wrapper exactly. Honouring it turns a legitimate
+  # multi-workspace member into a 403 on a route their membership entitles them to — a
+  # different defect, not a repair. There is no correct call: see the last sentence of the
+  # message. The fixture case `singleHelperOkHonoured` is what holds this open.
   - id: docs-no-ambiguous-actor-helpers
     languages: [go]
     severity: ERROR
     message: >
-      AMBIGUOUS ACTOR: authz.ActorOrEmpty / authz.WorkspaceOrEmpty delegate to SingleMemberID
-      / SingleWorkspace, which return "" for ANY caller whose membership count != 1 — not
-      just zero-membership callers, but every MULTI-WORKSPACE member. That is what created
-      this whole bug class: it made `if v := ActorOrEmpty(ctx); v != "" {...else body}`
-      fallbacks live (the body named the actor) and `if ws := WorkspaceOrEmpty(ctx); ws != ""
-      { in.WorkspaceID = ws }` overrides into silent no-ops (the body named the tenant), for
-      exactly those callers — while ALSO voiding their real per-member grants.
+      AMBIGUOUS ACTOR: authz.SingleMemberID / authz.SingleWorkspace — and their discard-the-ok
+      wrappers authz.ActorOrEmpty / authz.WorkspaceOrEmpty — return "" / ok=false for ANY
+      caller whose membership count != 1: not just zero-membership callers, but every
+      MULTI-WORKSPACE member. That is what created this whole bug class: it made
+      `if v := ActorOrEmpty(ctx); v != "" {...else body}` fallbacks live (the body named the
+      actor) and `if ws := WorkspaceOrEmpty(ctx); ws != "" { in.WorkspaceID = ws }` overrides
+      into silent no-ops (the body named the tenant), for exactly those callers — while ALSO
+      voiding their real per-member grants. Unpacking the root directly
+      (`actor, _ := authz.SingleMemberID(ctx)`) is the same defect with the wrapper inlined,
+      and checking the ok instead only trades silent misattribution for a 403 the caller's
+      membership does not deserve.
       Use instead:
         permission.ActorFromContext(ctx) / WorkspaceFromContext(ctx)  — on a route gated by
           RequireAccess: the caller's member id, and the workspace, resolved from the
@@ -148,6 +170,8 @@ rules:
       - pattern-either:
           - pattern: authz.ActorOrEmpty(...)
           - pattern: authz.WorkspaceOrEmpty(...)
+          - pattern: authz.SingleMemberID(...)
+          - pattern: authz.SingleWorkspace(...)
 
   # ── C. The INVERTED fallback: prefer the client's identity, consult the verified one only
   #       if the client omitted it. The most dangerous shape in the class, because it needs

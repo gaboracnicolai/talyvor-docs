@@ -146,6 +146,81 @@ func bareAmbiguousHelper(ctx context.Context) string {
 	return authz.WorkspaceOrEmpty(ctx)
 }
 
+// ─── D, THE ROOTS. The three cases below are the ones the rule could not see ─────────────────
+//
+// ⚠ THE HELPERS RULE IS NAMED FOR THE ROOT PRIMITIVES AND, UNTIL THESE CASES, MATCHED ONLY THE
+// TWO WRAPPERS. Its message has always said the defect IS SingleMemberID / SingleWorkspace
+// returning "" for every caller with != 1 memberships; its patterns bound ActorOrEmpty and
+// WorkspaceOrEmpty. Both roots are exported from internal/authz and both are one `v, _ :=` away
+// from being the wrapper, so the ban was a ban on the shorter spelling.
+//
+// This is not the file's own reasoning about signatures — it is what a real handler measured:
+// changelog.Create attributing created_by from `actor, _ := authz.SingleMemberID(r.Context())`,
+// with permission.WorkspaceFromContext left in place so rule A stayed satisfied, passed the whole
+// gauntlet — `semgrep --config .semgrep/ --error` EXIT 0 with ZERO findings, `go vet` clean,
+// 37 packages of `go test -race` green on real Postgres. Delete the two root patterns from the
+// rule and these three cases go quiet again, which is the state that measurement was taken in.
+
+// The actor half, ok DISCARDED — the wrapper written out by hand. Rule A cannot see it: this
+// handler consults an approved resolver for the WORKSPACE, which is all rule A's sanitizer asks.
+func rootActorOkDiscarded(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var in bodyIn
+	json.NewDecoder(r.Body).Decode(&in)
+	ws, _ := permission.WorkspaceFromContext(ctx)
+	// ruleid: docs-no-ambiguous-actor-helpers
+	actor, _ := authz.SingleMemberID(ctx)
+	in.WorkspaceID = ws
+	in.CreatedBy = actor
+	// ok: docs-no-body-supplied-authority
+	fixtureSt.Create(ctx, in)
+}
+
+// The tenancy half. Separate case because the two roots are separate patterns: deleting either
+// one must leave a red behind, and a single case would let one of them be dropped silently.
+func rootWorkspaceOkDiscarded(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var in bodyIn
+	json.NewDecoder(r.Body).Decode(&in)
+	actor, _ := permission.ActorFromContext(ctx)
+	// ruleid: docs-no-ambiguous-actor-helpers
+	ws, _ := authz.SingleWorkspace(ctx)
+	in.WorkspaceID = ws
+	in.CreatedBy = actor
+	// ruleid: docs-no-body-supplied-authority
+	fixtureSt.Create(ctx, in)
+}
+
+// ⚠ THE ok HONOURED, AND STILL A FINDING — the case that holds the ban open at its widest point.
+// It is the shape a careful author writes, and it is the shape a future narrowing would carve
+// out first ("surely checking the ok is fine"). It is not fine: a member of two workspaces gets
+// ok=false on a route their membership entitles them to, so the honest-looking version trades
+// silent misattribution for a 403 nobody earned. Without this case the rule could be narrowed to
+// the discard-the-ok idiom and every annotation in this file would still pass.
+func singleHelperOkHonoured(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	// ruleid: docs-no-ambiguous-actor-helpers
+	ws, ok := authz.SingleWorkspace(ctx)
+	if !ok {
+		w.WriteHeader(403)
+		return
+	}
+	_ = ws
+}
+
+// MUST STAY SILENT, and it is not the same shape as the correct handlers further down: this one
+// names a workspace and an actor through authz alone, with no permission.* resolver anywhere. It
+// is the reference for a workspace-level route, and it is what stops "the rule reds on anything
+// that mentions authz" from being an explanation for the three findings above.
+func workspaceLevelRouteAuthorizesInstead(ctx context.Context, claimed string) string {
+	// ok: docs-no-ambiguous-actor-helpers
+	m, ok := authz.AuthorizeWorkspace(ctx, claimed)
+	if !ok {
+		return ""
+	}
+	return m.MemberID
+}
+
 // ─── C'. The inverted fallback, two-value form ──────────────────────────────────────────────
 //
 // The same defect against the resolvers the rule messages actually recommend. Go forces the
