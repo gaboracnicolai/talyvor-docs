@@ -56,9 +56,7 @@ func (s *Store) Create(ctx context.Context, b model.Block) (*model.Block, error)
 	if b.PageID == "" || b.Type == "" {
 		return nil, errors.New("block: page_id and type required")
 	}
-	if b.Content == "" {
-		b.Content = "{}"
-	}
+	b.Content = floorContent(b.Content)
 	// A BLOCK'S PARENT IS A BLOCK ON THE SAME PAGE, and until this predicate existed nothing said
 	// so. The FK in 0002_pages.sql points at blocks(id) with no page and no workspace column in
 	// sight, and the handler sets PageID from the URL but takes ParentID off the decoded body — so
@@ -87,6 +85,30 @@ func (s *Store) Create(ctx context.Context, b model.Block) (*model.Block, error)
 		return nil, ErrParentNotOnPage
 	}
 	return out, err
+}
+
+// emptyDoc is the canonical "this block has no content" ProseMirror value — the same constant
+// page.Store carries, and the value `blocks.content` is declared `NOT NULL DEFAULT` in
+// migrations/0002_pages.sql.
+const emptyDoc = "{}"
+
+// floorContent raises an EMPTY body to emptyDoc, and touches nothing else.
+//
+// ⚠ IT IS THE SECOND HALF OF THE PARTIAL-UPDATE MERGE, which fixed the IMPLICIT empty (an absent
+// JSON key arriving as Go's zero value and being written) and recorded the explicit one as a
+// separate finding. Create has floored since this file was written; Update passed the empty string
+// through its COALESCE, so `{"content":""}` was the one remaining way to put a non-JSON value in
+// the column.
+//
+// ⚠ THE FLOOR APPLIES TO A VALUE THAT WAS SENT, NEVER TO AN ABSENT ONE — Update's parameter is a
+// *string precisely so those two are distinguishable, and flooring the nil would re-destroy a
+// document on every drag-and-drop reorder. emptycontentfloor_realpg_test.go's
+// [ABSENT-KEY-UNTOUCHED] is the case that says so.
+func floorContent(v string) string {
+	if v == "" {
+		return emptyDoc
+	}
+	return v
 }
 
 // ErrParentNotOnPage is returned when parent_id names a block that is not on the page being
@@ -170,6 +192,13 @@ func (s *Store) DeleteInWorkspaces(ctx context.Context, id string, wsIDs []strin
 func (s *Store) Update(ctx context.Context, id string, content *string, position *float64) (*model.Block, error) {
 	if s.pool == nil {
 		return nil, errors.New("block: store has no pool")
+	}
+	// A SENT-but-empty body is raised to the column's floor; an ABSENT one (nil) stays nil and
+	// COALESCE keeps what is there. The two arms are the whole point of the pointer — see
+	// floorContent and handler.Update's note on the two destructive zeroes.
+	if content != nil {
+		floored := floorContent(*content)
+		content = &floored
 	}
 	// nosemgrep: docs-by-id-write-requires-workspace-scope -- GATED IN-METHOD: Update is a primitive reached only via UpdateInWorkspaces (above), which asserts the block's page ∈ the caller's verified workspaces first (blocks.page_id → pages.workspace_id = ANY) → ErrNotFound. Holds on its own, independent of the route enforcer.
 	return scan(s.pool.QueryRow(ctx,

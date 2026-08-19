@@ -89,6 +89,25 @@ func newStore(db pgxDB, track issueLookup) *Store {
 
 const cols = `id, page_id, workspace_id, version, title, summary, type, issue_ids, content, published_at, created_by, created_at, updated_at`
 
+// emptyDoc is the canonical "this entry has no body" ProseMirror value, and the value
+// `changelog_entries.content` is declared `NOT NULL DEFAULT` in migrations/0012_changelog.sql.
+const emptyDoc = "{}"
+
+// floorContent raises an EMPTY body to emptyDoc, and touches nothing else. The same three lines
+// page.Store and block.Store carry, for the same reason and against the same measurement: the
+// floor was applied by CreateEntry and not by UpdateEntry, so PATCH {"content":""} wrote the empty
+// string into a column the schema says holds a JSON document.
+//
+// ⚠ APPLIED ONLY TO A KEY THAT WAS SENT. UpdateEntry is allow-list-driven over the caller's map,
+// so an omitted key never reaches the SET list; flooring outside that loop would empty an entry on
+// every title-only edit. emptycontentfloor_realpg_test.go's [ABSENT-KEY-UNTOUCHED] holds it.
+func floorContent(v string) string {
+	if v == "" {
+		return emptyDoc
+	}
+	return v
+}
+
 func scan(s interface{ Scan(...any) error }) (*ChangelogEntry, error) {
 	var e ChangelogEntry
 	if err := s.Scan(
@@ -139,9 +158,7 @@ func (s *Store) CreateEntry(ctx context.Context, e ChangelogEntry) (*ChangelogEn
 	if e.IssueIDs == nil {
 		e.IssueIDs = []string{}
 	}
-	if e.Content == "" {
-		e.Content = "{}"
-	}
+	e.Content = floorContent(e.Content)
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO changelog_entries
         (page_id, workspace_id, version, title, summary, type, issue_ids, content, created_by)
@@ -208,6 +225,14 @@ func (s *Store) UpdateEntry(ctx context.Context, id, pageID string, updates map[
 	for k, v := range updates {
 		if !allowed[k] {
 			continue
+		}
+		// The column's floor, applied to a value that WAS sent. A key the client omitted never
+		// enters this loop, so "empty this entry" and "leave this entry alone" stay different
+		// requests. See floorContent.
+		if k == "content" {
+			if str, isStr := v.(string); isStr {
+				v = floorContent(str)
+			}
 		}
 		setParts = append(setParts, fmt.Sprintf("%s = $%d", k, idx))
 		args = append(args, v)
