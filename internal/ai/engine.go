@@ -17,8 +17,26 @@ import (
 
 // Models. Cheap haiku for transforms; sonnet for the Q&A surface,
 // which needs to reason over multiple page contexts.
+//
+// ⚠⚠ modelFast WAS "claude-haiku-4-6" AND THERE IS NO HAIKU 4.6 AT ANY VERSION. Seven of this
+// service's nine AI operations — write, summarize, grammar, shorter, longer, translate,
+// suggest-title — named a model that does not exist, so every one of them was a 404
+// not_found_error from Anthropic in any deployment with a real Lens behind it. Only Ask
+// (modelSmart) and the embedding path named a real model.
+//
+// ⚠ LENS DOES NOT CATCH THIS FOR US, AND ITS OWN SOURCE SAYS WHY. talyvor-lens removed the same
+// literal from its COST-ROUTING CATALOG after it "404'd a live request"
+// (internal/catalog/verified_models_test.go, pinning a GET /v1/models capture;
+// internal/catalog/seed.go; internal/router/router.go's cheap tier now names claude-haiku-4-5,
+// "the real cheapest Anthropic model"). That guard covers models LENS selects. A model id in the
+// REQUEST BODY skips it: the proxy prices an unknown model on a derived fallback, alerts, and
+// passes it upstream — so the provider is what answers.
+//
+// claude-haiku-4-5 is the id Lens's router replaced the identical phantom with, and it is in the
+// pinned capture. modelexistence_test.go is the census that keeps every model literal in this
+// repository answerable to that capture.
 const (
-	modelFast   = "claude-haiku-4-6"
+	modelFast   = "claude-haiku-4-5"
 	modelSmart  = "claude-sonnet-4-6"
 	defaultLang = "English"
 )

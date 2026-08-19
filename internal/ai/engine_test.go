@@ -77,7 +77,12 @@ func TestWriteWithAI_ReturnsGeneratedText(t *testing.T) {
 		t.Fatalf("expected feature docs-ai-write, got %q", srv.lastFeature)
 	}
 	// Body should pin the haiku model + ship the user-supplied context.
-	if srv.lastBody["model"] != "claude-haiku-4-6" {
+	//
+	// ⚠ THIS LINE HELD "claude-haiku-4-6" AND WAS GREEN, WHICH IS THE WHOLE POINT: `srv` is a fake
+	// Lens that echoes whatever model it is handed, so asserting the constant against itself says
+	// the request carried SOME id and nothing about whether that id names a model. No Haiku 4.6
+	// exists; the assertion pinned a 404. modelexistence_test.go is the check this one cannot be.
+	if srv.lastBody["model"] != "claude-haiku-4-5" {
 		t.Fatalf("want haiku, got %v", srv.lastBody["model"])
 	}
 	msgs, _ := srv.lastBody["messages"].([]any)

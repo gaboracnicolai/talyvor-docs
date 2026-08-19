@@ -65,7 +65,7 @@ func TestComplete_CallsAnthropicProxyPath(t *testing.T) {
 	defer srv.Close()
 	c := meteredFakeClient(srv.URL)
 
-	out, err := c.Complete(context.Background(), "ws-1", "Hello", "You are helpful", "claude-haiku-4-6")
+	out, err := c.Complete(context.Background(), "ws-1", "Hello", "You are helpful", "claude-haiku-4-5")
 	if err != nil {
 		t.Fatalf("complete: %v", err)
 	}
@@ -116,13 +116,13 @@ func TestComplete_SendsAnthropicMessagesBody(t *testing.T) {
 	defer srv.Close()
 	c := meteredFakeClient(srv.URL)
 
-	_, _ = c.Complete(context.Background(), "ws-1", "Write something", "Be concise", "claude-haiku-4-6")
+	_, _ = c.Complete(context.Background(), "ws-1", "Write something", "Be concise", "claude-haiku-4-5")
 
 	var body map[string]any
 	if err := json.Unmarshal(srv.lastBody, &body); err != nil {
 		t.Fatalf("body not json: %v\n%s", err, srv.lastBody)
 	}
-	if body["model"] != "claude-haiku-4-6" {
+	if body["model"] != "claude-haiku-4-5" {
 		t.Fatalf("wrong model: %v", body["model"])
 	}
 	if body["system"] != "Be concise" {
@@ -142,7 +142,7 @@ func TestComplete_ReturnsErrorWhenLensDown(t *testing.T) {
 	c := New("http://127.0.0.1:1", "k1").WithTokenProvider(prov)
 	c.httpClient.Timeout = 200 * time.Millisecond
 
-	_, err := c.Complete(context.Background(), "ws-1", "x", "y", "claude-haiku-4-6")
+	_, err := c.Complete(context.Background(), "ws-1", "x", "y", "claude-haiku-4-5")
 	if err == nil {
 		t.Fatal("expected error from dead Lens, got nil")
 	}
@@ -156,7 +156,7 @@ func TestComplete_ReturnsErrorOn5xx(t *testing.T) {
 	defer srv.Close()
 	c := meteredFakeClient(srv.URL)
 
-	_, err := c.Complete(context.Background(), "ws-1", "x", "y", "claude-haiku-4-6")
+	_, err := c.Complete(context.Background(), "ws-1", "x", "y", "claude-haiku-4-5")
 	if err == nil {
 		t.Fatal("expected error on 500, got nil")
 	}
@@ -179,7 +179,7 @@ func TestComplete_FeatureHeaderOverridable(t *testing.T) {
 	defer srv.Close()
 	c := meteredFakeClient(srv.URL)
 
-	_, _ = c.CompleteWithFeature(context.Background(), "ws-1", "Hello", "sys", "claude-haiku-4-6", "docs-ai-summarize")
+	_, _ = c.CompleteWithFeature(context.Background(), "ws-1", "Hello", "sys", "claude-haiku-4-5", "docs-ai-summarize")
 	if got := srv.lastHeaders.Get("X-Talyvor-Feature"); got != "docs-ai-summarize" {
 		t.Fatalf("want docs-ai-summarize feature, got %q", got)
 	}
@@ -193,7 +193,7 @@ func TestComplete_HandlesEmptyContent(t *testing.T) {
 	defer srv.Close()
 	c := meteredFakeClient(srv.URL)
 
-	out, err := c.Complete(context.Background(), "ws-1", "x", "y", "claude-haiku-4-6")
+	out, err := c.Complete(context.Background(), "ws-1", "x", "y", "claude-haiku-4-5")
 	if err != nil {
 		t.Fatalf("empty content: %v", err)
 	}
