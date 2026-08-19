@@ -373,9 +373,12 @@ func (s *Store) Delete(ctx context.Context, id string, wsIDs []string) error {
 	if s.pool == nil {
 		return errors.New("templatelib: no pool")
 	}
-	// Scope by the caller's VERIFIED workspace SET, never a raw path param:
-	// a template in a workspace the caller doesn't belong to is invisible
-	// (0 rows affected → ErrNotFound → 404), never deleted cross-tenant.
+	// wsIDs is an AUTHORIZED scope, never a raw path param: the handler runs
+	// {wsID} through authz.AuthorizeWorkspace (handler.go#scopeFor) before it
+	// arrives here. A template outside that scope is invisible (0 rows affected
+	// → ErrNotFound → 404), never deleted. It used to be the caller's whole
+	// membership SET, which refused the stranger but not the second workspace
+	// the same caller belonged to — see wsidscope_realpg_test.go.
 	tag, err := s.pool.Exec(ctx,
 		`DELETE FROM library_templates WHERE id = $1 AND workspace_id = ANY($2)`,
 		id, wsIDs,
