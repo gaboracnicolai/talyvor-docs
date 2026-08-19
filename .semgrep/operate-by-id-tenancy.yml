@@ -97,10 +97,15 @@ rules:
     # that introduces it — while any NEW unauthorized read is flagged by default, which is
     # the property that failed here.
     #
-    # ⚠ THAT LAST SENTENCE WAS TRUE ONLY OF A LITERAL. `pattern: chi.URLParam($R, "wsID")`
-    # matches a STRING; a read whose param NAME is not one is not flagged, and the deny-list
-    # then has nothing to deny. MEASURED, both directions, because the boundary is not where
-    # it looks:
+    # ⚠ THAT LAST SENTENCE WAS TRUE ONLY OF *ONE* LITERAL, AND THE SENTENCE BELOW USED TO SAY
+    # "a read whose param NAME is not a literal is not flagged", WHICH UNDERSTATED IT BY A
+    # WHOLE CLASS. This pattern matches ONE STRING — `"wsID"`. A read whose param name is not
+    # a literal is not flagged; NEITHER IS A READ WHOSE NAME IS A DIFFERENT LITERAL, and for
+    # years the rule below excluded every string literal on the written grounds that this rule
+    # owned them all. It owns one. `chi.URLParam(r, "workspaceID")` was invisible to BOTH.
+    # See the corrected note on docs-no-indirect-url-param-scope; the fixture's
+    # aliasWorkspaceRead/tenantWorkspaceRead are the red that measured it at d34e01c.
+    # MEASURED, both directions, because the boundary is not where it looks:
     #   · `const wsParam = "wsID"; chi.URLParam(r, wsParam)`  IS flagged — semgrep constant-
     #     propagates within a file, so a named constant is not an escape.
     #   · `func f(param string) { chi.URLParam(r, param) }`   is NOT flagged — propagation
@@ -112,28 +117,80 @@ rules:
     # docs-no-indirect-url-param-scope below closes it; see .semgrep/operate-by-id-tenancy.go
     # for the fixture that fails if either half regresses.
 
-  # ── The literal-only blind spot of the rule above, closed. A path param read through a name
-  #    this rule cannot resolve is not automatically a defect — it is a read NOBODY HAS
-  #    CLASSIFIED. Every one of the four in the tree at authoring time is safe, and each now
-  #    says why at the line, which is the same deny-list discipline the sibling rule uses.
+  # ── The blind spot of the rule above, closed — properly this time. A path param read whose name
+  #    this rule set cannot place is not automatically a defect: it is a read NOBODY HAS
+  #    CLASSIFIED. Each of the four in the tree says why at the line, which is the same deny-list
+  #    discipline the sibling rule uses.
+  #
+  # ⚠ WHAT THIS RULE USED TO SAY, AND WHY IT WAS THE SAME MISTAKE ONE LEVEL DOWN. It read
+  #   `pattern-not: chi.URLParam($R, "...")` — EXCLUDE EVERY STRING LITERAL — justified at the
+  #   line by "Every literal read is the sibling rule's business, INCLUDING \"wsID\"". The
+  #   sibling's business is EXACTLY ONE LITERAL. So a workspace path param spelled any other
+  #   literal way — {workspaceID}, {workspace_id}, {tenantID} — was invisible to BOTH rules BY
+  #   CONSTRUCTION, and the deny-list of inline suppressions had nothing to deny. That is the
+  #   `paths:` allow-list this file was rewritten to kill, wearing a different hat: a false
+  #   assurance printed beside a gap, and the assurance is the part a reviewer trusts.
+  #   MEASURED red at d34e01c on the CI-pinned semgrep 1.165.0 before this was changed: the
+  #   fixture's aliasWorkspaceRead ("workspaceID") and tenantWorkspaceRead ("tenantID") produced
+  #   NO FINDING FROM ANY OF THE FIVE RULES.
+  #
+  # ⚠ IT WAS LATENT, NOT LIVE, AND SAY SO RATHER THAN IMPLY A SAVE. Re-censused at d34e01c over
+  #   non-test internal/ + cmd/: the tree reads 16 distinct URL-param literals — pageID (52),
+  #   wsID (19), id (11), dbID (9), spaceID (8), version (3), templateID (2), rowID (2),
+  #   issueID (2), blockID (2), viewID, token, slug, requestID, permID, other — and every one of
+  #   the 15 non-wsID names was read and confirmed to be a resource id, a version number, a share
+  #   token or a slug. NOT ONE is a workspace under another name. No shipped read was hiding here.
+  #   What the shape cost was the NEXT one.
+  #
+  # ⚠ WHY THE EXEMPTION IS A CENSUS IN THE RULE AND NOT ~100 INLINE SUPPRESSIONS. Dropping the
+  #   blanket exclusion to `"wsID"` alone was the other candidate fix and it is worse: it makes
+  #   every one of the 92 non-workspace literal reads an unclassified finding needing a line-level
+  #   suppression that says nothing — which is how a class guard becomes noise and then becomes
+  #   ignored. The list below is the classification, made once, from a measurement. Its guarantee
+  #   is narrow and stated: A NAME OUTSIDE THIS SET IS FLAGGED. It does not know what a name
+  #   MEANS — someone could add "workspaceID" to it — but that is a rule diff with a written
+  #   reason, reviewed, and not the silence it replaces.
+  #
+  # ⚠ AND THE LIST IS MEASURED RATHER THAN REMEMBERED: internal/paramcensus asserts, in BOTH
+  #   directions, that this regex's alternatives are exactly the non-wsID literals the tree
+  #   actually reads. A dead exemption (a name that leaves the tree but stays exempt here, ready
+  #   to be re-used for something else) fails there. That is the failure mode a remembered list
+  #   has and a `paths:` allow-list had.
   - id: docs-no-indirect-url-param-scope
     languages: [go]
     severity: ERROR
     message: >
-      SEC-4 L2 (indirect param name): this reads a chi path param whose NAME is not a literal
-      here, so docs-no-url-param-workspace-scope — which matches chi.URLParam($R, "wsID") —
-      cannot tell whether this is the workspace. Constant propagation covers `const p = "wsID"`;
-      it does NOT cross a function boundary, so a name arriving as an ARGUMENT reads a param the
-      class guard never sees. That is the deceptive shape with one more indirection: the caller
-      supplies the name, so the call site alone cannot show what was read. If the value can be
-      the workspace, authorize it (authz.AuthorizeWorkspace) or scope by authz.WorkspaceIDs(ctx)
-      before it reaches a store; if it is a resource id resolved elsewhere, say so in an inline
+      SEC-4 L2 (unclassified param name): this reads a chi path param that NO RULE HERE CAN PLACE —
+      either its NAME is not a literal at this site, or it is a literal nobody has classified.
+      docs-no-url-param-workspace-scope matches exactly one string, chi.URLParam($R, "wsID"), and
+      the census of names measured NOT to be a workspace is in this rule's pattern-not; anything
+      else could be the workspace. Constant propagation covers `const p = "wsID"`; it does NOT
+      cross a function boundary, so a name arriving as an ARGUMENT reads a param the class guard
+      never sees, and a NEW literal spelling ({workspaceID}, {tenantID}) is a workspace the sibling
+      was never told about. If the value can be the workspace, authorize it
+      (authz.AuthorizeWorkspace) or scope by authz.WorkspaceIDs(ctx) before it reaches a store. If
+      it is a resource id resolved elsewhere, either add it to this rule's census (and to
+      internal/paramcensus, which asserts the two agree) or say so in an inline
       `// nosemgrep: docs-no-indirect-url-param-scope -- <what this name is, and who scopes it>`.
     patterns:
       - pattern: chi.URLParam($R, $P)
-      # Every literal read is the sibling rule's business, INCLUDING "wsID" — so a line does
-      # not need two suppressions, and this rule's findings are exactly the unclassified set.
-      - pattern-not: chi.URLParam($R, "...")
+      # "wsID" is the sibling rule's ONE literal — excluded here so no line needs two
+      # suppressions, and so the two rules partition the reads instead of overlapping.
+      - pattern-not: chi.URLParam($R, "wsID")
+      # ── THE CENSUS OF NAMES MEASURED NOT TO BE A WORKSPACE (d34e01c). Everything else — a name
+      #    arriving as an argument, or a literal nobody has classified — is a finding.
+      #
+      # NOTE, MEASURED rather than assumed, because it is the way this clause silently does
+      # nothing: a metavariable bound to a string literal carries its QUOTES in the text
+      # metavariable-regex sees. `^pageID$` matches NOTHING here; `^"pageID"$` matches. Probed on
+      # the CI-pinned semgrep 1.165.0 with both anchorings against one real read — same family as
+      # the leading-backtick note at the head of this file.
+      - pattern-not:
+          patterns:
+            - pattern: chi.URLParam($R, $P)
+            - metavariable-regex:
+                metavariable: $P
+                regex: ^"(pageID|id|dbID|spaceID|version|templateID|rowID|issueID|blockID|viewID|token|slug|requestID|permID|other)"$
 
   - id: docs-by-id-write-requires-workspace-scope-sprintf
     languages: [go]

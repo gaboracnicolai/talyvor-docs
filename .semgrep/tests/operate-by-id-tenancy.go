@@ -76,6 +76,26 @@ func literalResourceRead(r *http.Request) string {
 	return chi.URLParam(r, "pageID")
 }
 
+// ⚠ THE WORKSPACE UNDER ANOTHER NAME — the case that fell between the two rules, and the reason
+// this fixture grew. The sibling matches EXACTLY ONE literal, `chi.URLParam($R, "wsID")`; the
+// indirect rule excluded EVERY string literal, justified in-file by "Every literal read is the
+// sibling rule's business, INCLUDING \"wsID\"". The sibling's business is one literal, so a
+// workspace path param spelled any other literal way was invisible to BOTH by construction and
+// the deny-list of inline suppressions had nothing to deny. MEASURED red at d34e01c: this
+// annotation failed the fixture run because NEITHER rule produced a finding here.
+func aliasWorkspaceRead(r *http.Request) string {
+	// ruleid: docs-no-indirect-url-param-scope
+	return chi.URLParam(r, "workspaceID")
+}
+
+// The same hole one name further out. `workspaceID` alone would let the fix be a second hard-coded
+// literal — this asserts the property is "a name NOBODY HAS CLASSIFIED is flagged", not "these two
+// spellings are flagged".
+func tenantWorkspaceRead(r *http.Request) string {
+	// ruleid: docs-no-indirect-url-param-scope
+	return chi.URLParam(r, "tenantID")
+}
+
 func byIDWriteUnscoped(ctx context.Context, p pool, id string) error {
 	// ruleid: docs-by-id-write-requires-workspace-scope
 	return p.Exec(ctx, `UPDATE pages SET title = $2 WHERE id = $1`, id, "t")
