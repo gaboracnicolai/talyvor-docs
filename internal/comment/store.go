@@ -156,7 +156,7 @@ func (s *Store) Unresolve(ctx context.Context, commentID string) error {
 	if s.pool == nil {
 		return errors.New("comment: no pool")
 	}
-	// nosemgrep: docs-by-id-write-requires-workspace-scope -- Unresolve is a primitive reached only via UnresolveInWorkspaces (store.go), which calls assertInWorkspaces first (join on p.workspace_id = ANY($2)).
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- Unresolve is a primitive reached only via UnresolveInWorkspaces (store.go), which calls assertInPage first (ties {id} → the authorized {pageID} → p.workspace_id = ANY($wsIDs)).
 	_, err := s.pool.Exec(ctx,
 		`UPDATE page_comments
         SET resolved = false, resolved_by = NULL, resolved_at = NULL, updated_at = NOW()
@@ -314,7 +314,7 @@ func (s *Store) Delete(ctx context.Context, commentID, requesterID string) error
 	if author != requesterID {
 		return errors.New("comment: only the author can delete")
 	}
-	// nosemgrep: docs-by-id-write-requires-workspace-scope -- Delete is a primitive reached only via DeleteInWorkspaces (store.go), which calls assertInWorkspaces first (join on p.workspace_id = ANY($2)); the author check above is the second gate.
+	// nosemgrep: docs-by-id-write-requires-workspace-scope -- Delete is a primitive reached only via DeleteInWorkspaces (store.go), which calls assertInPage first (ties {id} → the authorized {pageID} → p.workspace_id = ANY($wsIDs)); the author check above is the second gate.
 	_, err := s.pool.Exec(ctx, `DELETE FROM page_comments WHERE id = $1`, commentID)
 	return err
 }
@@ -329,7 +329,16 @@ func (s *Store) Delete(ctx context.Context, commentID, requesterID string) error
 // ErrNotFound signals a by-id op resolved to no comment on a page in the caller's workspaces.
 var ErrNotFound = errors.New("comment: not found in an accessible workspace")
 
-// assertInWorkspaces returns ErrNotFound unless commentID's page lives in one of wsIDs.
+// THE OLD GATE'S NAME LIVED ON HERE FOR A MONTH, AND TWO SUPPRESSIONS COPIED IT. The line that
+// used to head this comment read "assertInWorkspaces returns ErrNotFound unless commentID's page
+// lives in one of wsIDs" — true until 7583d2a (#24) deleted assertInWorkspaces from this package
+// and pointed all four call sites at assertInPage, updating neither that summary nor the by-id
+// suppressions on Unresolve and Delete, which f238b90 (#22) had written correctly two days
+// earlier. a126eb6 (#33) then added Resolve's suppression naming assertInPage, so this file
+// carried both spellings side by side, three functions apart. 160 commits landed on main after
+// the rename and 2 of them touched this file: a claim about the call graph goes false with no
+// commit near it, which is why internal/suppressionguard now checks these rather than a reader.
+//
 // assertInPage asserts that commentID belongs to pageID AND that pageID lives in one of the
 // caller's verified workspaces. BOTH halves matter, and only the second one used to exist.
 //

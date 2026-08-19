@@ -139,6 +139,36 @@ func TestSec_Comment_CannotActAcrossPagesViaAuthorizedPageID(t *testing.T) {
 		t.Errorf("Mallory REPLIED into a foreign page's thread via an authorized {pageID} (%d)", rr.Code)
 	}
 
+	// (e) AND UNRESOLVE, WHICH THIS TEST DID NOT DRIVE UNTIL NOW. Four wrappers take the
+	// assertInPage gate — Reply, Resolve, Unresolve, Delete — and (a)-(c) covered three. MEASURED,
+	// not assumed: deleting the assertInPage call out of UnresolveInWorkspaces left the ENTIRE
+	// repo green — 37 packages, the full real-Postgres suite, this file included — while
+	// DELETE /spaces/{spaceID}/pages/{pageID}/comments/{id}/resolve reopened exactly the
+	// cross-page reach the three cases above exist to refuse. A class test that names its class
+	// and drives three quarters of it reports on the quarter it never touched.
+	var secretResolved string
+	if err := d.Pool.QueryRow(ctx,
+		`INSERT INTO page_comments (page_id, author_id, content, thread_id, resolved, resolved_by, resolved_at)
+		 VALUES ($1, $2, 'settled salary thread', gen_random_uuid()::text, true, $2, NOW()) RETURNING id`,
+		privatePage, bob).Scan(&secretResolved); err != nil {
+		t.Fatalf("seed a RESOLVED comment on the private page: %v", err)
+	}
+	rr = do(cmtReq(http.MethodDelete,
+		"/v1/spaces/"+publicSpace+"/pages/"+publicPage+"/comments/"+secretResolved+"/resolve",
+		"mallory@corp.com", `{}`))
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("UNRESOLVE of a FOREIGN page's comment via an authorized {pageID} = %d, want 404. "+
+			"body=%s", rr.Code, rr.Body.String())
+	}
+	var stillResolved bool
+	if err := d.Pool.QueryRow(ctx, `SELECT resolved FROM page_comments WHERE id=$1`, secretResolved).Scan(&stillResolved); err != nil {
+		t.Fatal(err)
+	}
+	if !stillResolved {
+		t.Errorf("Mallory REOPENED a settled thread on a private page she cannot read, by " +
+			"authorizing against an unrelated public page")
+	}
+
 	// (d) SCOPE, NOT BREAKAGE: the legitimate same-page path must still work. A fix that
 	// simply denies everything would pass (a)-(c) while breaking comments outright.
 	var ownComment string
@@ -153,5 +183,13 @@ func TestSec_Comment_CannotActAcrossPagesViaAuthorizedPageID(t *testing.T) {
 		"mallory@corp.com", `{}`)); rr.Code != http.StatusOK {
 		t.Errorf("resolving a comment that genuinely belongs to the authorized page = %d, want 200 "+
 			"(the fix must tie {id} to {pageID}, not deny everything). body=%s", rr.Code, rr.Body.String())
+	}
+	// The same companion for (e). Without it, a gate that refuses EVERY unresolve satisfies (e)
+	// perfectly — "the row is still resolved" is also what a totally broken verb looks like.
+	if rr := do(cmtReq(http.MethodDelete,
+		"/v1/spaces/"+publicSpace+"/pages/"+publicPage+"/comments/"+ownComment+"/resolve",
+		"mallory@corp.com", `{}`)); rr.Code != http.StatusOK {
+		t.Errorf("unresolving a comment that genuinely belongs to the authorized page = %d, want 200. "+
+			"body=%s", rr.Code, rr.Body.String())
 	}
 }
