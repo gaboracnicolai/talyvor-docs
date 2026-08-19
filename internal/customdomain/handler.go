@@ -27,6 +27,35 @@ func contains(xs []string, v string) bool {
 	return false
 }
 
+// scopeFor authorizes the caller-supplied {wsID} path param against the verified membership set
+// and returns the ONE-workspace scope every store call on these routes must filter by.
+//
+// ⚠ WHY THE SET IS NOT THE SCOPE HERE, THOUGH IT IS EVERYWHERE ELSE IN DOCS. authz's package doc
+// says it "does NOT authorize a single path workspace" because "Docs's by-id routes are flat
+// (/v1/spaces/{spaceID}/pages/{pageID}), not workspace-in-path like Track". These four routes are
+// the exception that premise excludes — they ARE workspace-in-path. Handing them
+// authz.WorkspaceIDs made the {wsID} they were asked about decorative: a caller in workspaces A
+// and B was served, and could delete and DNS-verify, B's domains through A's URL. Create alone
+// had noticed (it authorized {wsID} inline before owning the new row); List, Verify and Delete
+// had not. Measured on real Postgres in wsidscope_realpg_test.go.
+//
+// FAIL-CLOSED: a caller with no memberships, an empty {wsID}, or a workspace the caller does not
+// belong to all return ok=false. Callers answer 404 rather than 403 — the no-existence-oracle
+// convention the rest of this package's by-id errors already follow (see ErrNotFound).
+//
+// ⚠ IT RETURNS THE ID AND THE SCOPE SEPARATELY, AND THAT IS NOT TIDINESS. The first cut returned
+// only the slice and Create read `ws[0]`. Control C5 (over-refusal: make the scope empty) did not
+// score a catch — it PANICKED on that index, so the mutation crashed the run instead of exercising
+// the guard, a void control rather than a caught one. An empty-but-ok scope is unreachable today,
+// but a signature that panics if it ever becomes reachable is a trap for the next hand.
+func scopeFor(r *http.Request) (wsID string, scope []string, ok bool) {
+	wsID = chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized here: contains(authz.WorkspaceIDs) rejects non-members before this id becomes a query scope
+	if !contains(authz.WorkspaceIDs(r.Context()), wsID) {
+		return "", nil, false
+	}
+	return wsID, []string{wsID}, true
+}
+
 // Handler covers two surfaces:
 //   - admin CRUD for custom domains (mounted under /v1)
 //   - the public read-only space view served by the DomainRouter
@@ -86,8 +115,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	// authorize it against the membership set before it becomes the
 	// new row's owner — otherwise the write lands in a foreign
 	// workspace. Unauthorized → 404 (no existence oracle).
-	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized write-target: contains(authz.WorkspaceIDs) below rejects non-members before Create owns the new domain
-	if !contains(authz.WorkspaceIDs(r.Context()), wsID) {
+	wsID, _, ok := scopeFor(r)
+	if !ok {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -107,7 +136,12 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
-	out, err := h.store.GetByWorkspace(r.Context(), authz.WorkspaceIDs(r.Context()))
+	_, ws, ok := scopeFor(r)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	out, err := h.store.GetByWorkspace(r.Context(), ws)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -119,7 +153,12 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Verify(w http.ResponseWriter, r *http.Request) {
-	ok, err := h.store.Verify(r.Context(), chi.URLParam(r, "id"), authz.WorkspaceIDs(r.Context()))
+	_, ws, authorized := scopeFor(r)
+	if !authorized {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	ok, err := h.store.Verify(r.Context(), chi.URLParam(r, "id"), ws)
 	if errors.Is(err, ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
@@ -136,7 +175,12 @@ func (h *Handler) Verify(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
-	err := h.store.Delete(r.Context(), chi.URLParam(r, "id"), authz.WorkspaceIDs(r.Context()))
+	_, ws, ok := scopeFor(r)
+	if !ok {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	err := h.store.Delete(r.Context(), chi.URLParam(r, "id"), ws)
 	if errors.Is(err, ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not found")
 		return
