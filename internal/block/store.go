@@ -140,7 +140,7 @@ func (s *Store) assertInWorkspaces(ctx context.Context, blockID string, wsIDs []
 }
 
 // UpdateInWorkspaces updates a block only if its page lives in one of the caller's workspaces.
-func (s *Store) UpdateInWorkspaces(ctx context.Context, id, content string, position float64, wsIDs []string) (*model.Block, error) {
+func (s *Store) UpdateInWorkspaces(ctx context.Context, id string, content *string, position *float64, wsIDs []string) (*model.Block, error) {
 	if err := s.assertInWorkspaces(ctx, id, wsIDs); err != nil {
 		return nil, err
 	}
@@ -155,13 +155,28 @@ func (s *Store) DeleteInWorkspaces(ctx context.Context, id string, wsIDs []strin
 	return s.Delete(ctx, id)
 }
 
-func (s *Store) Update(ctx context.Context, id string, content string, position float64) (*model.Block, error) {
+// Update writes only the fields the caller NAMED. A nil argument means "not in this request" and
+// the column keeps its current value; that distinction is the whole point of the pointers, and it
+// cannot be expressed with values — see handler.Update for the two zero values that were being
+// written and what each one destroyed.
+//
+// COALESCE resolves it INSIDE the one statement rather than by reading the row first. A
+// SELECT-then-UPDATE would lose a concurrent edit made in the window between the two, and would
+// also make the "keep it" branch depend on a value this method had already stopped observing —
+// the same reasoning Create records for folding its parent-on-this-page check into the INSERT.
+//
+// The casts are load-bearing: pgx sends an untyped nil, and `COALESCE(NULL, content)` needs the
+// parameter's type to be known before Postgres will plan it.
+func (s *Store) Update(ctx context.Context, id string, content *string, position *float64) (*model.Block, error) {
 	if s.pool == nil {
 		return nil, errors.New("block: store has no pool")
 	}
 	// nosemgrep: docs-by-id-write-requires-workspace-scope -- GATED IN-METHOD: Update is a primitive reached only via UpdateInWorkspaces (above), which asserts the block's page ∈ the caller's verified workspaces first (blocks.page_id → pages.workspace_id = ANY) → ErrNotFound. Holds on its own, independent of the route enforcer.
 	return scan(s.pool.QueryRow(ctx,
-		`UPDATE blocks SET content = $1, position = $2, updated_at = NOW()
+		`UPDATE blocks
+        SET content  = COALESCE($1::text, content),
+            position = COALESCE($2::float8, position),
+            updated_at = NOW()
         WHERE id = $3 RETURNING `+columns,
 		content, position, id,
 	))

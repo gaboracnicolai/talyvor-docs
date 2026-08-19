@@ -37,7 +37,7 @@ func TestBlock_InWorkspaces_CrossTenant_GateHoldsWithoutEnforcer_RealPG(t *testi
 	}
 
 	// Cross-tenant [wsB] → ErrNotFound, and the block is untouched.
-	if _, err := store.UpdateInWorkspaces(ctx, blk.ID, `{"t":9}`, 2, []string{wsB}); !errors.Is(err, block.ErrNotFound) {
+	if _, err := store.UpdateInWorkspaces(ctx, blk.ID, ptr(`{"t":9}`), ptr(2.0), []string{wsB}); !errors.Is(err, block.ErrNotFound) {
 		t.Errorf("cross-tenant UpdateInWorkspaces = %v, want ErrNotFound", err)
 	}
 	if err := store.DeleteInWorkspaces(ctx, blk.ID, []string{wsB}); !errors.Is(err, block.ErrNotFound) {
@@ -48,7 +48,7 @@ func TestBlock_InWorkspaces_CrossTenant_GateHoldsWithoutEnforcer_RealPG(t *testi
 	}
 
 	// Owner [wsA] → succeeds (legit behavior unchanged).
-	if _, err := store.UpdateInWorkspaces(ctx, blk.ID, `{"t":1}`, 3, []string{wsA}); err != nil {
+	if _, err := store.UpdateInWorkspaces(ctx, blk.ID, ptr(`{"t":1}`), ptr(3.0), []string{wsA}); err != nil {
 		t.Fatalf("owner UpdateInWorkspaces: %v", err)
 	}
 	if err := store.DeleteInWorkspaces(ctx, blk.ID, []string{wsA}); err != nil {
@@ -58,3 +58,8 @@ func TestBlock_InWorkspaces_CrossTenant_GateHoldsWithoutEnforcer_RealPG(t *testi
 		t.Fatal("owner DeleteInWorkspaces did not delete")
 	}
 }
+
+// ptr is the "this field WAS named" helper for Update's partial-update arguments — nil means the
+// column is left alone (see block.Store.Update). Both call sites above name both fields, which is
+// what keeps this file about the workspace gate and nothing else.
+func ptr[T any](v T) *T { return &v }
