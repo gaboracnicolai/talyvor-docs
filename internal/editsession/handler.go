@@ -70,7 +70,16 @@ func actorFor(r *http.Request) string {
 func wsScope(r *http.Request) []string { return authz.WorkspaceIDs(r.Context()) }
 
 // respond maps a claim result to HTTP. A live foreign session is 423 Locked (so the UI can show
-// "<holder> is editing" and offer takeover); a cross-tenant/missing page is 404.
+// "<holder> is editing"); a cross-tenant/missing page is 404.
+//
+// ⚠ THIS COMMENT USED TO END "…and offer takeover", AND THAT HALF WAS FALSE IN A CHECKABLE WAY.
+// The takeover route is `Store.Takeover` → `claim`, the same call `Acquire` makes, so it returns
+// THIS SAME 423 for as long as the session is live: measured on real Postgres, both doors give
+// byte-identical bodies in that state and byte-identical successes once it expires
+// (takeoverparity_realpg_test.go). The SPA renders its Takeover button iff `heldByOther`, which is
+// false the moment the session stops being live — so the offer is on screen precisely while it
+// must fail, and gone once it would work. Whether takeover SHOULD steal a live session is a
+// product decision; the guards exist so it cannot be decided by accident.
 func (h *Handler) respondClaim(w http.ResponseWriter, sess *Session, err error) {
 	switch {
 	case errors.Is(err, ErrNotFound):

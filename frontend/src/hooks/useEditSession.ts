@@ -4,7 +4,17 @@ import { editSessionApi, type EditSession } from "~/api/editsession";
 
 // HEARTBEAT_MS keeps a held session alive. Well inside the backend's 30s TTL so a couple of
 // missed beats (tab throttling, a blip) don't drop the slot, but a closed/crashed editor
-// expires within ~TTL and the page becomes claimable via Takeover.
+// expires within ~TTL and the page becomes claimable.
+//
+// ⚠ IT DOES NOT BECOME CLAIMABLE "VIA TAKEOVER", WHICH IS WHAT THIS COMMENT USED TO SAY.
+// `EditingBanner` — the only thing that renders the Takeover button — returns null unless
+// `heldByOther`, and `sessionFlags` makes that false the moment `live` is false. So the button is
+// unmounted within one poll (`refetchInterval` below) of the session expiring, and the route it
+// calls refuses for exactly as long as the button is on screen: `Store.Takeover` is
+// `return s.claim(...)`, the same call `Acquire` makes, and `claim` never steals a LIVE foreign
+// slot. What actually reclaims the page is the ordinary auto-acquire below. Measured both sides —
+// internal/editsession/takeoverparity_realpg_test.go and EditingBanner.affordance.test.tsx.
+// Whether Takeover SHOULD steal a live session is a product decision, recorded there, not here.
 export const HEARTBEAT_MS = 10_000;
 
 export interface SessionFlags {
