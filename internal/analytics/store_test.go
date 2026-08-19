@@ -82,12 +82,13 @@ func TestGetReadStats_AggregatesViewsAndViewers(t *testing.T) {
 	store, pool := newMockStore(t)
 	now := time.Now().UTC()
 
-	// Aggregate query: total views, unique viewers, avg duration, last viewed.
+	// Aggregate query: the page's title (a scalar subquery on `pages`, not an aggregate of the
+	// viewed rows — see GetReadStats), then total views, unique viewers, avg duration, last viewed.
 	pool.ExpectQuery(`COUNT.*page_views.*page_id`).
 		WithArgs("pg-1", 30).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"total_views", "unique_viewers", "avg_duration_sec", "last_viewed_at",
-		}).AddRow(int(42), int(7), int(95), now))
+			"title", "total_views", "unique_viewers", "avg_duration_sec", "last_viewed_at",
+		}).AddRow("Runbook", int(42), int(7), int(95), now))
 
 	// Views by day.
 	pool.ExpectQuery(`DATE_TRUNC.*FROM page_views`).
@@ -108,6 +109,11 @@ func TestGetReadStats_AggregatesViewsAndViewers(t *testing.T) {
 	got, err := store.GetReadStats(context.Background(), "pg-1", 30)
 	if err != nil {
 		t.Fatalf("GetReadStats: %v", err)
+	}
+	if got.Title != "Runbook" {
+		t.Fatalf("title = %q, want %q — the column is selected and must reach the field; an "+
+			"unassigned bare string serialises as \"\", which reads as a document with no name",
+			got.Title, "Runbook")
 	}
 	if got.TotalViews != 42 {
 		t.Fatalf("total views = %d", got.TotalViews)

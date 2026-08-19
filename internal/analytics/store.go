@@ -229,6 +229,25 @@ func (s *Store) RecordView(ctx context.Context, view PageView) error {
 // days. Three queries (totals, day-buckets, top-viewers) keep each
 // SQL simple; combining them with CTEs hurt readability without
 // meaningful perf gain at our scale.
+//
+// ⚠ `Title` IS FILLED HERE, AND IT USED TO BE THE ONE FIELD OF THIS TYPE THAT NEITHER PRODUCER
+// AGREED ON. GetWorkspaceStats' ranked query selects `MAX(p.title)` into it; this method assigned
+// it nothing, so every response on GET /spaces/{spaceID}/pages/{pageID}/analytics — and every read
+// the MCP get_page_analytics tool takes from here — carried the zero value of a bare string. That
+// is not an omission: `""` is the claim that the document has no name, exactly as the untouched
+// `unique_viewers: 0` on the OTHER side of this comparison was the claim that nobody read it (see
+// the note on the ranked query, and rollupfigures_realpg_test.go). api/analytics.ts declares
+// `title: string` REQUIRED on the one ReadStats both routes return.
+//
+// ⚠ A SCALAR SUBQUERY, NOT A JOIN, AND THE NEVER-VIEWED PAGE IS WHY. The statement below
+// aggregates page_views with no GROUP BY, so it returns exactly one row even for a page with no
+// traffic — the readership screen's most important case. `JOIN pages` would leave that row's title
+// NULL, i.e. it would report a name only for documents that already have readers. The subquery
+// costs no extra round trip and no extra scan (`pages.id` is the primary key), and it yields SQL
+// NULL for a page id that does not exist rather than inventing a name for it. Read through
+// sql.NullString so "there is no such page" and "this page is titled the empty string" stay
+// distinguishable at the scan boundary; both land as `""` on the wire, which is the pre-existing
+// contract for a titleless page and is not widened here.
 func (s *Store) GetReadStats(ctx context.Context, pageID string, days int) (*ReadStats, error) {
 	if s.pool == nil {
 		return nil, nil
@@ -239,18 +258,23 @@ func (s *Store) GetReadStats(ctx context.Context, pageID string, days int) (*Rea
 	var out ReadStats
 	out.PageID = pageID
 
-	var lastViewed sql.NullTime
+	var (
+		lastViewed sql.NullTime
+		title      sql.NullString
+	)
 	if err := s.pool.QueryRow(ctx,
-		`SELECT COUNT(*)::int, COUNT(DISTINCT viewer_id)::int,
+		`SELECT (SELECT title FROM pages WHERE id = $1),
+                COUNT(*)::int, COUNT(DISTINCT viewer_id)::int,
                 COALESCE(AVG(duration_sec)::int, 0),
                 MAX(created_at)
         FROM page_views
         WHERE page_id = $1
           AND created_at > NOW() - INTERVAL '1 day' * $2`,
 		pageID, days,
-	).Scan(&out.TotalViews, &out.UniqueViewers, &out.AvgDurationSec, &lastViewed); err != nil {
+	).Scan(&title, &out.TotalViews, &out.UniqueViewers, &out.AvgDurationSec, &lastViewed); err != nil {
 		return nil, fmt.Errorf("analytics: totals: %w", err)
 	}
+	out.Title = title.String
 	if lastViewed.Valid {
 		t := lastViewed.Time
 		out.LastViewedAt = &t

@@ -90,8 +90,8 @@ func TestGetReadStats_ATruncatedDayStreamIsNotAChart(t *testing.T) {
 	pool.ExpectQuery(`COUNT.*page_views.*page_id`).
 		WithArgs("pg-1", 30).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"total_views", "unique_viewers", "avg_duration_sec", "last_viewed_at",
-		}).AddRow(int(42), int(7), int(95), now))
+			"title", "total_views", "unique_viewers", "avg_duration_sec", "last_viewed_at",
+		}).AddRow("Runbook", int(42), int(7), int(95), now))
 
 	pool.ExpectQuery(`DATE_TRUNC.*FROM page_views`).
 		WithArgs("pg-1", 30).
@@ -141,8 +141,8 @@ func TestGetReadStats_ATruncatedViewerStreamIsNotARoster(t *testing.T) {
 	pool.ExpectQuery(`COUNT.*page_views.*page_id`).
 		WithArgs("pg-1", 30).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"total_views", "unique_viewers", "avg_duration_sec", "last_viewed_at",
-		}).AddRow(int(42), int(7), int(95), now))
+			"title", "total_views", "unique_viewers", "avg_duration_sec", "last_viewed_at",
+		}).AddRow("Runbook", int(42), int(7), int(95), now))
 
 	// The day stream is WHOLE here, so this test cannot pass on the previous fix.
 	pool.ExpectQuery(`DATE_TRUNC.*FROM page_views`).
@@ -189,8 +189,8 @@ func TestGetReadStats_AWholeStreamStillAnswers(t *testing.T) {
 	pool.ExpectQuery(`COUNT.*page_views.*page_id`).
 		WithArgs("pg-1", 30).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"total_views", "unique_viewers", "avg_duration_sec", "last_viewed_at",
-		}).AddRow(int(42), int(7), int(95), now))
+			"title", "total_views", "unique_viewers", "avg_duration_sec", "last_viewed_at",
+		}).AddRow("Runbook", int(42), int(7), int(95), now))
 	pool.ExpectQuery(`DATE_TRUNC.*FROM page_views`).
 		WithArgs("pg-1", 30).
 		WillReturnRows(pgxmock.NewRows([]string{"date", "count"}).
@@ -244,8 +244,8 @@ func TestGetReadStats_TruncationDoesNotBorrowTheScanCheck(t *testing.T) {
 	pool.ExpectQuery(`COUNT.*page_views.*page_id`).
 		WithArgs("pg-1", 30).
 		WillReturnRows(pgxmock.NewRows([]string{
-			"total_views", "unique_viewers", "avg_duration_sec", "last_viewed_at",
-		}).AddRow(int(42), int(7), int(95), now))
+			"title", "total_views", "unique_viewers", "avg_duration_sec", "last_viewed_at",
+		}).AddRow("Runbook", int(42), int(7), int(95), now))
 	pool.ExpectQuery(`DATE_TRUNC.*FROM page_views`).
 		WithArgs("pg-1", 30).
 		WillReturnRows(pgxmock.NewRows([]string{"date", "count"}).
