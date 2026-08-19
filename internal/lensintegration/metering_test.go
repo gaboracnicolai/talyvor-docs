@@ -110,7 +110,7 @@ func TestComplete_CarriesPerWorkspaceJWT_NotGlobalKey(t *testing.T) {
 	defer f.Close()
 	c := meteredClient(f.URL)
 
-	if _, err := c.Complete(context.Background(), "wsA", "hi", "sys", "claude-haiku-4-6"); err != nil {
+	if _, err := c.Complete(context.Background(), "wsA", "hi", "sys", "claude-haiku-4-5"); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 
@@ -134,7 +134,7 @@ func TestComplete_FailsClosedOnMintFailure(t *testing.T) {
 	defer f.Close()
 	c := meteredClient(f.URL)
 
-	if _, err := c.Complete(context.Background(), "wsA", "hi", "sys", "claude-haiku-4-6"); err == nil {
+	if _, err := c.Complete(context.Background(), "wsA", "hi", "sys", "claude-haiku-4-5"); err == nil {
 		t.Fatal("Complete must error when the per-workspace token can't be minted (fail-closed)")
 	}
 	if _, dataAuth, _ := f.snapshot(); len(dataAuth) != 0 {
