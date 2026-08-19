@@ -34,6 +34,18 @@
 //	    not, the partition develops either a hole (nobody owns "wsID") or a double report, and
 //	    (1) and (2) would both still pass while it happened.
 //
+// ⚠ THE GUARD THAT WAS PROPOSED NEXT ON THIS THREAD AND MEASURED NOT WORTH BUILDING — recorded
+// here because this is where the next hand will look for it. The handover after #183 named a
+// census over the ROUTE TREE: assert that the only path param a workspace-scoped mount introduces
+// is "wsID", and catch a route that MOUNTS {pageID} while its handler READS "pageId" (chi.URLParam
+// returns "" and a store op runs on an empty id). Both halves were probed and both were already
+// held: the workspace-name half by #183 itself — an unclassified name is only dangerous once it is
+// READ, and at that moment the semgrep rule fires — and the mismatch half by the suite, measured on
+// a gated route (4 tests red across 3 packages, one of them routeguard's STRUCTURAL in-class route
+// set) and on an ungated public one. scripts/w31-mountread-probe-8v3r.py is that measurement, kept
+// runnable rather than written down: re-run it before building the census, because the ungated
+// shape rests on ONE behavioural test that is not about this class at all.
+//
 // WHAT IT DOES NOT CLAIM, stated so the comment cannot be overread. It does not know what a name
 // MEANS. Nothing here can tell that "tenantID" would be a workspace; someone could add it to the
 // census and this stays green. What it guarantees is narrower and still worth having: the exempt
