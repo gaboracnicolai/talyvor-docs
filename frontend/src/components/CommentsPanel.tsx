@@ -26,6 +26,19 @@ export function CommentsPanel({ spaceID, pageID }: PanelProps) {
   } = useComments(spaceID, pageID, tab === "resolved");
   const [draft, setDraft] = useState("");
 
+  // `include_resolved` is an INCLUDE flag, not an ONLY flag: comment.Store.ListByPage drops its
+  // `AND resolved = false` predicate when it is set and returns EVERY thread on the page. Asking
+  // for it from a two-value tab therefore got the resolved tab the OPEN threads as well, listed
+  // under a heading that promises one kind and beside a count (GetStats, which IS exclusive) that
+  // counted the other — so the panel contradicted its own label, and offered "Resolve" on threads
+  // it was presenting as resolved.
+  //
+  // Selected here rather than narrowed on the server: an `include_*` parameter that means "also
+  // include" is the ordinary reading of its name, and `resolved` is already on every row. The
+  // server's inclusive contract is pinned by TestListByPage_IncludeResolvedIsInclusiveNotExclusive
+  // _RealPG so this cannot be re-fixed one layer down.
+  const visible = tab === "resolved" ? threads.filter((t) => t.resolved) : threads;
+
   const open = stats?.open ?? 0;
   const resolved = stats?.resolved ?? 0;
 
@@ -81,14 +94,14 @@ export function CommentsPanel({ spaceID, pageID }: PanelProps) {
 
       {isLoading ? (
         <p className="text-muted">Loading…</p>
-      ) : threads.length === 0 ? (
+      ) : visible.length === 0 ? (
         <p className="flex items-center gap-1 text-muted">
           <MessageSquare size={11} />
           {tab === "open" ? "No open threads." : "No resolved threads."}
         </p>
       ) : (
         <div className="space-y-2">
-          {threads.map((t) => (
+          {visible.map((t) => (
             <CommentThread
               key={t.id}
               thread={t}
