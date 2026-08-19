@@ -1144,14 +1144,35 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 
 // Verify stamps last_verified_at + verified_by so the page drops off
 // the stale-pages list. Docs's "this is still accurate" attestation.
+//
+// ⚠⚠ IT MUST NOT TOUCH `updated_at`, AND IT USED TO — THE FIFTH COPY OF THE SEAM THE RecordView
+// BLOCK ABOVE DESCRIBES, and the only one where the write was not a side effect of copied code
+// but the whole act: verifying is the explicit claim that NOTHING CHANGED, so recording it as an
+// edit contradicts the thing being recorded. `PageView.tsx` renders `Last edited by
+// {page.updated_by} · {page.updated_at}` and this statement does not touch `updated_by`, so the
+// bump printed alice's name beside the instant bob clicked "Mark as verified" — an edit that
+// never happened, attributed to someone who was not there. Measured in
+// verify_editclock_realpg_test.go.
+//
+// ⚠ AND THE BUMP MADE THE DOCUMENTED FRESHNESS RULE UNREACHABLE. freshness/engine.go#buildReport
+// measures from the fresher of `updated_at` / `last_verified_at` — "that's the whole point of
+// Verify" — and this is `last_verified_at`'s ONLY production writer (it is not in
+// updatableFields and no migration defaults it). Setting both columns from one `NOW()`, which
+// Postgres evaluates once per transaction, made them exactly equal; `After` is strict, so that
+// branch could not be taken by any page the product could produce. Dropping the bump is what
+// makes the rule live rather than decorative.
+//
+// ⚠ THE STALE-LIST PROMISE IN THE FIRST LINE DOES NOT DEPEND ON THE BUMP: GetStalePages requires
+// BOTH clocks past the TTL, so a fresh last_verified_at alone takes the page off the list. That
+// the two mechanisms agreed on exactly that one question is why every existing assertion stayed
+// green either way, and it is pinned now.
 func (s *Store) Verify(ctx context.Context, pageID, verifierID string) error {
 	if s.pool == nil {
 		return errors.New("page: store has no pool")
 	}
 	// nosemgrep: docs-by-id-write-requires-workspace-scope -- Verify is a primitive reached only via VerifyInWorkspaces (store.go), which calls assertInWorkspaces(pageID, authz.WorkspaceIDs) first (join on p.workspace_id = ANY($2)) → a foreign pageID 404s before this runs.
 	_, err := s.pool.Exec(ctx,
-		`UPDATE pages SET last_verified_at = NOW(), verified_by = $1,
-            updated_at = NOW()
+		`UPDATE pages SET last_verified_at = NOW(), verified_by = $1
         WHERE id = $2`, verifierID, pageID,
 	)
 	return err
