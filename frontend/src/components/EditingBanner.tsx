@@ -10,8 +10,19 @@ interface EditingBannerProps {
 
 // EditingBanner is the full-width strip above the editor for the SINGLE-WRITER edit session
 // (distinct from LockBanner's manual lock). It renders only when someone ELSE holds a live
-// session — the current editor never needs to be told they're editing. It offers Takeover,
-// which the backend grants only once the holder's session has actually expired.
+// session — the current editor never needs to be told they're editing.
+//
+// ⚠ AND THAT IS EXACTLY THE STATE IN WHICH THE TAKEOVER BUTTON BELOW CANNOT SUCCEED. The backend
+// grants a takeover only once the holder's session has EXPIRED — but an expired session makes
+// `heldByOther` false, so this component has already returned null and the button is off screen.
+// The two predicates are the same predicate (`live && holder !== me`), measured on both sides:
+// internal/editsession/takeoverparity_realpg_test.go shows takeover and acquire answering
+// identically (423 live, 200 expired), and EditingBanner.affordance.test.tsx pins the render rule.
+// The previous version of this comment described a state this component cannot be in.
+//
+// Left as-is deliberately: whether "Take over" should steal a LIVE session is a product call. The
+// tooltip is honest about today's behaviour, and the two guards mean neither side can change
+// without the other reddening.
 export function EditingBanner({ flags, holderName, onTakeover, takingOver }: EditingBannerProps) {
   if (!flags.heldByOther) return null;
   const who = holderName || flags.holder || "another user";
