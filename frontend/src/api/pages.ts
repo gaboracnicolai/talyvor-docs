@@ -1,5 +1,5 @@
 import { apiRequest, qs } from "./client";
-import type { Comment, Page, PageVersion } from "./types";
+import type { Page, PageVersion } from "./types";
 
 export const pagesApi = {
   list(spaceID: string) {
@@ -62,19 +62,15 @@ export const pagesApi = {
   stale(workspaceID: string) {
     return apiRequest<Page[]>(`/v1/workspaces/${workspaceID}/pages/stale`);
   },
-  listComments(spaceID: string, pageID: string) {
-    return apiRequest<Comment[]>(`/v1/spaces/${spaceID}/pages/${pageID}/comments`);
-  },
-  createComment(spaceID: string, pageID: string, body: Partial<Comment>) {
-    return apiRequest<Comment>(`/v1/spaces/${spaceID}/pages/${pageID}/comments`, {
-      method: "POST",
-      body,
-    });
-  },
-  resolveComment(spaceID: string, pageID: string, commentID: string) {
-    return apiRequest<{ ok: boolean }>(
-      `/v1/spaces/${spaceID}/pages/${pageID}/comments/${commentID}/resolve`,
-      { method: "POST" },
-    );
-  },
+  // ⚠ THE COMMENT CALLS THAT USED TO SIT HERE ARE GONE ON PURPOSE — `commentsApi` IS THE CLIENT.
+  // `listComments`/`createComment`/`resolveComment` duplicated commentsApi.list/create/resolve on
+  // the same three routes, had zero callers, and typed the response as api/types.ts#Comment: a
+  // NINE-field shape against a wire that carries fourteen. The five it did not name are
+  // thread_id, parent_id, author_name, resolved_at and replies — the thread tree and the only
+  // human-readable identity on a comment. TypeScript refuses those fields through the narrow
+  // type, so the trap did not show a wrong number; it told the next reader the server does not
+  // thread comments, while internal/comment/store.go assembles the tree and the handler ships it.
+  // `createComment(body: Partial<Comment>)` could not express parent_id, so a reply was not
+  // expressible through it either. route-response-type.census.test.ts is what keeps one route to
+  // one declared response type from here on.
 };

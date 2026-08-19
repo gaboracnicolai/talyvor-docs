@@ -76,14 +76,9 @@ export interface PageVersion {
   created_at: string;
 }
 
-export interface Comment {
-  id: string;
-  page_id: string;
-  block_id?: string;
-  author_id: string;
-  content: string;
-  resolved: boolean;
-  resolved_by?: string;
-  created_at: string;
-  updated_at: string;
-}
+// ⚠ THERE IS NO `Comment` HERE ANY MORE, AND THAT IS THE POINT. This module used to declare a
+// second one — nine fields, mirroring internal/model/model.go's `Comment`, which no handler in
+// the tree had ever written. The comment wire is internal/comment/store.go's fourteen-field
+// shape and its ONE client type is api/comments.ts#Comment. A second declaration of a wire
+// object is not an alias: it is a narrower claim about the same bytes, and the narrower claim
+// wins wherever it is imported.
