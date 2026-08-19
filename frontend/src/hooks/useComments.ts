@@ -30,7 +30,6 @@ export function useComments(spaceID: string, pageID: string, includeResolved = f
     mutationFn: (body: { content: string; block_id?: string }) =>
       commentsApi.create(spaceID, pageID, {
         ...body,
-        author_id: memberID,
         author_name: memberName || memberID,
       }),
     onSuccess: invalidate,
@@ -39,14 +38,12 @@ export function useComments(spaceID: string, pageID: string, includeResolved = f
     mutationFn: ({ commentID, content }: { commentID: string; content: string }) =>
       commentsApi.reply(spaceID, pageID, commentID, {
         content,
-        author_id: memberID,
         author_name: memberName || memberID,
       }),
     onSuccess: invalidate,
   });
   const resolve = useMutation({
-    mutationFn: (commentID: string) =>
-      commentsApi.resolve(spaceID, pageID, commentID, memberID),
+    mutationFn: (commentID: string) => commentsApi.resolve(spaceID, pageID, commentID),
     onSuccess: invalidate,
   });
   const unresolve = useMutation({
