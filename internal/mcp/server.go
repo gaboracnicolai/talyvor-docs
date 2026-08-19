@@ -190,7 +190,7 @@ var writeTools = map[string]bool{
 // chosen by the caller. There is no honest partial answer to "give me THIS object", so these DENY
 // at the VIEW tier, which is what the REST by-id doors do via Enforcer.Require(AccessView).
 //
-// ⚠ THE THREE READ TOOLS THAT ARE NOT HERE ARE NOT UNGATED — THEY ARE GATED IN A DIFFERENT SHAPE,
+// ⚠ THE READ TOOLS THAT ARE NOT HERE ARE NOT UNGATED — THEY ARE GATED IN A DIFFERENT SHAPE,
 // AND CONFUSING THE TWO IS HOW THIS SET GOES STALE:
 //
 //   - search_docs and get_space_tree return a MIXED set the caller did not enumerate. Denying the
@@ -199,6 +199,15 @@ var writeTools = map[string]bool{
 //   - get_page gates INSIDE the tool because its object does not exist until the lookup has run:
 //     the slug arm carries only (space_id, slug), so a gate here would have to resolve the same
 //     row a second time, on the other side of the decision it is making.
+//   - get_stale_pages is filtered one layer FURTHER OUT, by freshness.GetStaleReport's
+//     AuthorizePageRead pass, and ask_docs filters its GROUNDING CORPUS per page before the rows
+//     reach the model.
+//
+// ⚠ THIS SENTENCE USED TO SAY "THE THREE READ TOOLS THAT ARE NOT HERE" AND NAME THE FIRST THREE.
+// Measured against the dispatch switch there are FOUR reads outside this set, five counting
+// ask_docs — the count was written when it was true and nothing could see it stop being true. The
+// full list, with the reason for each, is now machine-checked against the dispatch switch on every
+// run by accessExemptTools in toolclassification_test.go, so a prose count cannot drift again.
 //
 // authorizeRead's switch DENIES an unmapped member of this set, so adding a name here without a
 // rule is a loud total denial rather than a silent hole.
