@@ -228,11 +228,28 @@ type rss struct {
 }
 
 func (h *Handler) Feed(w http.ResponseWriter, r *http.Request) {
-	// SEC-4 L2 DECEPTIVE shape: the feed is scoped to the caller's VERIFIED workspace set,
-	// never the {wsID} URL param — otherwise any caller could read another workspace's
-	// published feed by naming its id in the path.
-	wsIDs := authz.WorkspaceIDs(r.Context())
-	entries, err := h.store.GetPublicFeed(r.Context(), wsIDs, 50)
+	// The feed is scoped to the {wsID} the caller ASKED ABOUT, after authorizing it against the
+	// verified memberships.
+	//
+	// ⚠ THE COMMENT THAT STOOD HERE ARGUED THE OTHER WAY AND WAS WRONG BY HALF, so it is recorded
+	// rather than deleted: "the feed is scoped to the caller's VERIFIED workspace set, never the
+	// {wsID} URL param — otherwise any caller could read another workspace's published feed by
+	// naming its id in the path." Every clause is true about a STRANGER and none of it is true
+	// about the SECOND WORKSPACE THE SAME CALLER BELONGS TO. Handing GetPublicFeed the whole
+	// membership set made {wsID} decorative: a caller in A and B was served one RSS document,
+	// titled for one workspace, carrying both workspaces' published release notes. Refusing to
+	// read the param is not the safe choice; AUTHORIZING it is, which is what the twelve sibling
+	// workspace-in-path routes do. Measured on real Postgres in feedwsidscope_realpg_test.go.
+	//
+	// 404 rather than 403 for a non-member: this route's own by-id errors already answer 404 to
+	// avoid an existence oracle, and a workspace the caller cannot see should not be confirmed to
+	// exist by the status code.
+	wsID := chi.URLParam(r, "wsID") // nosemgrep: docs-no-url-param-workspace-scope -- authorized on the next line by AuthorizeWorkspace, before any store read
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	entries, err := h.store.GetPublicFeed(r.Context(), []string{wsID}, 50)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return

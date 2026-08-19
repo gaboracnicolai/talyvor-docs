@@ -493,10 +493,16 @@ func (s *Store) GenerateFromIssues(ctx context.Context, workspaceID, pageID, cre
 
 // ─── GetPublicFeed ───────────────────────────────────
 
-// GetPublicFeed lists published entries scoped to the caller's VERIFIED workspace set
-// (SEC-4 L2 DECEPTIVE shape). The Feed handler previously fed workspaceID straight from
-// chi.URLParam("wsID"), so a caller could name any workspace's id in the URL and read its
-// published feed. wsIDs now comes from authz.WorkspaceIDs (verified membership), never the URL.
+// GetPublicFeed lists published entries scoped to wsIDs, which is an AUTHORIZED scope.
+//
+// THE HISTORY, because both halves of it are load-bearing. Originally the Feed handler fed
+// workspaceID straight from chi.URLParam("wsID") UNCHECKED, so any caller could name any
+// workspace's id in the URL and read its published feed — a real cross-tenant leak. The repair
+// swapped the param for authz.WorkspaceIDs, the caller's whole VERIFIED membership set, and that
+// closed the leak but made {wsID} decorative: a caller in workspaces A and B got ONE feed
+// carrying BOTH, titled for whichever one the URL happened to name. The handler now AUTHORIZES
+// the param (authz.AuthorizeWorkspace) and passes that single workspace — neither the raw param
+// nor the whole set. See feedwsidscope_realpg_test.go.
 func (s *Store) GetPublicFeed(ctx context.Context, wsIDs []string, limit int) ([]ChangelogEntry, error) {
 	if s.pool == nil {
 		return nil, nil
