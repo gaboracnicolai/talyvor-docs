@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -257,9 +258,25 @@ func (s *Store) UseTemplate(ctx context.Context, templateID, spaceID, workspaceI
 	}
 
 	// Built-in path — no DB round-trip needed.
+	//
+	// ⚠ THE BUMP IS AFTER THE CREATE, AND IT USED TO BE BEFORE IT — ON BOTH TIERS. A create that
+	// failed still moved the counter, so `use_count` counted ATTEMPTS while the tile that renders it
+	// (frontend/src/components/TemplateCard.tsx, `{use_count} uses` under a TrendingUp icon) says
+	// uses. Measured through the shipped route on real Postgres: six uses of one template into one
+	// space gave five pages and use_count = 6 (usecount_failedcreate_realpg_test.go).
+	//
+	// The sibling counter in this very call path already wrote the rule down, and this is the same
+	// sentence one package over (page/store.go, beside metrics.PagesCreated.Inc()): "AFTER the insert
+	// succeeded and NOT before: a refused or failed create is not a page created, and a counter that
+	// moves on the attempt is a different, quieter lie."
+	//
+	// ⚠ WHAT IS *NOT* FIXED HERE, because both are product decisions and the queue holds them (W3.1):
+	// this counter is keyed on template id ALONE, so it is CROSS-TENANT — one workspace is served
+	// every workspace's uses — and it is PER-PROCESS, resetting to zero on each deploy. Whether a
+	// built-in's number should be global popularity or this workspace's usage decides which of those
+	// is the defect. The ordering is the one half that is wrong under EITHER reading.
 	if t := builtinByID(templateID); t != nil {
-		s.bumpBuiltin(templateID)
-		return s.pages.Create(ctx, model.Page{
+		pg, err := s.pages.Create(ctx, model.Page{
 			SpaceID:     spaceID,
 			WorkspaceID: workspaceID,
 			Title:       t.Name,
@@ -268,6 +285,11 @@ func (s *Store) UseTemplate(ctx context.Context, templateID, spaceID, workspaceI
 			Icon:        t.Icon,
 			CreatedBy:   createdBy,
 		})
+		if err != nil {
+			return nil, err
+		}
+		s.bumpBuiltin(templateID)
+		return pg, nil
 	}
 
 	// Custom path — read content, bump use_count, create page.
@@ -285,13 +307,7 @@ func (s *Store) UseTemplate(ctx context.Context, templateID, spaceID, workspaceI
 	if err != nil {
 		return nil, fmt.Errorf("templatelib: not found: %w", err)
 	}
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE library_templates SET use_count = use_count + 1 WHERE id = $1 AND workspace_id = ANY($2)`,
-		templateID, wsIDs,
-	); err != nil {
-		return nil, fmt.Errorf("templatelib: bump use_count: %w", err)
-	}
-	return s.pages.Create(ctx, model.Page{
+	pg, err := s.pages.Create(ctx, model.Page{
 		SpaceID:     spaceID,
 		WorkspaceID: workspaceID,
 		Title:       t.Name,
@@ -300,6 +316,31 @@ func (s *Store) UseTemplate(ctx context.Context, templateID, spaceID, workspaceI
 		Icon:        t.Icon,
 		CreatedBy:   createdBy,
 	})
+	if err != nil {
+		return nil, err
+	}
+	// Same ordering rule as the built-in tier above, and the bump keeps its wsIDs scope so a member
+	// still cannot move a foreign workspace's counter.
+	//
+	// ⚠ IT NO LONGER FAILS THE REQUEST, AND THAT IS THE COST OF THE REORDER, STATED RATHER THAN
+	// HIDDEN. Before, a bump error returned an error and no page existed, so the error was true.
+	// After, the page IS committed by the line above — returning an error would tell the caller their
+	// page was not created while it sits in their space, which is a worse lie than an undercounted
+	// tile. So it logs and serves the page, exactly as page.Store.Create does for the version
+	// snapshot it cannot write ("page: version snapshot NOT written"). The counter is wrong in the
+	// SAFE direction here: it undercounts a use that happened, rather than claiming one that did not.
+	if _, err := s.pool.Exec(ctx,
+		`UPDATE library_templates SET use_count = use_count + 1 WHERE id = $1 AND workspace_id = ANY($2)`,
+		templateID, wsIDs,
+	); err != nil {
+		slog.Error("templatelib: use_count NOT bumped — the page was created and this use is uncounted",
+			slog.String("template_id", templateID),
+			slog.String("page_id", pg.ID),
+			slog.String("workspace_id", workspaceID),
+			slog.String("err", err.Error()),
+			slog.String("effect", "the template gallery under-reports this template's uses by one"))
+	}
+	return pg, nil
 }
 
 // UseCountForBuiltin exposes the per-process counter so tests can
