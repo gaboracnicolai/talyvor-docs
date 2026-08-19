@@ -461,6 +461,32 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
 // rather than two spellings of the same emptiness, which is what a control caught.
 const emptyDoc = "{}"
 
+// floorContent raises an EMPTY body to emptyDoc, and touches nothing else.
+//
+// ⚠ IT EXISTS BECAUSE THE FLOOR USED TO BE A CREATE-ONLY RULE. `pages.content` is
+// `TEXT NOT NULL DEFAULT '{}'`; Create has normalised an empty body up to that default since
+// 0002_pages.sql shipped, and Update wrote `updates["content"]` verbatim — so an explicit
+// `{"content":""}` put the empty string in a column whose schema, whose Create path and whose
+// emptyDoc comment all say it holds a JSON document. Measured through the shipped chain:
+// POST {"content":""} → 201 content="{}", PATCH {"content":""} → 200 content="". The snapshot the
+// same save appends carried the empty string too, so it was a restore point rather than a
+// transient row state.
+//
+// ⚠ THE CALLER MUST APPLY IT TO A VALUE THAT WAS SENT, NEVER TO AN ABSENT ONE. "Empty this
+// document" and "do not touch this column" are different requests, and conflating them is the
+// defect the block package's partial-update merge closed. Both call sites are inside an
+// `if _, ok := updates["content"]` / `if content != nil` arm for that reason, and
+// emptycontentfloor_realpg_test.go's [ABSENT-KEY-UNTOUCHED] holds it.
+//
+// ⚠ NOT A REFUSAL: `{}` IS the empty document, so this preserves the caller's intent exactly
+// rather than inventing a 400 for an edit the product supports.
+func floorContent(v string) string {
+	if v == "" {
+		return emptyDoc
+	}
+	return v
+}
+
 // maxVersionAttempts bounds the retry on `UNIQUE (page_id, version)`. Each attempt re-derives the
 // version from the table, so an attempt is only spent when ANOTHER writer won the number this one
 // picked — i.e. the bound is on simultaneous savers of one page, not on retries of one save. Five
@@ -781,6 +807,11 @@ func (s *Store) Update(ctx context.Context, id string, updates map[string]any) (
 	if v, ok := updates["content"]; ok {
 		if str, isStr := v.(string); isStr {
 			contentChanged = true
+			// The floor is applied HERE, before content_text is derived and before the value
+			// reaches the SET list, so the column, the snapshot appendVersion takes from `out`,
+			// and the derived text all see one value. See floorContent.
+			str = floorContent(str)
+			updates["content"] = str
 			updates["content_text"] = extractContentText(str)
 		}
 	}
