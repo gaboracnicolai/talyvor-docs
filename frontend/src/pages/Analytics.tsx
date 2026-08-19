@@ -114,10 +114,25 @@ function WorkspaceAnalytics({ workspaceID }: { workspaceID: string }) {
         />
       </div>
       <PageList title="Most read" items={data.most_read_pages} empty="No views yet." />
+      {/*
+        ⚠ THIS CAPTION USED TO READ "All pages have plenty of traffic." AND COULD ONLY EVER APPEAR
+        WHEN THAT WAS FALSE. `least_read_pages` and `total_views` come from ONE slice in
+        GetWorkspaceStats — the cohort is filled from `visible` and the total is summed over the
+        same `visible`, and every ranked row carries COUNT(*) >= 1 — so
+        `least_read_pages == [] ⟺ total_views == 0`. Measured through the shipped route on real
+        Postgres in internal/analytics/leastreadcaption_realpg_test.go, including the case where
+        readership is real but the caller may not see it and both figures fall to zero together.
+        The cohort is therefore empty in exactly one state, a workspace nothing visible has been
+        read in, which is the state where "plenty of traffic" is untrue: a workspace with 50 unread
+        documents reported `Never read 50` beside it, in one response.
+        Not made conditional — a branch for "traffic exists AND the cohort is empty" is reachable by
+        nothing, and a branch kept for a caller that does not exist is its own defect here.
+        Analytics.leastread.test.tsx holds it.
+      */}
       <PageList
         title="Needs attention (lowest read)"
         items={data.least_read_pages}
-        empty="All pages have plenty of traffic."
+        empty="No views yet."
       />
     </section>
   );

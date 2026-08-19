@@ -16,6 +16,7 @@
     "src/hooks/useSearch.offset.test.tsx": 3,
     "src/pages/Analytics.chartgaps.test.tsx": 4,
     "src/pages/Analytics.emptystate.test.tsx": 4,
+    "src/pages/Analytics.leastread.test.tsx": 4,
     "src/pages/PageView.cost.test.tsx": 6,
     "src/pages/PageView.editsession.selfidentity.test.tsx": 3,
     "src/pages/PageView.editsession.test.tsx": 4,
@@ -32,6 +33,6 @@
     "src/sw/register.test.ts": 8,
     "src/sw/sw.test.ts": 7
   },
-  "totalFiles": 31,
-  "totalTests": 145
+  "totalFiles": 32,
+  "totalTests": 149
 }

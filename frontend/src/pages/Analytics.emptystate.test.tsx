@@ -96,8 +96,16 @@ describe("Analytics — the empty state the roll-up actually returns", () => {
     workspaceStats.mockResolvedValue(JSON.parse(EMPTY_ROLLUP));
     render(wrap(<AnalyticsPage workspaceID="w1" />));
 
-    expect(await screen.findByText("No views yet.")).toBeInTheDocument();
-    expect(screen.getByText("All pages have plenty of traffic.")).toBeInTheDocument();
+    // ⚠ THIS CASE USED TO ASSERT "All pages have plenty of traffic." FOR THE LEAST-READ COHORT,
+    // i.e. it pinned a claim that could only ever appear when it was false — beside the
+    // `never_read_count: 1` this same fixture carries. That was never this file's finding: it was
+    // written to prove the empty path RENDERS AT ALL (the null crash above), and it pinned the
+    // wording it found on the way. The caption is corrected to the true one both cohorts now show;
+    // this file's purpose is unchanged. See Analytics.leastread.test.tsx and, for why the old
+    // string was unreachable-when-true rather than merely wrong sometimes,
+    // internal/analytics/leastreadcaption_realpg_test.go.
+    expect(await screen.findAllByText("No views yet.")).toHaveLength(2);
+    expect(screen.queryByText("All pages have plenty of traffic.")).not.toBeInTheDocument();
     // The one figure this state DOES report — a workspace with a never-read page is precisely
     // the state whose screen used to blank.
     expect(screen.getByText("Never read")).toBeInTheDocument();
