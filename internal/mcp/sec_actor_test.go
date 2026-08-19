@@ -14,7 +14,7 @@ import (
 // edit to keep exercising the write path (wiring the real permission, not weakening the gate).
 func grantEdit(t *testing.T, d *testutil.DB, ws, pageID, member, grantedBy string) {
 	t.Helper()
-	if err := permission.NewStore(d.Pool).Grant(context.Background(), permission.Permission{
+	if _, err := permission.NewStore(d.Pool).Grant(context.Background(), permission.Permission{
 		ResourceType: permission.ResourcePage, ResourceID: pageID, SubjectType: "member",
 		SubjectID: member, Access: permission.AccessEdit, WorkspaceID: ws, GrantedBy: grantedBy,
 	}); err != nil {

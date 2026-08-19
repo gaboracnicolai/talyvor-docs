@@ -96,7 +96,7 @@ func TestSecRoot_Comment_AuthorIsVerifiedNotBody(t *testing.T) {
 	// (Bob and Mallory) comment access so this attribution/deletion test still exercises the comment
 	// path — the subject here is WHO a comment is attributed to, not the tier gate.
 	for _, m := range []string{bob, mallory} {
-		if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+		if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 			ResourceType: permission.ResourcePage, ResourceID: pageID, SubjectType: "member",
 			SubjectID: m, Access: permission.AccessComment, WorkspaceID: wsA, GrantedBy: alice,
 		}); err != nil {

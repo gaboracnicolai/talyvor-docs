@@ -306,7 +306,7 @@ func privateSeed(t *testing.T, d *testutil.DB) (ws, pageID, owner, member string
 	if err != nil {
 		t.Fatalf("seed page: %v", err)
 	}
-	if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+	if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 		ResourceType: permission.ResourcePage, ResourceID: pg.ID, SubjectType: "member",
 		SubjectID: member, Access: permission.AccessEdit, WorkspaceID: ws, GrantedBy: owner,
 	}); err != nil {

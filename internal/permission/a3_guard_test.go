@@ -130,7 +130,7 @@ func TestA3_IntraWorkspaceAccessControl(t *testing.T) {
 		t.Fatalf("seed page 2: %v", err)
 	}
 	grant := func(rt permission.ResourceType, rid, subject string, lvl permission.AccessLevel) {
-		if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+		if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 			ResourceType: rt, ResourceID: rid, SubjectType: "member", SubjectID: subject,
 			Access: lvl, WorkspaceID: W, GrantedBy: owner,
 		}); err != nil {

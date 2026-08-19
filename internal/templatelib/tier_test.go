@@ -89,7 +89,7 @@ func TestA3_TemplateUse_TierEnforcement(t *testing.T) {
 		t.Fatalf("seed target space: %v", err)
 	}
 	grant := func(spaceID, subject string, lvl permission.AccessLevel) {
-		if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+		if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 			ResourceType: permission.ResourceSpace, ResourceID: spaceID, SubjectType: "member",
 			SubjectID: subject, Access: lvl, WorkspaceID: W, GrantedBy: owner,
 		}); err != nil {
@@ -185,7 +185,7 @@ func TestA3_TemplateFromPage_ViewGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed source page: %v", err)
 	}
-	if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+	if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 		ResourceType: permission.ResourceSpace, ResourceID: privSpace.ID, SubjectType: "member",
 		SubjectID: viewer, Access: permission.AccessView, WorkspaceID: W, GrantedBy: owner,
 	}); err != nil {

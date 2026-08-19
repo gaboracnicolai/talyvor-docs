@@ -141,7 +141,7 @@ func TestSEC4_L2_SecondaryCrossTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed row: %v", err)
 	}
-	if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+	if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 		ResourceType: permission.ResourceSpace, ResourceID: spaceB, SubjectType: "member",
 		SubjectID: bob, Access: permission.AccessAdmin, WorkspaceID: wsB, GrantedBy: bob,
 	}); err != nil {

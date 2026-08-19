@@ -108,7 +108,7 @@ func TestA3_DatabaseTierEnforcement(t *testing.T) {
 		t.Fatalf("seed page: %v", err)
 	}
 	grant := func(subject string, lvl permission.AccessLevel) {
-		if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+		if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 			ResourceType: permission.ResourcePage, ResourceID: pg.ID, SubjectType: "member",
 			SubjectID: subject, Access: lvl, WorkspaceID: W, GrantedBy: owner,
 		}); err != nil {

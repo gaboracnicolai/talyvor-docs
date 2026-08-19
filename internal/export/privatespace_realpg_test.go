@@ -178,7 +178,7 @@ func newExportFixture(t *testing.T, d *testutil.DB) *exportFixture {
 
 	// The ordinary share: view on the parent, and on ONE child. Nothing on the other.
 	for _, id := range []string{parent, granted} {
-		if err := permStore.Grant(ctx, permission.Permission{
+		if _, err := permStore.Grant(ctx, permission.Permission{
 			ResourceType: permission.ResourcePage, ResourceID: id,
 			SubjectType: "member", SubjectID: bob, Access: permission.AccessView,
 			WorkspaceID: ws, GrantedBy: alice,

@@ -68,7 +68,7 @@ func TestImport_CountsEveryPageInPagesCreatedTotal_RealPG(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed target space: %v", err)
 	}
-	if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+	if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 		ResourceType: permission.ResourceSpace, ResourceID: targetSpace.ID, SubjectType: "member",
 		SubjectID: editor, Access: permission.AccessEdit, WorkspaceID: W, GrantedBy: owner,
 	}); err != nil {

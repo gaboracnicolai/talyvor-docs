@@ -79,7 +79,7 @@ func TestSec_ChangelogCreate_AuthorIsVerifiedNotBody(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Mallory needs Edit to reach the route.
-	if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+	if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 		ResourceType: permission.ResourceSpace, ResourceID: spaceID,
 		SubjectType: "member", SubjectID: mallory,
 		Access: permission.AccessEdit, WorkspaceID: ws, GrantedBy: alice,

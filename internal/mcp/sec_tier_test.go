@@ -71,7 +71,7 @@ func TestSEC4_MCP_TierEnforcement(t *testing.T) {
 		t.Fatalf("seed page: %v", err)
 	}
 	grant := func(subject string, lvl permission.AccessLevel) {
-		if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+		if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 			ResourceType: permission.ResourcePage, ResourceID: pg.ID, SubjectType: "member",
 			SubjectID: subject, Access: lvl, WorkspaceID: W, GrantedBy: owner,
 		}); err != nil {
@@ -164,7 +164,7 @@ func TestSEC4_MCP_CreatePage_SetsVerifiedWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed space: %v", err)
 	}
-	if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+	if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 		ResourceType: permission.ResourceSpace, ResourceID: sp.ID, SubjectType: "member",
 		SubjectID: viewer, Access: permission.AccessView, WorkspaceID: W, GrantedBy: owner,
 	}); err != nil {
