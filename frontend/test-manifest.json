@@ -4,6 +4,7 @@
     "src/api/page.cached-required-keys.test.ts": 2,
     "src/api/route-response-type.census.test.ts": 3,
     "src/api/search.wire-census.test.ts": 4,
+    "src/components/CommentsPanel.resolvedtab.test.tsx": 3,
     "src/components/EditingBanner.affordance.test.tsx": 3,
     "src/components/EditingBanner.test.tsx": 4,
     "src/components/SearchModal.cost.test.tsx": 6,
@@ -34,6 +35,6 @@
     "src/sw/register.test.ts": 8,
     "src/sw/sw.test.ts": 7
   },
-  "totalFiles": 33,
-  "totalTests": 152
+  "totalFiles": 34,
+  "totalTests": 155
 }
