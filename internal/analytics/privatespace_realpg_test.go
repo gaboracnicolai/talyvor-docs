@@ -268,7 +268,7 @@ func TestWorkspaceAnalytics_PrivateSpace_NotRolledUpWithoutGrant_RealPG(t *testi
 	// ── [GRANTED] an explicit VIEW grant on the private SPACE, which is not the same state as
 	// making the space public — a fix that keyed on `private = false` would fail here.
 	permStore := permission.NewStore(d.Pool)
-	if err := permStore.Grant(context.Background(), permission.Permission{
+	if _, err := permStore.Grant(context.Background(), permission.Permission{
 		ResourceType: permission.ResourceSpace, ResourceID: privSpace, SubjectType: "member",
 		SubjectID: f.bob, Access: permission.AccessView, WorkspaceID: f.ws, GrantedBy: f.alice,
 	}); err != nil {

@@ -198,7 +198,7 @@ func tierSeed(t *testing.T, d *testutil.DB) (ws, pageID, viewer, editor string) 
 		t.Fatalf("seed page: %v", err)
 	}
 	grant := func(subject string, lvl permission.AccessLevel) {
-		if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+		if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 			ResourceType: permission.ResourcePage, ResourceID: pg.ID, SubjectType: "member",
 			SubjectID: subject, Access: lvl, WorkspaceID: ws, GrantedBy: owner,
 		}); err != nil {

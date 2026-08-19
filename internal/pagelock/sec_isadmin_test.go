@@ -101,7 +101,7 @@ func TestSec_Unlock_IgnoresClientSuppliedIsAdmin(t *testing.T) {
 	// nowhere near admin.
 	permStore := permission.NewStore(d.Pool)
 	for _, m := range []string{bob, mallory} {
-		if err := permStore.Grant(ctx, permission.Permission{
+		if _, err := permStore.Grant(ctx, permission.Permission{
 			ResourceType: permission.ResourceSpace, ResourceID: spaceID,
 			SubjectType: "member", SubjectID: m,
 			Access: permission.AccessEdit, WorkspaceID: ws, GrantedBy: alice,

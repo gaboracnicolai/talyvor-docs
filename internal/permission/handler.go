@@ -119,11 +119,17 @@ func (h *Handler) grant(w http.ResponseWriter, r *http.Request, resType Resource
 		WorkspaceID:  in.WorkspaceID,
 		GrantedBy:    grantedBy,
 	}
-	if err := h.store.Grant(r.Context(), p); err != nil {
+	// 201 CARRIES THE ROW POSTGRES WROTE, NOT THE STRUCT THIS FUNCTION BUILT. `p` has no id and no
+	// created_at — the database assigns both — so serializing it answered every grant with
+	// `"id":"","created_at":"0001-01-01T00:00:00Z"` while the sibling GET returned the real values.
+	// `id` is the key DELETE /permissions/{permID} takes, so the response was a contract naming a
+	// key it did not supply. grantroute_realpg_test.go pins the round trip.
+	out, err := h.store.Grant(r.Context(), p)
+	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, p)
+	writeJSON(w, http.StatusCreated, out)
 }
 
 // deleteSpace/deletePage mirror grantSpace/grantPage exactly, and the split is the fix rather than

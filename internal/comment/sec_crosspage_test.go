@@ -51,7 +51,7 @@ func TestSec_Comment_CannotActAcrossPagesViaAuthorizedPageID(t *testing.T) {
 	// the PUBLIC page so she clears the tier gate and this test still exercises the CROSS-PAGE scoping
 	// (its actual subject) rather than being deflected by a tier 403. She still has NO access to the
 	// private page — the point of the test is that she reaches its comment via the public {pageID}.
-	if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+	if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 		ResourceType: permission.ResourcePage, ResourceID: publicPage, SubjectType: "member",
 		SubjectID: mallory, Access: permission.AccessComment, WorkspaceID: ws, GrantedBy: alice,
 	}); err != nil {

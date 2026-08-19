@@ -154,7 +154,7 @@ func lockSeed(t *testing.T, d *testutil.DB) (pageID, alice, bob string) {
 		t.Fatalf("seed page: %v", err)
 	}
 	for _, m := range []string{alice, bob} {
-		if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+		if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 			ResourceType: permission.ResourcePage, ResourceID: pg.ID, SubjectType: "member",
 			SubjectID: m, Access: permission.AccessEdit, WorkspaceID: ws, GrantedBy: owner,
 		}); err != nil {

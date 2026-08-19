@@ -36,14 +36,26 @@ func newMockStore(t *testing.T) (*Store, pgxmock.PgxPoolIface) {
 	return newStore(pool), pool
 }
 
+// grantRows is the shape RETURNING hands back — the `cols` list, in order. Built here rather than
+// in each test so a column added to `cols` fails in ONE place instead of drifting per test.
+func grantRows(id string, created time.Time) *pgxmock.Rows {
+	return pgxmock.NewRows([]string{
+		"id", "resource_type", "resource_id", "subject_type", "subject_id",
+		"access", "workspace_id", "granted_by", "created_at",
+	}).AddRow(id, "space", "sp-1", "member", "u-1", "edit", "ws-1", "u-admin", created)
+}
+
 func TestGrant_UpsertsPermissionRow(t *testing.T) {
 	store, pool := newMockStore(t)
 
-	pool.ExpectExec(`INSERT INTO permissions`).
+	// ExpectQuery, not ExpectExec: Grant now RETURNs the persisted row, because the create route's
+	// 201 must carry the id its sibling DELETE route takes. See Grant's doc comment.
+	created := time.Date(2026, 8, 19, 10, 0, 0, 0, time.UTC)
+	pool.ExpectQuery(`INSERT INTO permissions`).
 		WithArgs("space", "sp-1", "member", "u-1", "edit", "ws-1", "u-admin").
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+		WillReturnRows(grantRows("perm-1", created))
 
-	err := store.Grant(context.Background(), Permission{
+	out, err := store.Grant(context.Background(), Permission{
 		ResourceType: ResourceSpace,
 		ResourceID:   "sp-1",
 		SubjectType:  "member",
@@ -55,6 +67,17 @@ func TestGrant_UpsertsPermissionRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Grant: %v", err)
 	}
+	// THE RETURNED ROW IS THE POINT, so it is asserted rather than discarded: a Grant that runs the
+	// right statement and then hands back the struct it was given is the exact defect this replaced.
+	if out == nil {
+		t.Fatal("Grant returned a nil permission on success")
+	}
+	if out.ID != "perm-1" {
+		t.Errorf("Grant returned id %q, want the RETURNING row's %q", out.ID, "perm-1")
+	}
+	if !out.CreatedAt.Equal(created) {
+		t.Errorf("Grant returned created_at %v, want the RETURNING row's %v", out.CreatedAt, created)
+	}
 	if err := pool.ExpectationsWereMet(); err != nil {
 		t.Fatalf("expectations: %v", err)
 	}
@@ -62,7 +85,7 @@ func TestGrant_UpsertsPermissionRow(t *testing.T) {
 
 func TestGrant_RejectsInvalidAccess(t *testing.T) {
 	store, _ := newMockStore(t)
-	err := store.Grant(context.Background(), Permission{
+	_, err := store.Grant(context.Background(), Permission{
 		ResourceType: ResourceSpace,
 		ResourceID:   "sp-1",
 		SubjectType:  "member",
@@ -89,11 +112,17 @@ func TestGrant_RejectsTeamSubjectType(t *testing.T) {
 	// Deleting the expectation instead would be worse — a team grant reaching the INSERT would then
 	// produce an unexpected-call error, err would be non-nil, and the assertion below would pass for
 	// exactly the wrong reason.
+	//
+	// ⚠ AND IT HAD TO MOVE FROM ExpectExec TO ExpectQuery WITH Grant's RETURNING, FOR THAT SAME
+	// REASON. An Exec expectation left behind here would no longer match the statement Grant runs,
+	// so a team grant that reached the INSERT would fail as an unexpected Query() — non-nil err —
+	// and this test would go green while proving nothing. The mechanism the expectation names is
+	// part of the guard, not boilerplate.
 	store, pool := newMockStore(t)
-	pool.ExpectExec(`INSERT INTO permissions`).
+	pool.ExpectQuery(`INSERT INTO permissions`).
 		WithArgs("space", "sp-1", "team", "t-eng", "view", "ws-1", "u-admin").
-		WillReturnResult(pgxmock.NewResult("INSERT", 1)).Maybe()
-	err := store.Grant(context.Background(), Permission{
+		WillReturnRows(grantRows("perm-team", time.Now())).Maybe()
+	_, err := store.Grant(context.Background(), Permission{
 		ResourceType: ResourceSpace, ResourceID: "sp-1",
 		SubjectType: "team", SubjectID: "t-eng",
 		Access: AccessView, WorkspaceID: "ws-1", GrantedBy: "u-admin",
@@ -107,10 +136,13 @@ func TestGrant_RejectsTeamSubjectType(t *testing.T) {
 func TestGrant_AcceptsEveryone(t *testing.T) {
 	// The removal must not over-reject: "everyone" is a real, honored subject type.
 	store, pool := newMockStore(t)
-	pool.ExpectExec(`INSERT INTO permissions`).
+	pool.ExpectQuery(`INSERT INTO permissions`).
 		WithArgs("space", "sp-1", "everyone", "everyone", "view", "ws-1", "u-admin").
-		WillReturnResult(pgxmock.NewResult("INSERT", 1))
-	err := store.Grant(context.Background(), Permission{
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "resource_type", "resource_id", "subject_type", "subject_id",
+			"access", "workspace_id", "granted_by", "created_at",
+		}).AddRow("perm-everyone", "space", "sp-1", "everyone", "everyone", "view", "ws-1", "u-admin", time.Now()))
+	_, err := store.Grant(context.Background(), Permission{
 		ResourceType: ResourceSpace, ResourceID: "sp-1",
 		SubjectType: "everyone", SubjectID: "everyone",
 		Access: AccessView, WorkspaceID: "ws-1", GrantedBy: "u-admin",

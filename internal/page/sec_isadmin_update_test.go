@@ -62,7 +62,7 @@ func TestSec_Update_IgnoresClientSuppliedIsAdmin(t *testing.T) {
 			`SELECT member_id FROM workspace_members WHERE workspace_id=$1 AND email=$2`, ws, email).Scan(&mid); err != nil {
 			t.Fatalf("lookup member %s: %v", email, err)
 		}
-		if err := permStore.Grant(ctx, permission.Permission{
+		if _, err := permStore.Grant(ctx, permission.Permission{
 			ResourceType: permission.ResourceSpace, ResourceID: spaceID,
 			SubjectType: "member", SubjectID: mid,
 			Access: permission.AccessEdit, WorkspaceID: ws, GrantedBy: alice,

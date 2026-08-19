@@ -51,7 +51,7 @@ func TestSecRoot_Unlock_MultiWorkspaceCallerCannotForgeMemberID(t *testing.T) {
 	// `everyone: edit` — the only grant shape that could match an empty memberID, and the
 	// condition that made the fallback reachable.
 	permStore := permission.NewStore(d.Pool)
-	if err := permStore.Grant(ctx, permission.Permission{
+	if _, err := permStore.Grant(ctx, permission.Permission{
 		ResourceType: permission.ResourceSpace, ResourceID: spaceID,
 		SubjectType: "everyone", SubjectID: "*",
 		Access: permission.AccessEdit, WorkspaceID: wsA, GrantedBy: alice,

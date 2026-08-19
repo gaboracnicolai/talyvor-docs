@@ -90,7 +90,7 @@ func TestSec_Update_AICostIsNotWritableFromTheRequestBody(t *testing.T) {
 		ws, bobEmail).Scan(&bobID); err != nil {
 		t.Fatalf("lookup bob: %v", err)
 	}
-	if err := permStore.Grant(ctx, permission.Permission{
+	if _, err := permStore.Grant(ctx, permission.Permission{
 		ResourceType: permission.ResourceSpace, ResourceID: spaceID,
 		SubjectType: "member", SubjectID: bobID,
 		Access: permission.AccessEdit, WorkspaceID: ws, GrantedBy: alice,

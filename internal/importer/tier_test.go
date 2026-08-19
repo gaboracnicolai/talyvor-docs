@@ -102,7 +102,7 @@ func TestA3_Import_TierEnforcement(t *testing.T) {
 		t.Fatalf("seed target space: %v", err)
 	}
 	grant := func(subject string, lvl permission.AccessLevel) {
-		if err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
+		if _, err := permission.NewStore(d.Pool).Grant(ctx, permission.Permission{
 			ResourceType: permission.ResourceSpace, ResourceID: targetSpace.ID, SubjectType: "member",
 			SubjectID: subject, Access: lvl, WorkspaceID: W, GrantedBy: owner,
 		}); err != nil {

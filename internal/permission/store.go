@@ -115,35 +115,52 @@ func scan(s interface{ Scan(...any) error }) (*Permission, error) {
 // it to 404. Distinct from a raw DB error so a real failure is never masked as not-found.
 var ErrNotFound = errors.New("permission: not found in workspace")
 
-// Grant inserts or updates a permission. UNIQUE on (resource,
-// subject) collapses duplicates so re-granting becomes an access
-// upgrade rather than a duplicate row.
-func (s *Store) Grant(ctx context.Context, p Permission) error {
+// Grant inserts or updates a permission and RETURNS THE PERSISTED ROW. UNIQUE on (resource,
+// subject) collapses duplicates so re-granting becomes an access upgrade rather than a duplicate
+// row — and because DO UPDATE always fires (there is no WHERE on it), RETURNING yields exactly one
+// row on both arms: the freshly inserted grant, or the upgraded one with its ORIGINAL id and
+// created_at, which is the id the sibling DELETE route addresses.
+//
+// ⚠ IT RETURNS THE ROW BECAUSE THE ROW IS WHAT THE CREATE ROUTE PROMISES, AND FOR TWO YEARS IT
+// SENT AN EMPTY KEY INSTEAD. This used to return only `error`, so `handler.grant` had nothing to
+// answer 201 with except the `Permission` IT had built — id "" and created_at zero on every
+// response, while GET on the same resource returned the real uuid and timestamp. Measured through
+// the real chain on real Postgres in grantroute_realpg_test.go, whose header carries the bodies.
+// The id is not decoration: `DELETE /v1/spaces/{spaceID}/permissions/{permID}` takes exactly it,
+// and the frontend types this route as Promise<Permission>.
+//
+// ⚠ THE SIGNATURE CHANGE IS THE FIX, NOT A CONVENIENCE. An overload that kept an error-only Grant
+// beside a row-returning one would leave the lossy version as the obvious call for the next writer
+// of a create route — which is how this happened. One method, and it always tells the caller what
+// it wrote. The 28 fixture call sites that ignore the row now say so with `_`.
+func (s *Store) Grant(ctx context.Context, p Permission) (*Permission, error) {
 	if s.pool == nil {
-		return errors.New("permission: no pool")
+		return nil, errors.New("permission: no pool")
 	}
 	if !validAccessForGrant[p.Access] {
-		return fmt.Errorf("permission: invalid access %q", p.Access)
+		return nil, fmt.Errorf("permission: invalid access %q", p.Access)
 	}
 	if p.SubjectType == "" || p.SubjectID == "" {
-		return errors.New("permission: subject required")
+		return nil, errors.New("permission: subject required")
 	}
 	if !validSubjectType[p.SubjectType] {
 		// Only member/everyone are honored by resolveAccess; "team" (and anything else) is inert, so
 		// persisting it would tell the admin a share happened when it did not. Fail loud instead.
-		return fmt.Errorf("permission: unsupported subject_type %q (only \"member\" and \"everyone\" are honored)", p.SubjectType)
+		return nil, fmt.Errorf("permission: unsupported subject_type %q (only \"member\" and \"everyone\" are honored)", p.SubjectType)
 	}
-	_, err := s.pool.Exec(ctx,
+	row := s.pool.QueryRow(ctx,
 		`INSERT INTO permissions (resource_type, resource_id, subject_type, subject_id, access, workspace_id, granted_by)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (resource_type, resource_id, subject_type, subject_id)
-        DO UPDATE SET access = EXCLUDED.access, granted_by = EXCLUDED.granted_by`,
+        DO UPDATE SET access = EXCLUDED.access, granted_by = EXCLUDED.granted_by
+        RETURNING `+cols,
 		string(p.ResourceType), p.ResourceID, p.SubjectType, p.SubjectID, string(p.Access), p.WorkspaceID, p.GrantedBy,
 	)
+	out, err := scan(row)
 	if err != nil {
-		return fmt.Errorf("permission: grant: %w", err)
+		return nil, fmt.Errorf("permission: grant: %w", err)
 	}
-	return nil
+	return out, nil
 }
 
 // Revoke removes the (resource, subject) permission. A revoke of a
