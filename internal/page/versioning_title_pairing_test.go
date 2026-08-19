@@ -47,7 +47,7 @@ func TestVersionSnapshot_PairsTitleAndContentFromTheSameSave_RealPG(t *testing.T
 		}
 	}
 
-	vers, err := store.GetVersions(ctx, pID)
+	vers, err := store.GetVersions(ctx, pID, []string{ws})
 	if err != nil {
 		t.Fatalf("versions: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestVersionSnapshot_ContentOnlySave_KeepsTheCurrentTitle_RealPG(t *testing.
 		t.Fatalf("content-only save: %v", err)
 	}
 
-	vers, err := store.GetVersions(ctx, pID)
+	vers, err := store.GetVersions(ctx, pID, []string{ws})
 	if err != nil {
 		t.Fatalf("versions: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestRestoreNewestVersion_LeavesTheLivePageUnchanged_RealPG(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read before: %v", err)
 	}
-	vers, err := store.GetVersions(ctx, pID)
+	vers, err := store.GetVersions(ctx, pID, []string{ws})
 	if err != nil {
 		t.Fatalf("versions: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestRestoreNewestVersion_LeavesTheLivePageUnchanged_RealPG(t *testing.T) {
 	}
 	newest := vers[0].Version // ORDER BY version DESC
 
-	if _, err := store.RestoreVersion(ctx, pID, newest); err != nil {
+	if _, err := store.RestoreVersion(ctx, pID, newest, []string{ws}); err != nil {
 		t.Fatalf("restore v%d: %v", newest, err)
 	}
 
