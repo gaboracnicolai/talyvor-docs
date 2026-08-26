@@ -116,6 +116,12 @@ func (h *Handler) Mount(r chi.Router) {
 		r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/{pageID}/verify", h.Verify)
 
 		r.With(h.pageEnf.Require(permission.AccessView)).Get("/{pageID}/versions", h.GetVersions)
+		// ⚠ NOT `/{pageID}/versions/cost`, AND THE REASON IS ONE ROUTE UP. `/{pageID}/versions/
+		// {version}` is registered on the next line, so a sibling under the same prefix would sit
+		// beside a wildcard and its resolution would depend on chi's static-over-param precedence
+		// — true today, invisible at the call site, and a 400 BAD_VERSION rather than a 404 the
+		// day it stopped being true. A distinct segment cannot be shadowed by anything.
+		r.With(h.pageEnf.Require(permission.AccessView)).Get("/{pageID}/version-cost", h.GetVersionCostSplit)
 		r.With(h.pageEnf.Require(permission.AccessView)).Get("/{pageID}/versions/{version}", h.GetVersion)
 		r.With(h.pageEnf.Require(permission.AccessView)).Get("/{pageID}/versions/{version}/diff/{other}", h.DiffVersions)
 		r.With(h.pageEnf.Require(permission.AccessEdit)).Post("/{pageID}/versions/{version}/restore", h.RestoreVersion)
@@ -308,6 +314,63 @@ func (h *Handler) GetVersions(w http.ResponseWriter, r *http.Request) {
 		out = []model.PageVersion{}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// versionCostSplitBody is the WIRE shape of a page's AI spend split. It is declared here rather
+// than by tagging `Store.VersionCostSplit` because the store's field names are free to change and
+// these four keys are a contract with the SPA — and because every one of them is money, where a
+// silently renamed key reads to a client as an absent value and to a reader as a missing bucket.
+//
+// ⚠ THE UNITS ARE IN THE NAMES. The store calls them Attributed/Pending/Unattributable/PageTotal;
+// on the wire they carry `_usd`, matching `own_ai_cost_usd` and `total_ai_cost_usd`, the two money
+// keys this API already serves. A bare `attributed` beside those would be the only money field in
+// the surface that does not say what it is denominated in.
+type versionCostSplitBody struct {
+	Attributed     float64 `json:"attributed_usd"`
+	Pending        float64 `json:"pending_usd"`
+	Unattributable float64 `json:"unattributable_usd"`
+	PageTotal      float64 `json:"page_total_usd"`
+}
+
+// GetVersionCostSplit serves the reconciliation between what version history SHOWS and what the
+// page has actually spent.
+//
+// ⚠ IT EXISTS BECAUSE THE FUNCTION UNDER IT HAD NO CALLER. `Store.VersionCostSplit` landed with
+// #190 arguing, in its own docstring, that "a per-revision figure that does not add up is a lie
+// about money that looks like a feature" — and then nothing served it. MEASURED at merged main
+// `f1ad4db`: zero production callers, only its own unit test and two comments naming it. The
+// reconciliation was guaranteed in Go and unreachable from the product, which is the same
+// distance from a reader as not existing.
+//
+// ⚠ AND THE GAP IS ALREADY ON SCREEN, which is what makes this a route rather than a report.
+// `frontend/src/pages/PageView.tsx` renders `<VersionHistory>` and, directly beneath it, the panel
+// printing `own_ai_cost_usd`. A reader therefore already sees both numbers; when a page carries
+// pending or pre-0021 spend they do not agree, and until now nothing could say why.
+//
+// Workspace-scoped like every other per-page read here: the store's `assertInWorkspaces` does the
+// refusing, and it is handed the CALLER's verified workspaces — a route that passed the page's own
+// would defeat it without changing a line of that function.
+func (h *Handler) GetVersionCostSplit(w http.ResponseWriter, r *http.Request) {
+	split, err := h.store.VersionCostSplit(r.Context(), chi.URLParam(r, "pageID"), authz.WorkspaceIDs(r.Context()))
+	if errors.Is(err, ErrNotFound) {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "VERSION_COST_FAILED", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, versionCostSplitBody{
+		Attributed:     split.Attributed,
+		Pending:        split.Pending,
+		Unattributable: split.Unattributable,
+		// ⚠ PASSED THROUGH, NEVER RECOMPUTED AS THE SUM OF THE OTHER THREE. The store reads this
+		// from `pages.own_ai_cost_usd` precisely so the whole and its parts are two independent
+		// numbers that can be COMPARED; deriving it here would make the reconciliation true by
+		// construction and blind — the arithmetic would balance in exactly the case where the
+		// buckets had lost money.
+		PageTotal: split.PageTotal,
+	})
 }
 
 // GetVersion returns a single historical snapshot. Workspace-scoped: a page outside the

@@ -78,8 +78,44 @@ export interface PageVersion {
   // ⚠ 0 means "no priced spend is attributed to this revision", NOT "this revision was free": a
   // completion bound after the newest save belongs to a revision that does not exist yet, and every
   // binding written before migration 0021 carries no revision at all. Both are real money, both are
-  // reported by the server's VersionCostSplit, and neither can appear here.
+  // reported by the server's VersionCostSplit — served since `GET .../version-cost` and rendered
+  // by VersionHistory's reconciliation strip — and neither can appear here.
   ai_cost_usd: number;
+}
+
+/**
+ * VersionCostSplit — how much of a page's AI spend version history can actually show.
+ *
+ * ⚠ IT IS ON THE WIRE BECAUSE THE FUNCTION BEHIND IT HAD NO CALLER. `Store.VersionCostSplit`
+ * landed with #190 arguing that "a per-revision figure that does not add up is a lie about money
+ * that looks like a feature", and then nothing served it: measured at merged main `f1ad4db`, zero
+ * production callers, only its own unit test and two comments — one of which was this file's.
+ * A reconciliation guaranteed in Go and unreachable from the product is, to a reader, absent.
+ *
+ * ⚠ THE THREE PARTS AND THE WHOLE ARE FOUR INDEPENDENT NUMBERS, DELIBERATELY. `page_total_usd` is
+ * read from `pages.own_ai_cost_usd` rather than derived from the other three, so the sum can be
+ * COMPARED against it instead of being true by construction — which is exactly the arithmetic
+ * that would balance in the case where a bucket had lost money.
+ */
+export interface VersionCostSplit {
+  /** Landed on a revision that exists. This is what the rows in version history add up to. */
+  attributed_usd: number;
+  /**
+   * Bound after the newest save, so it names a revision that does not exist YET. Not lost — it
+   * appears on its revision the moment the next save creates it.
+   */
+  pending_usd: number;
+  /**
+   * Written before migration 0021, when the revision was not captured at bind time. No query can
+   * recover it, and no future save will ever land it on a row.
+   *
+   * ⚠ IT IS ITS OWN FIELD RATHER THAN FOLDED IN WITH `pending_usd`, and the difference is the
+   * whole reason both exist: pending money is coming and this money is not. One combined
+   * "unshown" figure would tell a reader that all of it is on its way.
+   */
+  unattributable_usd: number;
+  /** `pages.own_ai_cost_usd` — the whole, read rather than recomputed. */
+  page_total_usd: number;
 }
 
 // ⚠ THERE IS NO `Comment` HERE ANY MORE, AND THAT IS THE POINT. This module used to declare a
