@@ -74,6 +74,12 @@ export interface PageVersion {
   content: string;
   created_by: string;
   created_at: string;
+  // The AI spend attributed to THIS revision — the completions bound while it was being written.
+  // ⚠ 0 means "no priced spend is attributed to this revision", NOT "this revision was free": a
+  // completion bound after the newest save belongs to a revision that does not exist yet, and every
+  // binding written before migration 0021 carries no revision at all. Both are real money, both are
+  // reported by the server's VersionCostSplit, and neither can appear here.
+  ai_cost_usd: number;
 }
 
 // ⚠ THERE IS NO `Comment` HERE ANY MORE, AND THAT IS THE POINT. This module used to declare a

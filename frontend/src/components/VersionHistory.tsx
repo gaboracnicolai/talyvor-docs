@@ -74,6 +74,26 @@ interface VersionHistoryProps {
   onRestored?: () => void;
 }
 
+// revisionCost renders what one revision's AI assistance cost.
+//
+// ⚠ A NON-ZERO COST MUST NEVER RENDER AS "$0.00". The rest of this SPA formats money with
+// toFixed(2) because it prices whole documents and linked Track issues; a single revision routinely
+// costs a fraction of a cent, and two decimals turn a real charge into a printed zero — the one
+// rounding error a reader cannot detect, because "$0.00" and "free" are the same six characters.
+// Small amounts widen to four decimals, and anything under that floor is reported as a bound rather
+// than rounded away.
+//
+// ⚠ AND ZERO IS "—", NOT "$0.00". Zero here means no priced spend is ATTRIBUTED to this revision,
+// which is not the same as the revision having been free: spend bound after the newest save belongs
+// to a revision that does not exist yet, and bindings older than migration 0021 carry no revision at
+// all. Printing $0.00 would state a fact about money the server never claimed.
+export function revisionCost(usd: number): string {
+  if (!(usd > 0)) return "—";
+  if (usd < 0.0001) return "<$0.0001";
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
 // VersionHistory lists the append-only version history and supports viewing a diff of any two
 // versions and restoring one (a non-destructive restore — it writes a new current version).
 export function VersionHistory({ spaceID, pageID, onRestored }: VersionHistoryProps) {
@@ -128,6 +148,12 @@ export function VersionHistory({ spaceID, pageID, onRestored }: VersionHistoryPr
               <span className="font-mono">v{v.version}</span>{" "}
               <span className="text-fg-muted">
                 {v.created_by || "—"} · {new Date(v.created_at).toLocaleString()}
+              </span>{" "}
+              <span
+                className="font-mono text-fg-muted"
+                title={v.ai_cost_usd > 0 ? "AI spend attributed to this revision" : "No AI spend is attributed to this revision"}
+              >
+                {revisionCost(v.ai_cost_usd)}
               </span>
             </button>
             <button

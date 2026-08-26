@@ -1520,9 +1520,40 @@ func (s *Store) GetVersions(ctx context.Context, pageID string, wsIDs []string) 
 	if s.pool == nil {
 		return nil, nil
 	}
+	// ⚠ THE COST JOIN IS INSIDE THE WORKSPACE-SCOPED READ, not a second query beside it. The
+	// aggregate is keyed on page_id + page_version only — page_ai_spend_events also carries a
+	// workspace_id, but a subquery that re-derived tenancy would be a SECOND place for the scope
+	// to be right, and the rows it aggregates belong to the page this statement has already
+	// scoped.
+	//
+	// ⚠⚠ NEITHER CONJUNCT IN THE SUBQUERY IS LOAD-BEARING FOR CORRECTNESS, AND SAYING SO IS THE
+	// POINT — MEASURED BY POSITIVE CONTROL, NOT REASONED. Deleting either one leaves every guard
+	// in versioncost_realpg_test.go GREEN:
+	//
+	//	page_version IS NOT NULL   a pre-0021 row has page_version NULL, and NULL = v.version is
+	//	                           NULL, never TRUE — the LEFT JOIN already cannot match it. What
+	//	                           this conjunct DOES earn is idx_page_ai_spend_page_version, which
+	//	                           is partial on exactly this predicate and unusable without it.
+	//	cost_usd IS NOT NULL       SUM() skips NULLs, and a group of only-unpriced rows sums to
+	//	                           NULL, which COALESCE turns into the same 0 as no group at all.
+	//	                           It documents that an unpriced binding is not a price; it does
+	//	                           not enforce it.
+	//
+	// They are kept, labelled, rather than deleted or left to read as protection. A predicate that
+	// cannot change an answer is the shape of thing this repo has shipped before believing it was
+	// a filter; correctness here rests on the join key and on SUM's NULL semantics, and the guards
+	// that actually hold this query up are the ones that move the join key and the aggregate.
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, page_id, workspace_id, version, title, content, created_by, created_at
-        FROM page_versions WHERE workspace_id = ANY($2) AND page_id = $1 ORDER BY version DESC`,
+		`SELECT v.id, v.page_id, v.workspace_id, v.version, v.title, v.content, v.created_by, v.created_at,
+                COALESCE(c.cost, 0)
+        FROM page_versions v
+        LEFT JOIN (
+            SELECT page_version, SUM(cost_usd) AS cost
+              FROM page_ai_spend_events
+             WHERE page_id = $1 AND cost_usd IS NOT NULL AND page_version IS NOT NULL
+             GROUP BY page_version
+        ) c ON c.page_version = v.version
+        WHERE v.workspace_id = ANY($2) AND v.page_id = $1 ORDER BY v.version DESC`,
 		pageID, wsIDs,
 	)
 	if err != nil {
@@ -1532,7 +1563,7 @@ func (s *Store) GetVersions(ctx context.Context, pageID string, wsIDs []string) 
 	var out []model.PageVersion
 	for rows.Next() {
 		var v model.PageVersion
-		if err := rows.Scan(&v.ID, &v.PageID, &v.WorkspaceID, &v.Version, &v.Title, &v.Content, &v.CreatedBy, &v.CreatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.PageID, &v.WorkspaceID, &v.Version, &v.Title, &v.Content, &v.CreatedBy, &v.CreatedAt, &v.AICostUSD); err != nil {
 			return nil, err
 		}
 		out = append(out, v)

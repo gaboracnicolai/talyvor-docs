@@ -58,8 +58,15 @@ func (s *Store) BindAISpend(ctx context.Context, requestID, pageID, workspaceID,
             SELECT 1 FROM pages WHERE id = $2 AND workspace_id = $3
         ),
         ins AS (
-            INSERT INTO page_ai_spend_events (request_id, page_id, workspace_id, operation)
-            SELECT $1, $2, $3, $4 FROM ok
+            INSERT INTO page_ai_spend_events (request_id, page_id, workspace_id, operation, page_version)
+            SELECT $1, $2, $3, $4,
+                   -- ⚠ MAX + 1: the revision this work is GOING INTO, not the one it came after.
+                   -- page_versions row N is the state AFTER save N (measured, not read — see
+                   -- migrations/0021), so the spend that produced revision N is bound while
+                   -- MAX(version) is N-1. Recording MAX(version) would put every completion on
+                   -- the previous revision, off by one save, with a plausible number on every row.
+                   COALESCE((SELECT MAX(version) FROM page_versions WHERE page_id = $2), 0) + 1
+              FROM ok
             ON CONFLICT (request_id) DO NOTHING
             RETURNING 1
         )
@@ -225,4 +232,58 @@ func (s *Store) UnpricedWorkspaces(ctx context.Context, limit int) ([]string, er
 		out = append(out, w)
 	}
 	return out, rows.Err()
+}
+
+// VersionCostSplit is the whole of a page's priced AI spend, divided by whether version history
+// can show it.
+//
+// ⚠ IT EXISTS BECAUSE A PER-REVISION FIGURE THAT DOES NOT ADD UP IS A LIE ABOUT MONEY THAT LOOKS
+// LIKE A FEATURE. Summing the ai_cost_usd column down a page's version history gives Attributed
+// and nothing else, and a reader has no way to tell that from the page's own_ai_cost_usd. The two
+// differ for two reasons that are both normal:
+//
+//	Pending        spend bound after the newest save names a revision that does not exist yet. It
+//	               is not lost — it appears on its revision the moment the next save creates it.
+//	Unattributable every page_ai_spend_events row written before migration 0021 carries no
+//	               revision, and no query can recover one: the fact was never captured. Reporting
+//	               these as 0 on some revision, or dropping them, would both be claims nobody
+//	               measured.
+//
+// Attributed + Pending + Unattributable == the page's own_ai_cost_usd, and PageTotal is read from
+// that column rather than recomputed so the two can be compared rather than assumed equal.
+type VersionCostSplit struct {
+	Attributed     float64
+	Pending        float64
+	Unattributable float64
+	PageTotal      float64
+}
+
+// VersionCostSplit reports the split for one page, refusing pages outside the caller's workspaces.
+func (s *Store) VersionCostSplit(ctx context.Context, pageID string, wsIDs []string) (VersionCostSplit, error) {
+	if err := s.assertInWorkspaces(ctx, pageID, wsIDs); err != nil {
+		return VersionCostSplit{}, err
+	}
+	var out VersionCostSplit
+	if err := s.pool.QueryRow(ctx, `
+        WITH maxv AS (
+            SELECT COALESCE(MAX(version), 0) AS v FROM page_versions WHERE page_id = $1
+        ),
+        priced AS (
+            SELECT page_version, cost_usd
+              FROM page_ai_spend_events
+             WHERE page_id = $1 AND cost_usd IS NOT NULL
+        )
+        SELECT
+            COALESCE((SELECT SUM(cost_usd) FROM priced, maxv
+                       WHERE page_version IS NOT NULL AND page_version BETWEEN 1 AND maxv.v), 0),
+            COALESCE((SELECT SUM(cost_usd) FROM priced, maxv
+                       WHERE page_version IS NOT NULL AND page_version > maxv.v), 0),
+            COALESCE((SELECT SUM(cost_usd) FROM priced
+                       WHERE page_version IS NULL), 0),
+            COALESCE((SELECT own_ai_cost_usd FROM pages WHERE id = $1), 0)`,
+		pageID,
+	).Scan(&out.Attributed, &out.Pending, &out.Unattributable, &out.PageTotal); err != nil {
+		return VersionCostSplit{}, fmt.Errorf("page: version cost split: %w", err)
+	}
+	return out, nil
 }

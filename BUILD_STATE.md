@@ -1257,4 +1257,4 @@ docs migrate                                   # apply schema standalone
 **Adding a migration:** drop `00NN_name.sql` in `migrations/`. It is embedded, applied on
 boot in `NNNN` order, and recorded in `schema_migrations`. Never edit an applied migration
 — the checksum guard will fail the boot, by design. Docs numbering is independent of the
-sibling repos; current high-water is **0020**.
+sibling repos; current high-water is **0021**.
