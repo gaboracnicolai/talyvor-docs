@@ -142,6 +142,18 @@ type PageVersion struct {
 	Content     string    `json:"content"      db:"content"`
 	CreatedBy   string    `json:"created_by"   db:"created_by"`
 	CreatedAt   time.Time `json:"created_at"   db:"created_at"`
+
+	// AICostUSD is the AI spend ATTRIBUTED TO THIS REVISION — the completions bound while this
+	// revision was being written, i.e. after the previous save and before the one that produced
+	// this row. It is what "COST PER REVISION IN VERSION HISTORY" on the product page names.
+	//
+	// ⚠ 0 MEANS "NO PRICED SPEND IS ATTRIBUTED TO THIS REVISION", WHICH IS NOT THE SAME AS "THIS
+	// REVISION WAS FREE". Two other pools exist and neither can appear here: spend bound after the
+	// newest save names a revision that does not exist yet (PENDING), and every row written before
+	// migration 0021 carries no revision at all (UNATTRIBUTABLE, and unrecoverable — the fact was
+	// never captured). Store.VersionCostSplit reports all three so the sum over version history is
+	// never mistaken for the page's own_ai_cost_usd.
+	AICostUSD float64 `json:"ai_cost_usd" db:"ai_cost_usd"`
 }
 
 // ⚠ THE `Comment` THAT WAS DECLARED HERE IS DELETED. It carried nine json-tagged fields and had

@@ -57,6 +57,7 @@ const v = (version: number, title: string, content: string): PageVersion => ({
   content,
   created_by: "mem-1",
   created_at: "2026-08-13T10:00:00Z",
+  ai_cost_usd: 0,
 });
 
 // Mutable so each test installs its own pair; the mock is hoisted and must not close over a
