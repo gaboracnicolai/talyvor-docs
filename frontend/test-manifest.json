@@ -26,6 +26,7 @@
     "src/pages/PageView.editsession.test.tsx": 4,
     "src/pages/PageView.pagelock.selfidentity.test.tsx": 2,
     "src/pages/PageView.viewrecord.wire.test.tsx": 2,
+    "src/pages/SpaceView.rollup.test.tsx": 3,
     "src/pages/StalePages.copy.test.tsx": 2,
     "src/router/approval-open.test.tsx": 3,
     "src/router/guard-render.test.tsx": 6,
@@ -37,6 +38,6 @@
     "src/sw/register.test.ts": 8,
     "src/sw/sw.test.ts": 7
   },
-  "totalFiles": 36,
-  "totalTests": 163
+  "totalFiles": 37,
+  "totalTests": 166
 }

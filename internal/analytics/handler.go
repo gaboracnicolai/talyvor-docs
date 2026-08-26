@@ -13,8 +13,9 @@ import (
 )
 
 type Handler struct {
-	store   *Store
-	pageEnf *permission.Enforcer // A3: by-page access (view/edit)
+	store    *Store
+	pageEnf  *permission.Enforcer // A3: by-page access (view/edit)
+	spaceEnf *permission.Enforcer // A3: by-space access — the SPACE roll-up only
 }
 
 func NewHandler(store *Store) *Handler { return &Handler{store: store} }
@@ -28,10 +29,69 @@ func (h *Handler) WithAccess(pageEnf *permission.Enforcer) *Handler {
 	return h
 }
 
+// WithSpaceAccess wires the by-SPACE enforcer that gates the space roll-up.
+//
+// ⚠ A SEPARATE METHOD RATHER THAN A SECOND PARAMETER ON `WithAccess`, and the reason is not
+// taste: `WithAccess(pageEnf)` has nineteen call sites across this repo, all but one of them in
+// tests that build their own router. Widening its signature would edit nineteen files to add a
+// gate eighteen of them do not use, and every one of those edits is a chance to pass the wrong
+// enforcer to a route that then looks gated.
+//
+// ⚠ AND NOT WIRING IT FAILS CLOSED, which is what makes an additive method safe here.
+// `Enforcer.Require` on a NIL receiver denies with 404 and never reaches the handler
+// (permission.TestEnforcer_NilReceiver_FailsClosed), so a router that forgets this call serves a
+// dead route rather than an open one. `mainwiring_test.go` is the tripwire on the production call
+// site, because a dead route is still a feature that looks shipped.
+func (h *Handler) WithSpaceAccess(spaceEnf *permission.Enforcer) *Handler {
+	h.spaceEnf = spaceEnf
+	return h
+}
+
 func (h *Handler) Mount(r chi.Router) {
 	r.With(h.pageEnf.Require(permission.AccessView)).Post("/spaces/{spaceID}/pages/{pageID}/view", h.RecordView)
 	r.With(h.pageEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}/pages/{pageID}/analytics", h.PageStats)
 	r.Get("/workspaces/{wsID}/analytics/pages", h.WorkspaceStats)
+	// THE SPACE ROLL-UP — the third of the three scopes the product page sells ("PAGE, SPACE AND
+	// ORG ROLLUPS") and the one that did not exist. Gated by the SPACE enforcer, unlike the org
+	// route above, which authorizes its URL workspace in the handler: here the resource in the
+	// path IS a space, so the repo's own space gate is the right one and a private space the
+	// caller has no grant on is refused before any aggregation happens.
+	r.With(h.spaceEnf.Require(permission.AccessView)).Get("/spaces/{spaceID}/analytics/pages", h.SpaceStats)
+}
+
+// SpaceStats serves the readership roll-up for ONE space.
+//
+// ⚠ IT IS CHECKED TWICE, AND THE SECOND CHECK IS NOT THE FIRST ONE REPEATED. The route's space
+// enforcer answers "may this caller VIEW this space" — a question about GRANTS. The workspace
+// assertion below answers "is that space in a workspace this session is a verified member of" —
+// a question about TENANCY. Different subsystems, different failure modes; the org route already
+// applies the tenancy half to its own URL param and this is the same rule one level down.
+//
+// The per-page visibility filter inside the roll-up is the third, and it is the one that actually
+// protects private CONTENT — see main.go's note on the defect where the org route "authorized the
+// workspace and stopped".
+func (h *Handler) SpaceStats(w http.ResponseWriter, r *http.Request) {
+	spaceID := chi.URLParam(r, "spaceID")
+	wsID, err := h.store.WorkspaceOfSpace(r.Context(), spaceID)
+	if err != nil {
+		// A space that does not exist and a space in someone else's workspace answer the same
+		// way, on purpose: the alternative tells an unauthorized caller which space ids are real.
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	if _, ok := authz.AuthorizeWorkspace(r.Context(), wsID); !ok {
+		writeErr(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	stats, err := h.store.GetSpaceStats(r.Context(), wsID, spaceID, daysParam(r))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "stats failed")
+		return
+	}
+	if stats == nil {
+		stats = withEmptyCohorts(&WorkspaceReadStats{})
+	}
+	writeJSON(w, http.StatusOK, stats)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

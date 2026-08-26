@@ -297,7 +297,7 @@ func TestGetWorkspaceStats_ATruncatedRankedStreamIsNotARollUp(t *testing.T) {
 	// Two rows delivered, then the stream fails. 50 + 30 = 80 is the total a caller would be
 	// handed; nothing downstream can tell it from a workspace that genuinely saw 80 views.
 	pool.ExpectQuery(`(?i)page_id.*group by.*order by count.*desc`).
-		WithArgs("ws-1", 30).
+		WithArgs("ws-1", 30, "").
 		WillReturnRows(pgxmock.NewRows([]string{
 			"page_id", "title", "view_count", "unique_viewers", "avg_duration_sec", "last_viewed",
 		}).
@@ -344,7 +344,7 @@ func TestGetWorkspaceStats_ATruncatedNeverReadStreamIsNotACount(t *testing.T) {
 	lastSeen := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 
 	pool.ExpectQuery(`(?i)page_id.*group by.*order by count.*desc`).
-		WithArgs("ws-1", 30).
+		WithArgs("ws-1", 30, "").
 		WillReturnRows(pgxmock.NewRows([]string{
 			"page_id", "title", "view_count", "unique_viewers", "avg_duration_sec", "last_viewed",
 		}).AddRow("pg-1", "Top", int(50), int(7), int(41), lastSeen))
@@ -356,7 +356,7 @@ func TestGetWorkspaceStats_ATruncatedNeverReadStreamIsNotACount(t *testing.T) {
 	// Two ids delivered, then the stream fails. The workspace's real never-read cohort is
 	// unknowable from here — which is the point: 2 is not it, and 2 is what gets counted.
 	pool.ExpectQuery(`(?i)select p\.id from pages p.*left join page_views`).
-		WithArgs("ws-1").
+		WithArgs("ws-1", "").
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).
 			AddRow("pg-a").
 			AddRow("pg-b").

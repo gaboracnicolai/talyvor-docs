@@ -445,6 +445,12 @@ func main() {
 	editSessionHandler.WithAccess(pageEnf)
 	linkHandler.WithAccess(pageEnf)
 	analyticsHandler.WithAccess(pageEnf)
+	// THE SPACE ROLL-UP'S GATE — the third scope of "PAGE, SPACE AND ORG ROLLUPS", and the line
+	// without which that route is a dead 404 rather than an open door. Enforcer.Require on a nil
+	// receiver denies (permission.TestEnforcer_NilReceiver_FailsClosed), so forgetting this ships
+	// a feature that LOOKS present and answers nothing — which is why analytics/mainwiring_test.go
+	// pins this call as well as the page-read gate below. sixth copy of the same seam.
+	analyticsHandler.WithSpaceAccess(spaceEnf)
 	dbHandler.WithAccess(pageEnf, dbEnf)
 	changelogHandler.WithAccess(pageEnf)
 	freshHandler.WithAccess(pageEnf)

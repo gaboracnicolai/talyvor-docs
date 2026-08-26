@@ -403,7 +403,70 @@ const rollupCap = 10
 // predicate would bound it and is NOT done here: a second copy of the authorization rule that can
 // drift from the engine is the failure this package is being fixed for. What would bound it
 // honestly is a batch visibility lookup ON the permission engine, which does not exist yet.
+// WorkspaceOfSpace returns the workspace a space belongs to.
+//
+// ⚠ IT EXISTS SO THE SPACE ROLL-UP CAN BE CHECKED TWICE, and the second check is not redundant
+// with the first. The route is gated by the SPACE enforcer, which answers "may this caller VIEW
+// this space" — a question about grants. `getScopedStats` filters on `pv.workspace_id`, which is
+// a question about TENANCY, and the two are answered by different subsystems. Reading the
+// workspace off the space here lets the handler put the caller's verified memberships against it
+// before a single figure is aggregated, the same belt-and-braces `WorkspaceStats` already applies
+// to its own URL param.
+//
+// A space that does not exist is ErrNotFound rather than an empty string: "" would flow into the
+// tenancy filter and match no rows, which renders as a legitimately empty roll-up — a missing
+// space reported as a quiet space.
+func (s *Store) WorkspaceOfSpace(ctx context.Context, spaceID string) (string, error) {
+	if s == nil || s.pool == nil {
+		return "", ErrNoPageReadGate
+	}
+	var wsID string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT workspace_id FROM spaces WHERE id = $1`, spaceID,
+	).Scan(&wsID); err != nil {
+		return "", ErrNotFound
+	}
+	return wsID, nil
+}
+
+// ErrNoSpaceScope is returned by GetSpaceStats when it is handed no space.
+//
+// ⚠ IT IS AN ERROR AND NOT A DEFAULT, AND THAT IS THE WHOLE POINT OF ITS EXISTING. The scoped
+// query below expresses "every space" as an EMPTY spaceID, which is what lets the org and space
+// roll-ups be one statement instead of two that drift. That convenience is also a trapdoor: a
+// space roll-up called with "" — a renamed URL param, a handler reading the wrong key, a caller
+// passing a zero value — would silently answer with the WHOLE WORKSPACE and look entirely normal
+// doing it. `chi.URLParam` returns "" for a param that is not mounted, which is precisely how
+// that happens in this repo (see internal/mountguard). So the widening is refused at the door.
+var ErrNoSpaceScope = errors.New("analytics: space stats require a space id")
+
+// GetWorkspaceStats is the ORG roll-up: every space in the workspace.
 func (s *Store) GetWorkspaceStats(ctx context.Context, workspaceID string, days int) (*WorkspaceReadStats, error) {
+	return s.getScopedStats(ctx, workspaceID, "", days)
+}
+
+// GetSpaceStats is the SPACE roll-up — the third of the three scopes the product page sells
+// ("PAGE, SPACE AND ORG ROLLUPS") and the one that did not exist.
+//
+// ⚠ IT IS THE SAME STATEMENT AS THE ORG ROLL-UP, NARROWED, RATHER THAN A SECOND COPY OF IT.
+// `GetWorkspaceStats` is ~150 lines carrying a visibility filter, three cohorts and two
+// hard-won corrections — the aggregates that used to serve zeros, and the caption that could
+// only appear when it was false. A parallel implementation would start identical and diverge on
+// the first fix that landed in one of them, which is the failure this file's own comment already
+// records in another form: "Two routes, one page, two answers." Narrowing the scope keeps the two
+// roll-ups agreeing BY CONSTRUCTION, and `spacerollup_realpg_test.go` asserts that agreement
+// against the org figures rather than against a constant.
+func (s *Store) GetSpaceStats(ctx context.Context, workspaceID, spaceID string, days int) (*WorkspaceReadStats, error) {
+	if spaceID == "" {
+		return nil, ErrNoSpaceScope
+	}
+	return s.getScopedStats(ctx, workspaceID, spaceID, days)
+}
+
+// getScopedStats serves both roll-ups. An EMPTY spaceID means every space in the workspace; a
+// non-empty one narrows to that space. Nothing outside this file may pass "" by accident — the
+// two exported wrappers above are the only callers, and one of them refuses it.
+func (s *Store) getScopedStats(ctx context.Context, workspaceID, spaceID string, days int) (*WorkspaceReadStats, error) {
 	// Fail-closed, and checked BEFORE the pool: an unwired gate is a server misconfiguration and
 	// is reported as one. Mirrors freshness.GetStaleReport, including the nil receiver — a *Store
 	// held in an interface field is a non-nil interface over a nil pointer, so a caller's own
@@ -454,9 +517,16 @@ func (s *Store) GetWorkspaceStats(ctx context.Context, workspaceID string, days 
         WHERE pv.workspace_id = $1
           AND pv.created_at > NOW() - INTERVAL '1 day' * $2
           AND p.is_template = false
+          -- ⚠ THE SPACE NARROWING, AND IT IS IN THE SQL FOR THE SAME REASON is_template IS:
+          -- a row dropped in Go after the cap is applied would SHORTEN the dashboard instead of
+          -- narrowing it. Filtered here, the cap still fills from the space own content.
+          -- An empty $3 is the org roll-up; GetSpaceStats refuses to reach this with an empty id.
+          -- (No backticks in this comment: it lives inside a Go raw string literal, and one
+          -- would end the query mid-statement.)
+          AND ($3 = '' OR p.space_id = $3)
         GROUP BY pv.page_id
         ORDER BY COUNT(*) DESC, pv.page_id`,
-		workspaceID, days,
+		workspaceID, days, spaceID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("analytics: ranked pages: %w", err)
@@ -533,8 +603,12 @@ func (s *Store) GetWorkspaceStats(ctx context.Context, workspaceID string, days 
 		`SELECT p.id FROM pages p
         LEFT JOIN page_views pv ON pv.page_id = p.id
         WHERE p.workspace_id = $1 AND p.is_template = false
-          AND pv.id IS NULL`,
-		workspaceID,
+          AND pv.id IS NULL
+          -- Narrowed with the ranking above: a "never read" count that spanned the whole
+          -- workspace beside a space's own cohorts would be a figure about a different subject
+          -- sitting in the same response.
+          AND ($2 = '' OR p.space_id = $2)`,
+		workspaceID, spaceID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("analytics: never read: %w", err)
