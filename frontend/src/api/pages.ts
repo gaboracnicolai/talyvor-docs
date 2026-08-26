@@ -1,5 +1,5 @@
 import { apiRequest, qs } from "./client";
-import type { Page, PageVersion } from "./types";
+import type { Page, PageVersion, VersionCostSplit } from "./types";
 
 export const pagesApi = {
   list(spaceID: string) {
@@ -41,6 +41,14 @@ export const pagesApi = {
   version(spaceID: string, pageID: string, version: number) {
     return apiRequest<PageVersion>(
       `/v1/spaces/${spaceID}/pages/${pageID}/versions/${version}`,
+    );
+  },
+  // ⚠ NOT `/versions/cost`. The server registers `/{pageID}/versions/{version}` on the adjacent
+  // line, so a sibling under that prefix would resolve only by chi's static-over-param
+  // precedence — and would degrade to a 400 BAD_VERSION rather than a 404 the day it did not.
+  versionCostSplit(spaceID: string, pageID: string) {
+    return apiRequest<VersionCostSplit>(
+      `/v1/spaces/${spaceID}/pages/${pageID}/version-cost`,
     );
   },
   diffVersions(spaceID: string, pageID: string, from: number, to: number) {

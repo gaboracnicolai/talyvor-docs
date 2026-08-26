@@ -68,6 +68,11 @@ func TestSpaceAndPageRouteTable(t *testing.T) {
 		"GET /v1/spaces/{spaceID}/pages/{pageID}",
 		"PATCH /v1/spaces/{spaceID}/pages/{pageID}",
 		"POST /v1/spaces/{spaceID}/pages",
+		// ⚠ `/version-cost`, NOT `/versions/cost`. The line below mounts `/versions/{version}`, so
+		// a sibling under that prefix would resolve only by chi's static-over-param precedence and
+		// would degrade to a 400 BAD_VERSION rather than a 404 the day it did not. It serves the
+		// reconciliation between what version history SHOWS and what the page has SPENT.
+		"GET /v1/spaces/{spaceID}/pages/{pageID}/version-cost",
 		"GET /v1/spaces/{spaceID}/pages/{pageID}/versions",
 		"GET /v1/spaces/{spaceID}/pages/{pageID}/versions/{version}",
 		"GET /v1/spaces/{spaceID}/pages/{pageID}/versions/{version}/diff/{other}",

@@ -105,6 +105,20 @@ export function VersionHistory({ spaceID, pageID, onRestored }: VersionHistoryPr
     queryFn: () => pagesApi.versions(spaceID, pageID),
   });
 
+  // ⚠ HOW MUCH OF THE PAGE'S SPEND THESE ROWS DO NOT ACCOUNT FOR. Summing `ai_cost_usd` down the
+  // list gives Attributed and nothing else, and until this read existed a reader had no way to
+  // tell that from the page's own total — which `pages/PageView.tsx` renders directly BENEATH
+  // this component. Two numbers on one screen that did not add up, with nothing saying why.
+  //
+  // ⚠ A SEPARATE QUERY RATHER THAN A FIELD ON THE LIST, deliberately: the split is a fact about
+  // the PAGE, not about any revision, and hanging it off every row would invite a reader to add
+  // it up. It is also allowed to fail on its own — see the render, where a failed split withdraws
+  // the CLAIM without withdrawing the rows.
+  const split = useQuery({
+    queryKey: ["page-version-cost", pageID],
+    queryFn: () => pagesApi.versionCostSplit(spaceID, pageID),
+  });
+
   const [from, to] = [Math.min(...pick), Math.max(...pick)];
   const diff = useQuery({
     queryKey: ["page-diff", pageID, from, to],
@@ -167,6 +181,55 @@ export function VersionHistory({ spaceID, pageID, onRestored }: VersionHistoryPr
           </li>
         ))}
       </ul>
+      {/* ⚠ RENDERED ONLY WHEN THERE IS SOMETHING UNACCOUNTED FOR, and the silence is the design.
+          A permanent "nothing is missing" strip is noise on every page that is fine, and it
+          teaches a reader to skip the one region that carries the warning in the case that is
+          not. `unshown > 0` is the whole condition — a page whose rows add up renders nothing.
+
+          ⚠ AND A FAILED SPLIT RENDERS NOTHING EITHER, WHICH IS NOT THE SAME THING AND IS THE
+          LESSER OF TWO WRONG ANSWERS. `split.data` being absent means the read failed, not that
+          the rows are complete; the honest alternatives were to say so or to stay quiet, and
+          what must never happen is the opposite — a claim of completeness the screen cannot
+          support. The ROWS are unaffected either way: a failed side-read does not withdraw a
+          feature that is still correct. */}
+      {split.data && split.data.pending_usd + split.data.unattributable_usd > 0 && (
+        <div
+          data-testid="version-cost-reconcile"
+          className="rounded border border-border px-1.5 py-1 text-fg-muted"
+        >
+          {/* ⚠ THE TWO BUCKETS ARE NAMED SEPARATELY BECAUSE ONLY ONE OF THEM WILL EVER LAND.
+              Pending money appears on its revision the moment the next save creates it;
+              pre-0021 money never will, because the revision was not recorded when it was spent.
+              A single "unshown" figure would tell a reader that all of it is on its way. */}
+          <div>
+            {/* ⚠ EVERY FIGURE HERE GOES THROUGH `revisionCost`, INCLUDING THE PAGE TOTAL, and
+                the first draft of this strip did not — it printed the total with `toFixed(2)`
+                like the rest of the SPA. That is the defect this component's own header was
+                written about, reintroduced two lines below the fix: a page whose whole AI spend
+                is a fraction of a cent would have read "these rows show $0.0042 of $0.00", which
+                is both absurd and, in the direction that matters, a claim that the page spent
+                nothing. The AI-cost panel in pages/PageView.tsx still rounds this way and is
+                left alone here — it is not this component's to change on the way past. */}
+            These rows show {revisionCost(split.data.attributed_usd)} of{" "}
+            <span className="font-mono">{revisionCost(split.data.page_total_usd)}</span> this page
+            has spent on AI.
+          </div>
+          {split.data.pending_usd > 0 && (
+            <div>
+              <span className="font-mono">{revisionCost(split.data.pending_usd)}</span> was spent
+              after the newest save, so it belongs to a revision that does not exist yet — it lands
+              on the next save.
+            </div>
+          )}
+          {split.data.unattributable_usd > 0 && (
+            <div>
+              <span className="font-mono">{revisionCost(split.data.unattributable_usd)}</span> was
+              spent before this page recorded which revision it was for, so it can never be shown
+              against one. The revision was never recorded, not lost.
+            </div>
+          )}
+        </div>
+      )}
       {pick.length === 2 && (
         <div className="rounded border border-border">
           <div className="border-b border-border px-1.5 py-1 text-fg-muted">

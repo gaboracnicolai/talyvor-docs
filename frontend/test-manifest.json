@@ -10,6 +10,7 @@
     "src/components/SearchModal.cost.test.tsx": 6,
     "src/components/SearchModal.costreason.test.ts": 3,
     "src/components/VersionHistory.cost.test.tsx": 4,
+    "src/components/VersionHistory.reconcile.test.tsx": 4,
     "src/components/VersionHistory.rename.test.tsx": 3,
     "src/components/VersionHistory.test.tsx": 5,
     "src/components/database/DatabaseBlock.hiddencols.test.tsx": 9,
@@ -36,6 +37,6 @@
     "src/sw/register.test.ts": 8,
     "src/sw/sw.test.ts": 7
   },
-  "totalFiles": 35,
-  "totalTests": 159
+  "totalFiles": 36,
+  "totalTests": 163
 }
