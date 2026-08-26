@@ -159,8 +159,13 @@ func TestGetWorkspaceStats_TopAndBottomPagesAndNeverRead(t *testing.T) {
 	// aggregates. Distinct values per row are what make a transposed or mis-ordered scan visible
 	// here rather than only there.
 	lastSeen := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	// ⚠ THE THIRD ARGUMENT IS THE SPACE SCOPE, AND EMPTY IS WHAT MAKES THIS THE ORG ROLL-UP.
+	// GetWorkspaceStats and GetSpaceStats are ONE statement narrowed, rather than two that drift
+	// (see getScopedStats); "" means every space. These expectations are the reason that
+	// convenience cannot spread: GetSpaceStats refuses an empty id with ErrNoSpaceScope, so ""
+	// reaches the SQL from exactly one caller and this is it.
 	pool.ExpectQuery(`(?i)page_id.*group by.*order by count.*desc`).
-		WithArgs("ws-1", 30).
+		WithArgs("ws-1", 30, "").
 		WillReturnRows(pgxmock.NewRows([]string{
 			"page_id", "title", "view_count", "unique_viewers", "avg_duration_sec", "last_viewed",
 		}).
@@ -175,7 +180,7 @@ func TestGetWorkspaceStats_TopAndBottomPagesAndNeverRead(t *testing.T) {
 
 	// Never-read page IDS, not a COUNT — a count cannot be filtered.
 	pool.ExpectQuery(`(?i)select p\.id from pages p.*left join page_views`).
-		WithArgs("ws-1").
+		WithArgs("ws-1", "").
 		WillReturnRows(pgxmock.NewRows([]string{"id"}).
 			AddRow("pg-a").AddRow("pg-b").AddRow("pg-c"))
 

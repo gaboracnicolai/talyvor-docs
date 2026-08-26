@@ -63,4 +63,29 @@ in internal/analytics/privatespace_realpg_test.go.
 
 If the gate genuinely moved somewhere else, update this literal to name its new home.`)
 	}
+
+	// ⚠ THE SPACE ROLL-UP'S GATE, AND IT FAILS THE OTHER WAY FROM THE ONE ABOVE — WHICH IS WHY IT
+	// NEEDS ITS OWN LITERAL RATHER THAN TRUSTING THE ONE NEXT TO IT.
+	//
+	// A missing `WithPageRead` is LOUD in production: GetWorkspaceStats returns ErrNoPageReadGate
+	// and the screen fails. A missing `WithSpaceAccess` is SILENT: `Enforcer.Require` on a nil
+	// receiver denies with 404 (permission.TestEnforcer_NilReceiver_FailsClosed), so the space
+	// roll-up route would answer "not found" for every space, forever, and look like a routing
+	// typo rather than a dropped wiring. Fail-closed is the right default and it is exactly what
+	// makes the omission hard to see — the feature is shipped, the tests in this package build
+	// their own routers and stay green, and the only symptom is a screen section that never has
+	// anything in it.
+	if !strings.Contains(body, "analyticsHandler.WithSpaceAccess(") {
+		t.Errorf(`[A-SPACE-WIRED] cmd/docs/main.go no longer calls analyticsHandler.WithSpaceAccess(...).
+
+GET /v1/spaces/{spaceID}/analytics/pages is the SPACE roll-up — the third of the three scopes
+talyvor.higgsfield.app/products/docs sells ("PAGE, SPACE AND ORG ROLLUPS"). Its route is mounted
+unconditionally by analytics.Handler.Mount; without this call the enforcer is nil, Require denies,
+and every space's roll-up is a 404. That is fail-closed and it is also invisible: nothing in this
+package's own routers depends on main.go, and the SPA renders an empty section rather than an
+error. internal/analytics/spacerollup_realpg_test.go proves the route WORKS when wired, and would
+stay green with this line deleted.
+
+If the gate genuinely moved somewhere else, update this literal to name its new home.`)
+	}
 }
