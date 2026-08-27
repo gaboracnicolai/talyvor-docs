@@ -37,7 +37,11 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: "1.25"
+          # ⚠ KEEP EQUAL TO go.mod's `toolchain` (go1.26.6). actions/setup-go exports
+          # GOTOOLCHAIN=local, so this pin — not the directive — is what every job actually runs,
+          # including the gofmt gate and the real-Postgres suite. Enforced by
+          # internal/toolchainguard.
+          go-version: "1.26.6"
           cache: true
       # Formatting gate. Nothing checked gofmt before this — not `go vet`, not the frontend
       # job, nowhere in this file — and 5 files had already drifted. talyvor-lens had exactly
