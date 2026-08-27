@@ -262,9 +262,23 @@ func scan(s interface{ Scan(...any) error }) (*model.Page, error) {
 // ─── Create ────────────────────────────────────────────────
 
 // Create inserts a page, deriving slug from title and depth from the
-// parent's depth + 1. The first version is appended to
-// page_versions inside the same transaction so an aborted insert
-// can't leave a page without an initial revision.
+// parent's depth + 1, then appends version 1 through appendVersion.
+//
+// ⚠ THE VERSION SNAPSHOT IS BEST-EFFORT AND THE CREATE DOES NOT DEPEND ON IT. There is no
+// transaction around the two statements — `pool.Begin` has never appeared in this file — so a
+// version INSERT that fails leaves a page with no initial revision and Create still returns
+// success. That is deliberate and it is appendVersion's stated contract: a snapshot that cannot
+// be written must not fail the write the user already committed. What it must do is SAY SO, and
+// appendVersion reports the loss at ERROR with the page id and the effect.
+//
+// This docstring used to assert the opposite — that the two writes shared a transaction, and that
+// a page therefore could not exist without its initial revision. It was never true: the Phase 1
+// commit already used two separate pool calls, and the inline comment at the call site said the
+// reverse. TestCreate_DocstringDoesNotClaimATransactionItDoesNotHave keeps this paragraph honest
+// and TestCreate_WhenTheV1SnapshotFails_TheLossIsReported_RealPG is the executable proof.
+//
+// ⚠ That guard pins the old sentence VERBATIM, so this paragraph describes it and does not
+// reproduce it — quoting a banned claim to explain it is how the ban catches its own author.
 func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
 	if s.pool == nil {
 		return nil, errors.New("page: store has no pool")
@@ -397,15 +411,26 @@ func (s *Store) Create(ctx context.Context, p model.Page) (*model.Page, error) {
 	// plus the refusal case), internal/mcp, internal/templatelib and internal/importer.
 	metrics.PagesCreated.Inc()
 
-	// First version. Failure here doesn't roll back the page itself
-	// — the version table is informational. A retry path could
-	// re-attach the initial revision, but in practice a missing v1
-	// on a brand-new page is invisible to users.
-	_, _ = s.pool.Exec(ctx,
-		`INSERT INTO page_versions (page_id, workspace_id, version, title, content, created_by)
-        VALUES ($1, $2, $3, $4, $5, $6)`,
-		out.ID, out.WorkspaceID, 1, out.Title, out.Content, p.CreatedBy,
-	)
+	// ⚠ VERSION 1, THROUGH THE SAME WRITER THE UPDATE PATH USES — AND IT USED TO BE A SECOND COPY
+	// OF THAT INSERT WITH `_, _ =` IN FRONT OF IT. `page_versions` has exactly two writers in this
+	// repository and they sat 100 lines apart in this file. #113 ("overlapping saves no longer lose
+	// restore points") took the discarded error away from appendVersion — capturing it, retrying a
+	// contested version number, and reporting the loss with an `effect` an operator can act on —
+	// and NOTHING SWEPT THE OTHER WRITER. So the one that was fixed handled the ordinary case, and
+	// the one left behind was the ONLY writer of version 1: the base of every diff and the oldest
+	// restore point a page has.
+	//
+	// The old comment here said the miss was "invisible to users", and that was the argument for
+	// discarding the error. It is the wrong axis — appendVersion's own contract already settles it:
+	// "a snapshot that cannot be written must not fail the save the user already committed. What
+	// changed is that the failure is now REPORTED." Invisible to the user is exactly why it has to
+	// be visible to the operator; `_, _ =` made a lost restore point and a healthy create the same
+	// bytes in the log.
+	//
+	// appendVersion computes `COALESCE(MAX(version), 0) + 1`, which is 1 for a page that has no
+	// versions yet — so this is the same row the copy wrote, with the retry and the report added
+	// and the duplication removed. Two writers of one table is how these two drifted apart.
+	s.appendVersion(ctx, out.ID, out.WorkspaceID, out.Title, out.Content, p.CreatedBy)
 
 	// ⚠ THE SAME TWO CONTENT HOOKS Update RUNS, AND THEY WERE HERE IN NEITHER FORM. A page can be
 	// BORN with content — Handler.Create decodes the whole model.Page, the MCP `create_page` tool
