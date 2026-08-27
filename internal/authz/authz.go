@@ -35,13 +35,34 @@ type authCtx struct {
 	memberships []Membership
 	authWS      string // set by WithAuthorized after a per-call workspace authorization (MCP chokepoint)
 	authMember  string
+	// passed records that this context came through the BOUNDARY — i.e. that WithMemberships
+	// installed it, which the middleware only does after gatewayauth verified an identity and the
+	// resolver answered.
+	//
+	// ⚠ IT EXISTS BECAUSE THE PRESENCE OF AN authCtx WAS NOT THE SAME QUESTION, AND TWO DOCSTRINGS
+	// SAID IT WAS. Memberships and Email both promised "ok=false when the request never passed the
+	// boundary" and both derived that from whether the type assertion succeeded. WithAuthorized
+	// installs an authCtx unconditionally — it is written to work on top of whatever is there — so
+	// MEASURED on a bare context: WithAuthorized(context.Background(), "ws-x", "member-x") made
+	// Memberships report ok=TRUE with an empty set and Email report ("", TRUE). Both are the exact
+	// opposite of what they say.
+	//
+	// ⚠ IT WAS A TRAP AND NOT A LIVE DEFECT, MEASURED RATHER THAN ASSUMED, AND THAT IS WHY THE FIX
+	// IS A FIELD AND NOT A REWRITE: WorkspaceIDs still returned the empty set (so every by-id query
+	// still denied) and AuthorizeWorkspace still refused (its loop has nothing to match). The
+	// production caller — internal/mcp's callTool — only reaches WithAuthorized after
+	// AuthorizeWorkspace has already succeeded, which cannot happen without memberships. So
+	// nothing shipped was wrong; what was wrong was that the one consumer who trusts that `ok`
+	// (internal/collab's refreshRoster, which refuses on !ok || email == "") was protected by its
+	// own second check rather than by the contract it was reading.
+	passed bool
 }
 
 // Memberships returns the verified caller's full membership set. ok=false when the request
 // never passed the boundary.
 func Memberships(ctx context.Context) ([]Membership, bool) {
 	ac, ok := ctx.Value(ctxKey{}).(*authCtx)
-	if !ok {
+	if !ok || !ac.passed {
 		return nil, false
 	}
 	return ac.memberships, true
@@ -50,7 +71,7 @@ func Memberships(ctx context.Context) ([]Membership, bool) {
 // Email returns the verified caller email. ok=false when the request never passed the boundary.
 func Email(ctx context.Context) (string, bool) {
 	ac, ok := ctx.Value(ctxKey{}).(*authCtx)
-	if !ok {
+	if !ok || !ac.passed {
 		return "", false
 	}
 	return ac.email, true
@@ -185,6 +206,12 @@ func AuthorizeWorkspace(ctx context.Context, workspaceID string) (Membership, bo
 // WithAuthorized returns a context carrying an authorized workspace + the caller's member id
 // there — the MCP chokepoint installs it after AuthorizeWorkspace passes, so tools attribute
 // writes (created_by/updated_by/verified_by) to the verified actor, not a client-supplied arg.
+//
+// ⚠ IT COPIES `base` AND THEREFORE COPIES `passed`. On a context that never came through the
+// boundary that field stays false, which is what keeps Memberships and Email honest — see the
+// block on authCtx.passed. It deliberately does NOT refuse a bare context: AuthorizedWorkspace and
+// AuthorizedMember are the values this function exists to carry, and a caller that installs them
+// without a boundary gets exactly those and nothing else.
 func WithAuthorized(ctx context.Context, workspaceID, memberID string) context.Context {
 	base, _ := ctx.Value(ctxKey{}).(*authCtx)
 	next := authCtx{}
@@ -220,7 +247,7 @@ func AuthorizedWorkspace(ctx context.Context) (string, bool) {
 // installs it after resolution; handler tests use it to exercise a handler without the full
 // middleware chain.
 func WithMemberships(ctx context.Context, email string, ms []Membership) context.Context {
-	return context.WithValue(ctx, ctxKey{}, &authCtx{email: email, memberships: ms})
+	return context.WithValue(ctx, ctxKey{}, &authCtx{email: email, memberships: ms, passed: true})
 }
 
 // Middleware resolves the gatewayauth-verified identity to workspace memberships and puts them
