@@ -110,8 +110,17 @@ func TestCreate_AutoSlugAndDepthAndVersion(t *testing.T) {
 			[]string{}, 0, "document").
 		WillReturnRows(pageRow("pg-1", "My New Page", "my-new-page", 2, &parent))
 	// Version 1 insert — now carries the page's workspace_id.
+	//
+	// ⚠ FIVE ARGUMENTS, NOT SIX, AND THE MISSING ONE IS THE VERSION NUMBER. Create no longer
+	// carries its own copy of this INSERT: it calls appendVersion, the writer the UPDATE path
+	// already used, which computes `COALESCE(MAX(version), 0) + 1` IN SQL — 1 for a page with no
+	// versions yet, so the row written is the same one. The two copies had drifted (#113 gave
+	// appendVersion a retry and an error report and never swept this path), and one writer is
+	// what stops that happening again. As with the ai_cost_usd note above, pgxmock counts
+	// arguments, so this arity change failed here loudly rather than passing as a
+	// silently-different statement.
 	pool.ExpectExec(`INSERT INTO page_versions \(page_id, workspace_id, version`).
-		WithArgs("pg-1", "ws-1", 1, "My New Page", "{}", "creator").
+		WithArgs("pg-1", "ws-1", "My New Page", "{}", "creator").
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	out, err := store.Create(context.Background(), model.Page{
