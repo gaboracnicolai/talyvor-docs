@@ -178,6 +178,30 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 	if kind == "" {
 		kind = "all"
 	}
+	// ⚠ A TYPE THIS HANDLER DOES NOT KNOW RAN NEITHER HALF AND ANSWERED 200 WITH AN EMPTY LIST.
+	//
+	// The two dispatch tests below are `kind == "all" || kind == "fulltext"` and
+	// `kind == "all" || kind == "semantic"`. Anything else matched neither, so both halves were
+	// skipped, `results` stayed empty, and the envelope went out as a success — byte-identical to
+	// a workspace with no matching documents. A caller that renamed a type, capitalised it, or
+	// left a trailing space (`q` is TrimSpace'd above; this never was) read "nothing matched"
+	// forever, with a matching document sitting in the store.
+	//
+	// ⚠ THE SET IS NOT INVENTED HERE. talyvor-suite's apps/bff/docs_search.go already refuses
+	// anything outside {all, fulltext, semantic} with a 400 whose message names exactly those
+	// three — it was written because THIS handler does not, which mitigated browser callers and
+	// left every other caller of Docs exposed. This makes the upstream agree with a set the
+	// product had already decided.
+	//
+	// ⚠ AND THE DEFAULT IS NOT A MEMBER OF IT. The check is AFTER the `kind == ""` default above,
+	// deliberately: an absent `type` means `all` and must keep meaning it. Checking the raw value
+	// against the set would refuse every caller that omits the parameter, which is most of them.
+	if kind != "all" && kind != "fulltext" && kind != "semantic" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "type must be one of all, fulltext, semantic",
+		})
+		return
+	}
 	var spaceID *string
 	if sp := r.URL.Query().Get("space_id"); sp != "" {
 		spaceID = &sp
