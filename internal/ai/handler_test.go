@@ -217,7 +217,7 @@ func TestAskEndpoint_RefusesWhenNoPageReadGateIsWired(t *testing.T) {
 	for _, c := range []struct{ path, body string }{
 		{"/v1/workspaces/ws-1/ai/write", `{"prompt":"draft"}`},
 		{"/v1/workspaces/ws-1/ai/transform", `{"action":"summarize","text":"hello"}`},
-		{"/v1/workspaces/ws-1/ai/translate", `{"text":"hello","target_language":"French"}`},
+		{"/v1/workspaces/ws-1/ai/translate", `{"text":"hello","language":"French"}`}, // `language` is the key Translate binds — see fixture_keys_test.go
 		{"/v1/workspaces/ws-1/ai/suggest-title", `{"content":"body"}`},
 	} {
 		if rr := do(c.path, c.body); rr.Code != http.StatusOK {
