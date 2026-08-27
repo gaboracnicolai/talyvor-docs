@@ -84,6 +84,48 @@ jobs:
       # case ever wants covering, the shape is a WHOLE-SUITE assertion over `go test -json`,
       # never another name filter.
 
+  # Supply-chain gate: govulncheck against the Go vulnerability DB.
+  #
+  # ⚠ THERE WAS NONE, AND THE ABSENCE WAS THE FINDING (W6.33). Measured on clean main:
+  # `govulncheck ./...` reported TEN CALLED vulnerabilities — CALLED, not the separate "in
+  # modules you require but your code doesn't appear to call" bucket it counts on its own line —
+  # and this file contained the word govulncheck exactly zero times. The toolchain pin (#200)
+  # took ten to one; this job is what would have said so in the first place.
+  #
+  # ⚠ ORG-LEVEL CLASS GUARD, NOT A DOCS GUARD — the same reasoning the compose-secrets job below
+  # already states. talyvor-lens gated on govulncheck all along and talyvor-docs and talyvor-track
+  # did not, so the same accumulation happened twice in parallel, unwatched, in the two repos that
+  # hold real Postgres. This job carries no Docs-specific knowledge and lands in track in the same
+  # measurement.
+  #
+  # ⚠ LANDED RED ON PURPOSE, BEFORE the bump that clears it, and the PR's check history is the
+  # evidence rather than a claim: the first commit is this job alone and it FAILS naming
+  # GO-2026-5970 (golang.org/x/text). A gate nobody has watched fail is the same thing as no gate.
+  #
+  # govulncheck is reachability-aware, so it stays low-noise: a require-only/unreachable vuln does
+  # not fail the build. The tool is pinned; the advisory DB is fetched fresh at scan time, so this
+  # job can go red on a tree nobody touched — that is the point of it.
+  #
+  # Deliberately its own job with no `needs:`, so a supply-chain finding reports independently of
+  # the Go suite rather than being buried behind it.
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          # ⚠ KEEP EQUAL TO go.mod's `toolchain` (go1.26.6). govulncheck grades the STDLIB against
+          # the toolchain it runs under: a pin ABOVE go.mod's would assess a runtime this repo does
+          # not ship and could report green over a vulnerable binary, and a pin BELOW it reports
+          # vulns nothing ships. internal/toolchainguard enforces the floor half of that lockstep
+          # across every go-version pin in this file.
+          go-version: "1.26.6"
+          cache: false
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
   # The SEC-4 tenancy class-guard. Written in .semgrep/ since the SEC-4 work but
   # never wired into CI — a rule that does not run is not a guardrail.
   # ORG-LEVEL CLASS GUARD, not a Docs guard. talyvor-docs and talyvor-track independently
