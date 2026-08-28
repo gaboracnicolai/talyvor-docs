@@ -283,6 +283,31 @@ func TestAIFixturesSendOnlyKeysTheHandlersBind(t *testing.T) {
 			len(found), minFixtures)
 	}
 
+	// ⚠ FLOOR TWO IS A COUNT, AND A COUNT IS THE WEAKER HALF OF THE QUESTION. MEASURED: the
+	// adjacency rule pairs 15 fixtures against a floor of 5, so the parse can stop matching TEN of
+	// them — two thirds of the population — and this file still reports a clean run. Worse, a
+	// count cannot notice WHICH ones went: five fixtures all pointing at /ai/ask satisfy it while
+	// four routes go entirely unchecked, and the fixture that started this file was a
+	// /ai/translate one.
+	//
+	// So the floor that matters is PER ROUTE, and it is derived rather than chosen: every route
+	// this package mounts must have at least one paired body. That is stable under adding or
+	// removing individual fixtures — which the count deliberately allows — while a broken parse,
+	// a renamed route, or a rewritten table drops a route to zero and says which.
+	byRoute := map[string]int{}
+	for _, fx := range found {
+		byRoute[fx.route]++
+	}
+	for _, r := range aiRoutes {
+		if byRoute[r] == 0 {
+			t.Errorf("/ai/%s has NO paired (route, body) fixture in this package. Either nothing "+
+				"exercises it, or — far more likely, since the count floor above passed — the "+
+				"adjacency rule stopped matching the shape its fixtures are written in. Every key "+
+				"assertion for this route is then drawn from an empty population.\n"+
+				"    paired per route: %v", r, byRoute)
+		}
+	}
+
 	for _, fx := range found {
 		allowed := map[string]bool{}
 		for _, k := range bound[fx.route] {
