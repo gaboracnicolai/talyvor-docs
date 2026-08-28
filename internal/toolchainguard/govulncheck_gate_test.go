@@ -62,8 +62,27 @@ func stripComment(line string) string {
 // is clean — the caller must distinguish those.
 func gateJob(src string) (job string, jobsSeen int) {
 	var current string
+	// ⚠ ONLY KEYS UNDER `jobs:` COUNT, AND W6.37 IS WHY. A two-space key is not a job by itself:
+	// `on:` carries `push:` and `pull_request:` at exactly that indent. The first version of this
+	// parse counted them and logged "8 job(s)" for a six-job file — a wrong number in a log line
+	// and in a failure message, inflating in the reassuring direction. The verdict was never
+	// affected (the gate-present scan looks at steps), but a figure reported as MEASURED that is
+	// wrong is the defect this file exists to catch, so it is fixed rather than explained.
+	// TestTheGovulncheckGateGuardCanFail's mutant (2a) holds it: strip the `jobs:` block and the
+	// count must be ZERO.
+	inJobs := false
 	for _, line := range strings.Split(src, "\n") {
 		line = stripComment(line)
+		if strings.HasPrefix(line, "jobs:") {
+			inJobs = true
+			continue
+		}
+		if line != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "#") {
+			inJobs = false // a new top-level key ends the jobs block
+		}
+		if !inJobs {
+			continue
+		}
 		if m := jobHeaderRe.FindStringSubmatch(line); m != nil {
 			current, jobsSeen = m[1], jobsSeen+1
 			continue
@@ -172,6 +191,32 @@ func TestTheGovulncheckGateGuardCanFail(t *testing.T) {
 	if job, _ := gateJob(trailing); job != "" {
 		t.Errorf("MUTANT SURVIVED: the gate is gone and govulncheck is named only in a TRAILING "+
 			"comment, yet the guard reported job %q — it is matching prose", job)
+	}
+
+	// (2a) THE NON-VACUITY COUNTER ITSELF, AND IT IS THE REASON W6.37 EXISTS. `on:` carries
+	// `push:` and `pull_request:` at exactly the two-space indent a job key uses, so a parse that
+	// does not scope to the `jobs:` block counts them: this file's first version logged
+	// "8 job(s)" for a six-job ci.yaml. Wrong number, right verdict — but a figure reported as
+	// MEASURED that is wrong is the thing this queue exists to catch, and it inflates in the
+	// reassuring direction. Strip the whole `jobs:` block: the count must go to ZERO, not to
+	// "however many keys happen to be indented two spaces".
+	var noJobs []string
+	inJobs := false
+	for _, line := range strings.Split(real, "\n") {
+		if strings.HasPrefix(line, "jobs:") {
+			inJobs = true
+			continue
+		}
+		if inJobs && line != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "#") {
+			inJobs = false
+		}
+		if !inJobs {
+			noJobs = append(noJobs, line)
+		}
+	}
+	if _, seen := gateJob(strings.Join(noJobs, "\n")); seen != 0 {
+		t.Errorf("MUTANT SURVIVED: the whole `jobs:` block was removed and the parse still counted "+
+			"%d job(s) — the non-vacuity check is reading something that is not a job", seen)
 	}
 
 	// (3) The tool installed but never run — `go install` is not a scan.
