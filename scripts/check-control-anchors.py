@@ -78,6 +78,27 @@ It is intractable BY LITERAL and tractable BY IDENTIFIER: the same string is und
 name it is bound to is not. The 3 candidates that survived were all real, and are the W6.43b
 findings in w31-bodypage-attribution-controls.py and w31-changelog-delete-controls.py.
 
+⚠⚠ TWO FURTHER DETECTORS WERE BUILT AND MEASURED AND NEITHER SHOULD BE ADOPTED (W6.43c). Recorded
+here rather than in a queue entry so the next person to have the idea reads it in the file.
+
+  · WHOLE-FILE PATH HARVEST — take path literals from anywhere in the script, not just its
+    module-level values. Reaches 5 more scripts and 16 more anchors. Real findings: ZERO. False
+    positives: ONE, on this repo's own control harness, whose probe literals are designed not to
+    occur.
+  · KEYED ANCHOR TABLES — dicts carrying `old`/`new` keys, which the row detector walks past
+    because it only understands positional tuples. Reaches 4 more scripts and would report 15
+    INERT anchors. FOURTEEN OF THE FIFTEEN ARE ALIVE ELSEWHERE IN THE TREE: the scripts declare
+    one module-level path and their rows target OTHER files whose paths are built inside a
+    function, so the detector attributes every anchor to the wrong file. Checked one by one with
+    `grep -rlF`, not sampled.
+
+⚠⚠⚠ SO THE BINDING CONSTRAINT ON THE REMAINING 37 IS TARGET ATTRIBUTION, NOT ANCHOR EXTRACTION,
+and W6.43 said so before any of this was built: "nothing statically ties a literal to the FILE it
+is supposed to occur in, so 'occurs somewhere in the tree' is the only checkable claim and it is
+much weaker than 'occurs once in ci.yaml'". Both detectors above fail on exactly that sentence.
+The per-script `--check-anchors` convention W6.43 proposed remains the right answer for them,
+because a script knows its own targets at runtime and no static pass can recover them.
+
 """
 import argparse
 import ast
@@ -85,7 +106,9 @@ import contextlib
 import hashlib
 import io
 import os
+import re
 import sys
+import types
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS = os.path.join(REPO, "scripts")
@@ -346,6 +369,29 @@ def bare_census(name, ns, src):
     return rows, considered, unclassified
 
 
+def why_unreached(src, ns):
+    """A per-script REASON, because two opposite outcomes look identical from outside.
+
+    A script with NO anchor at all and a script whose anchor cannot be REACHED are
+    both "unreached", and they are opposite findings: the first is honest (there is
+    nothing to check), the second is a blind spot. A bucket count cannot tell them
+    apart, so this names which one each script is and a human can check the answer.
+    """
+    tree = ast.parse(src)
+    mutates = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                  and n.func.attr in ("replace", "write_text", "write_bytes", "write")
+                  for n in ast.walk(tree))
+    if not mutates:
+        return "NOT-A-MUTATOR — no replace and no write anywhere; not a control script"
+    paths = sum(1 for k, v in list(ns.items()) if not k.startswith("__") and path_shaped(v))
+    anchors = sum(1 for k, v in list(ns.items()) if not k.startswith("__") and _anchor_shaped(v))
+    if paths == 0:
+        return "NO-MODULE-LEVEL-TARGET — the file it edits is built inside a function"
+    if anchors == 0:
+        return "NO-MODULE-LEVEL-ANCHOR — the anchor text is built inside a function"
+    return "ANCHORS-BUT-NO-ROLE — %d constant(s) whose role is 2+ hops away" % anchors
+
+
 def census(scripts_dir=SCRIPTS):
     results, unreached = [], []
     bare_stats = [0, 0, 0]  # scripts, anchors considered, constants unclassified
@@ -354,15 +400,29 @@ def census(scripts_dir=SCRIPTS):
         path = os.path.join(scripts_dir, name)
         if os.path.samefile(path, os.path.abspath(__file__)):
             continue
-        ns = {"__name__": "__anchor_census__", "__file__": os.path.abspath(path)}
+        # ⚠ THE NAMESPACE IS A REAL MODULE REGISTERED IN sys.modules, AND THAT IS NOT TIDINESS.
+        # `@dataclass` resolves its own field types through `sys.modules[cls.__module__].__dict__`,
+        # so exec'ing into a bare dict under a synthetic __name__ raises
+        # `AttributeError: 'NoneType' object has no attribute '__dict__'` — and the script lands
+        # in the unreached bucket, indistinguishable from one that simply has no anchor table.
+        # MEASURED: w31-tenancypredicate-census-5r8k.py was invisible to this guard for exactly
+        # that reason, and the guard reported it as unreached rather than as a failure it caused.
+        modname = "__anchor_census_%s__" % re.sub(r"\W", "_", name)
+        mod = types.ModuleType(modname)
+        mod.__file__ = os.path.abspath(path)
+        sys.modules[modname] = mod
+        ns = mod.__dict__
         try:
             code = module_level_only(open(path, encoding="utf-8").read(), path)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                 exec(code, ns)
         except Exception as exc:
+            sys.modules.pop(modname, None)
             unreached.append((name, "EXEC-FAILED: %s: %s" % (type(exc).__name__, exc)))
             continue
+        finally:
+            sys.modules.pop(modname, None)
         rows = []
         for key, val in list(ns.items()):
             if not key.startswith("__"):
@@ -383,7 +443,7 @@ def census(scripts_dir=SCRIPTS):
             if rows:
                 results.extend(rows)
             if not considered:
-                unreached.append((name, "NO-ANCHOR-ROW-AND-NO-CLASSIFIED-CONSTANT"))
+                unreached.append((name, why_unreached(src, ns)))
             continue
         for r in uniq:
             target = r["path"] if os.path.isabs(r["path"]) else os.path.join(REPO, r["path"])
@@ -459,6 +519,11 @@ def main():
     print("control-anchors: bare-constant detector: %d more scripts, %d constants classified as "
           "anchors, %d constants it could NOT classify and therefore did not report"
           % (bare[0], bare[1], bare[2]))
+    tally = {}
+    for _, why in unreached:
+        tally[why.split(" —")[0]] = tally.get(why.split(" —")[0], 0) + 1
+    print("control-anchors: why the %d unreached are unreached: %s"
+          % (len(unreached), ", ".join("%s=%d" % kv for kv in sorted(tally.items()))))
 
     if args.list:
         for r in results:
