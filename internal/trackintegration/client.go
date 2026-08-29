@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +59,18 @@ type Client struct {
 	cache            map[string]cachedRef
 }
 
+// memberPageLimit is the page size this client asks Track's GET /v1/service/members for, AND the
+// number the truncation check below compares against. ⚠ ONE CONSTANT ON PURPOSE: a guard that
+// compared against a different number than the request carries would either refuse every real
+// roster or miss every real truncation, and both would look like a working guard.
+//
+// It matches Track's own `maxLimit = 500` ("hard cap — the roster read can never return more per
+// page", internal/member/handler.go, read at talyvor-track 7ad05ce3). ⚠ THAT MATCH IS A RECORDED
+// CROSS-REPO MEASUREMENT, NOT SOMETHING THIS REPOSITORY'S CI CAN CHECK — Docs checks out Docs. If
+// Track LOWERS its cap, this client will ask for 500, receive fewer, and read a truncated page as a
+// complete roster again; the full-page refusal below only fires when the two numbers agree.
+const memberPageLimit = 500
+
 func New(trackURL, apiKey string) *Client {
 	return &Client{
 		trackURL: strings.TrimRight(trackURL, "/"),
@@ -92,7 +105,7 @@ func (c *Client) GetWorkspaceMembers(ctx context.Context, workspaceID string) ([
 	if !c.MemberSyncConfigured() {
 		return nil, errors.New("trackintegration: member sync not configured (need DOCS_TRACK_URL + DOCS_TRACK_MEMBER_SYNC_SECRET)")
 	}
-	q := url.Values{"workspace_id": {workspaceID}, "limit": {"500"}}
+	q := url.Values{"workspace_id": {workspaceID}, "limit": {strconv.Itoa(memberPageLimit)}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.trackURL+"/v1/service/members?"+q.Encode(), nil)
 	if err != nil {
 		return nil, err
@@ -109,6 +122,26 @@ func (c *Client) GetWorkspaceMembers(ctx context.Context, workspaceID string) ([
 	var out []membership.MemberRef
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("trackintegration: decode members: %w", err)
+	}
+	// ⚠ A FULL PAGE IS NOT A ROSTER, AND THE NEXT THING THAT HAPPENS TO IT IS A DELETE.
+	// Track answers 200 with no "there is more" signal, so `len(out) == memberPageLimit` is
+	// indistinguishable from a complete roster of exactly that size — and the caller's next act is
+	// membership.Store.ReconcileWorkspace, whose second statement DELETEs every `source = 'track'`
+	// row whose email is absent from this slice. A workspace past the cap would lose every
+	// membership beyond the first page, on every sync, with a 200 at each step.
+	//
+	// ReconcileWorkspace already refuses the ADJACENT boundary — `if len(refs) == 0 { return }`,
+	// "empty-pull safety — never prune a roster to zero". The empty page was recognised as unsafe
+	// evidence and the full page was not.
+	//
+	// Returning an error reuses a property SyncOneWorkspace already documents rather than inventing
+	// one: "a pull that failed is not evidence that nobody is a member" — it logs and skips the
+	// workspace without reconciling. A truncated pull is not that evidence either.
+	if len(out) >= memberPageLimit {
+		return nil, fmt.Errorf(
+			"trackintegration: member pull for %s returned a full page (%d) — the roster may be "+
+				"truncated and cannot be used to prune; offset pagination is needed before this "+
+				"workspace can sync", workspaceID, len(out))
 	}
 	return out, nil
 }
