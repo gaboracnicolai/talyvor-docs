@@ -29,7 +29,7 @@ WHAT IT MEASURED WHEN IT WAS WRITTEN (main ef199ef, 80 scripts)
 SCRIPTS (nine remain; see W6.43a for what repairing one costs), none of which any instrument in this repo could see:
 
   w31-ask-error-controls.py        3 arms  anchor died 2026-08-10, 163 commits ago
-  w31-search-access-controls.py    2 arms  anchor died 2026-08-10, 168 commits ago
+  w31-search-access-controls.py    2 arms  anchor died 2026-08-10, 168 commits ago  ── REPAIRED, W6.43a
   w31-search-offset-controls.py    2 arms  anchor died 2026-08-13,  99 commits ago  ── REPAIRED, W6.43a
   w31-version-title-controls.py    2 arms  anchor died 2026-08-13, 123 commits ago
   w31-askgrounding-controls.py     1 arm   anchor MULTIPLIED 2026-08-11  ── REPAIRED, W6.43a
@@ -132,12 +132,6 @@ KNOWN_DEAD = {
     ("w31-ask-error-controls.py", "f382543247de"): "ask_docs SearchWithRank call site restructured by 75deeab",
     ("w31-ask-error-controls.py", "9e3c30774eb3"): "ask_docs AskDocs call site restructured by 75deeab",
     ("w31-ask-error-controls.py", "93b025466291"): "ask_docs ErrUnavailable branch restructured by 75deeab",
-
-    # internal/search/handler.go — the semantic call grew an `offset` parameter
-    # in 62aea6b (2026-08-10), the SAME DAY 1e27b56 wrote this control. 168
-    # commits have landed since.
-    ("w31-search-access-controls.py", "4e3aa09009bc"): "fetchLimit block rewritten by 62aea6b",
-    ("w31-search-access-controls.py", "eda5df12da53"): "semantic.Search signature grew `offset` in 62aea6b",
 
     # internal/page/store.go — becf0f8 (2026-08-13) moved the version-snapshot
     # INSERT out of this file entirely; `nextVer` no longer occurs in it at all.
