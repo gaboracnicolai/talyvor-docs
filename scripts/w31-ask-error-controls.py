@@ -38,47 +38,56 @@ BLIND = (PKG, "TestAskDocs_AnswersWithSources")           # fakes that cannot fa
 CROSS = (PKG, "TestSEC4_MCP_ArgTrust_CrossTenant")        # never calls ask_docs
 LIMIT = (PKG, "TestSecMCP_AskDocs_RateLimitedPerVerifiedWorkspace")
 
-SEARCH_CHECK = '''	hits, err := s.deps.pages.SearchWithRank(ctx, wsID, question, nil, 3, 0)
+# ⚠ ALL THREE ANCHORS BELOW WERE REBUILT FROM THE FILE AT c403f5e. 75deeab ("gate the READ tools
+# on the permission engine — six of them", 2026-08-10) restructured toolAskDocs the SAME DAY
+# 8613c89 wrote this control, and it stayed dead for 163 commits. THREE THINGS MOVED AND ONLY THE
+# THIRD IS A RENAME:
+#   · the search result is `found` and is then FILTERED into `hits` one row at a time by
+#     s.canViewPage — the access gate this control predates. `askFetch` replaces the literal 3
+#     because the gate drops rows AFTER the SQL limit, so the tool over-fetches.
+#   · the AI call left an `if s.deps.ai != nil {` wrapper and became an early-return
+#     `if s.deps.ai == nil { ... }`, so the block is one tab shallower and there is no
+#     `answer = ans` assignment to swallow into any more.
+#   · `ans` became `answer`, `hits` became `found`.
+# The MUTATIONS are unchanged in meaning: swallow the search error, swallow the AI error, delete
+# the unavailable arm.
+SEARCH_CHECK = '''	found, err := s.deps.pages.SearchWithRank(ctx, wsID, question, nil, askFetch, 0)
 	if err != nil {
 		slog.Error("mcp: ask_docs search failed — reporting the failure rather than answering ungrounded",
 			slog.String("workspace_id", wsID), slog.Any("err", err))
 		return nil, &rpcError{Code: errInternal, Message: "search failed"}
 	}'''
 
-SEARCH_SWALLOWED = '''	hits, _ := s.deps.pages.SearchWithRank(ctx, wsID, question, nil, 3, 0)'''
+SEARCH_SWALLOWED = '''	found, _ := s.deps.pages.SearchWithRank(ctx, wsID, question, nil, askFetch, 0)'''
 
-AI_CHECK = '''		ans, err := s.deps.ai.AskDocs(ctx, wsID, question, pages)
-		if err != nil {
-			slog.Error("mcp: ask_docs AI call failed — reporting the failure rather than an empty answer",
-				slog.String("workspace_id", wsID), slog.Any("err", err))
-			if errors.Is(err, ai.ErrUnavailable) {
-				return nil, &rpcError{Code: errInternal, Message: "the AI service is not available"}
-			}
-			return nil, &rpcError{Code: errInternal, Message: "the AI service failed to answer"}
+AI_CHECK = '''	answer, err := s.deps.ai.AskDocs(ctx, wsID, question, pages)
+	if err != nil {
+		slog.Error("mcp: ask_docs AI call failed — reporting the failure rather than an empty answer",
+			slog.String("workspace_id", wsID), slog.Any("err", err))
+		if errors.Is(err, ai.ErrUnavailable) {
+			return nil, &rpcError{Code: errInternal, Message: "the AI service is not available"}
 		}
-		answer = ans'''
+		return nil, &rpcError{Code: errInternal, Message: "the AI service failed to answer"}
+	}'''
 
-AI_SWALLOWED = '''		ans, err := s.deps.ai.AskDocs(ctx, wsID, question, pages)
-		if err == nil {
-			answer = ans
-		}'''
+AI_SWALLOWED = '''	answer, _ := s.deps.ai.AskDocs(ctx, wsID, question, pages)'''
 
-AI_UNAVAIL_BRANCH = '''			if errors.Is(err, ai.ErrUnavailable) {
-				return nil, &rpcError{Code: errInternal, Message: "the AI service is not available"}
-			}
+AI_UNAVAIL_BRANCH = '''		if errors.Is(err, ai.ErrUnavailable) {
+			return nil, &rpcError{Code: errInternal, Message: "the AI service is not available"}
+		}
 '''
 
 CONTROLS = [
     {
         "id": "C1",
-        "what": "MAIN REPRODUCED (search half): `hits, _ :=`, exactly as shipped at 198636a",
+        "what": "MAIN REPRODUCED (search half): the error assigned to `_` — `hits, _ :=` as shipped at 198636a, `found, _ :=` in today's spelling after 75deeab",
         "edits": [(S, SEARCH_CHECK, SEARCH_SWALLOWED, 1)],
         "must_red": ASK_TEST,
         "companion": BLIND,
     },
     {
         "id": "C2",
-        "what": "MAIN REPRODUCED (AI half): `if err == nil { answer = ans }`, as shipped",
+        "what": "MAIN REPRODUCED (AI half): the AI error swallowed — `if err == nil { answer = ans }` as shipped, `answer, _ :=` since 75deeab removed the nil-wrapper it sat in",
         # NEITHER C1 NOR C2 SUBSUMES THE OTHER, and that is what earns two error checks rather
         # than one: C1 is invisible to the "ai fails" case (the AI is healthy there) and C2 is
         # invisible to the "search fails" case (it returns before the AI is reached).

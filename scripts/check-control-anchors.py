@@ -28,7 +28,7 @@ WHAT IT MEASURED WHEN IT WAS WRITTEN (main ef199ef, 80 scripts)
 28 scripts yielded an anchor table · 204 anchors checked · 10 DEAD ARMS IN 5
 SCRIPTS (nine remain; see W6.43a for what repairing one costs), none of which any instrument in this repo could see:
 
-  w31-ask-error-controls.py        3 arms  anchor died 2026-08-10, 163 commits ago
+  w31-ask-error-controls.py        3 arms  anchor died 2026-08-10, 163 commits ago  ── REPAIRED, W6.43a
   w31-search-access-controls.py    2 arms  anchor died 2026-08-10, 168 commits ago  ── REPAIRED, W6.43a
   w31-search-offset-controls.py    2 arms  anchor died 2026-08-13,  99 commits ago  ── REPAIRED, W6.43a
   w31-version-title-controls.py    2 arms  anchor died 2026-08-13, 123 commits ago
@@ -126,13 +126,6 @@ NOT_ANCHORS = {
 #
 # Keyed (script, sha256(anchor)[:12]).
 KNOWN_DEAD = {
-    # internal/mcp/server.go — the ask_docs body was restructured by 75deeab
-    # (2026-08-10, "gate the READ tools on the permission engine"), the SAME DAY
-    # 8613c89 wrote this control. 163 commits have landed since.
-    ("w31-ask-error-controls.py", "f382543247de"): "ask_docs SearchWithRank call site restructured by 75deeab",
-    ("w31-ask-error-controls.py", "9e3c30774eb3"): "ask_docs AskDocs call site restructured by 75deeab",
-    ("w31-ask-error-controls.py", "93b025466291"): "ask_docs ErrUnavailable branch restructured by 75deeab",
-
     # internal/page/store.go — becf0f8 (2026-08-13) moved the version-snapshot
     # INSERT out of this file entirely; `nextVer` no longer occurs in it at all.
     # The five guard tests this control names ALL still exist.
