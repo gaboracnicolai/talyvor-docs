@@ -116,8 +116,21 @@ CONTROLS = [
     (
         "C5-refusal-deleted",
         HANDLER,
-        "\tif h.access == nil {\n\t\tslog.Error(",
-        "\tif false {\n\t\tslog.Error(",
+        # ⚠ THE ANCHOR WAS `if h.access == nil {` + `slog.Error(` AND NOTHING ELSE, WHICH WAS
+        # UNIQUE WHEN THIS CONTROL WAS WRITTEN AND HAS NOT BEEN SINCE THE NEXT DAY.
+        # 24adb1d (2026-08-10) created this control against the ONE such site — /ask's refusal.
+        # d1fc206 (2026-08-11) added a second, the page_id-carrying request's refusal, and from
+        # that commit this control printed "ANCHOR MISSING/AMBIGUOUS (2 matches) — control is
+        # dead" on every run. Nothing runs it, so nobody read it for 18 days, and the harness's
+        # own closing line said the rest: B-NILGATE was left CLAIMED BY NO CONTROL.
+        #
+        # ⚠⚠ THE REPAIR IS TO DISAMBIGUATE, NOT TO ACCEPT TWO MATCHES. Mutating both sites at
+        # once would silently widen this control from "the /ask refusal" to "every nil-gate
+        # refusal in the file", and B-NILGATE would then be justified by a mutation that also
+        # breaks a sibling seam — the shape W3.64 refused for the same reason in ci.yaml.
+        # The /ask message is what makes the site identifiable, so the anchor carries it.
+        "\tif h.access == nil {\n\t\tslog.Error(\"ai: /ask has no page-read gate wired",
+        "\tif false {\n\t\tslog.Error(\"ai: /ask has no page-read gate wired",
         ["B-NILGATE", "B-NILSTORE"],
         "The unwired-deployment path. With the refusal gone /ask runs the corpus search and "
         "answers from the empty set visibleTo fails closed to — a confident reply from zero "

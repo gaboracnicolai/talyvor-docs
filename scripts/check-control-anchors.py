@@ -26,13 +26,13 @@ all come out exactly as the script itself sees them.
 WHAT IT MEASURED WHEN IT WAS WRITTEN (main ef199ef, 80 scripts)
 ==============================================================
 28 scripts yielded an anchor table · 204 anchors checked · 10 DEAD ARMS IN 5
-SCRIPTS, none of which any instrument in this repo could see:
+SCRIPTS (nine remain; see W6.43a for what repairing one costs), none of which any instrument in this repo could see:
 
   w31-ask-error-controls.py        3 arms  anchor died 2026-08-10, 163 commits ago
   w31-search-access-controls.py    2 arms  anchor died 2026-08-10, 168 commits ago
   w31-search-offset-controls.py    2 arms  anchor died 2026-08-13,  99 commits ago
   w31-version-title-controls.py    2 arms  anchor died 2026-08-13, 123 commits ago
-  w31-askgrounding-controls.py     1 arm   anchor MULTIPLIED 2026-08-11
+  w31-askgrounding-controls.py     1 arm   anchor MULTIPLIED 2026-08-11  ── REPAIRED, W6.43a
 
 ⚠ THE MECHANISM IS THE SAME IN ALL FIVE AND IT IS WORTH STATING, because it
 predicts where the next one comes from: EVERY ONE WAS KILLED BY THE NEXT FIX TO
@@ -132,12 +132,6 @@ KNOWN_DEAD = {
     ("w31-ask-error-controls.py", "f382543247de"): "ask_docs SearchWithRank call site restructured by 75deeab",
     ("w31-ask-error-controls.py", "9e3c30774eb3"): "ask_docs AskDocs call site restructured by 75deeab",
     ("w31-ask-error-controls.py", "93b025466291"): "ask_docs ErrUnavailable branch restructured by 75deeab",
-
-    # internal/ai/handler.go — MULTIPLIED, not moved. `if h.access == nil {`
-    # followed by slog.Error was unique at 24adb1d (2026-08-10) and d1fc206
-    # (2026-08-11) added a second copy. The script requires exactly 1 and prints
-    # "control is dead"; it has been right, and unread, for 18 days.
-    ("w31-askgrounding-controls.py", "5c0341a851c1"): "anchor multiplied 1 -> 2 by d1fc206; the script demands exactly 1",
 
     # internal/search/handler.go — the semantic call grew an `offset` parameter
     # in 62aea6b (2026-08-10), the SAME DAY 1e27b56 wrote this control. 168
