@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import signal
 import re
 import subprocess
 import sys
@@ -126,8 +127,44 @@ def whole_suite(dsn: str) -> tuple:
     return sorted(set(re.findall(r"^FAIL\s+(github\.com/\S+)", out, re.M))), out
 
 
+
+def restore_on_signal(snapshot: dict) -> None:
+    """Put every snapshotted file back, then die of the signal we were sent.
+
+    A `finally` DOES NOT RUN ON SIGTERM. This script already restores in a `finally` — with
+    `git checkout --` — which makes it EXCEPTION-safe and not SIGNAL-safe; those are different
+    properties and only the first was covered.
+
+    Measured in talyvor-suite (W1.7, 78c69c8): a 2-minute timeout killed a control mid-mutation
+    and left a GATE REMOVED in the tree, with a green suite and a `git status` showing only files
+    the session had edited on purpose. Reproduced on demand in 5de27e3, ffe9063 and 5f01947.
+
+    The handler writes BYTES rather than shelling out to git: a signal handler should not depend
+    on a subprocess starting. Re-raising with SIG_DFL keeps the exit status honest; SIGKILL still
+    strands. Self-contained rather than an import, so the next script is a paste — the population
+    and the rule live in scripts/check-restore-signal-handlers.py.
+    """
+    def handler(signum, _frame):
+        for path, blob in snapshot.items():
+            try:
+                path.write_bytes(blob)
+            except OSError:
+                pass
+        sys.stderr.write("\n!! signal %d — restored %d mutated file(s) before exiting\n"
+                         % (signum, len(snapshot)))
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, handler)
+
+
 def control(name: str, muts: list, dsn: str, predict: dict, want_tags: str = "") -> bool:
     digests = {p: sha256(p) for p, _, _ in muts}
+    # Installed AFTER the snapshot and re-installed per control, because `muts` names a different
+    # file set each time. The `finally` below is the normal path; this is the one a SIGTERM takes,
+    # and `git checkout` in a `finally` cannot cover it.
+    restore_on_signal({p: p.read_bytes() for p, _, _ in muts})
     try:
         for path, old, new in muts:
             mutate(path, old, new)
