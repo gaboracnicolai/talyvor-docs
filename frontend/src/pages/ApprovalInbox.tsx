@@ -17,7 +17,11 @@ export function ApprovalInboxPage({ workspaceID, onOpenPage }: InboxProps) {
   const qc = useQueryClient();
   const pending = useQuery({
     queryKey: ["approvals-pending", workspaceID, reviewerID],
-    queryFn: () => approvalApi.pending(workspaceID, reviewerID),
+    // ⚠ SEE Sidebar.tsx: `reviewerID` is no longer sent, the server derives it, and the
+    // `enabled` gate below still keys on a localStorage value nothing writes — which is why this
+    // screen renders its "set docs_member_id" instruction instead of the caller's queue. Left as
+    // it is on purpose; turning it on is a product decision, not a wire cleanup.
+    queryFn: () => approvalApi.pending(workspaceID),
     enabled: !!reviewerID,
   });
 

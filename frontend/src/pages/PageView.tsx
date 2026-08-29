@@ -106,14 +106,11 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
     const flush = () => {
       const seconds = Math.round((Date.now() - viewStart.current) / 1000);
       if (seconds < 3) return;
-      const viewerID = localStorage.getItem("docs_member_id") || "anonymous";
       const viewerName = localStorage.getItem("docs_member_name") || "";
       void analyticsApi
         .recordView(space.id, page.id, {
-          viewer_id: viewerID,
           viewer_name: viewerName,
           duration_sec: seconds,
-          workspace_id: page.workspace_id,
         })
         .catch(() => undefined);
     };
@@ -306,7 +303,7 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
                 state={lockHook.state}
                 lockedByMe={lockHook.lockedByMe}
                 onLock={() => lockHook.lock.mutate()}
-                onUnlock={() => lockHook.unlock.mutate({})}
+                onUnlock={() => lockHook.unlock.mutate()}
                 busy={lockHook.lock.isPending || lockHook.unlock.isPending}
               />
               <PresenceBar presence={presence} selfClientID={selfClientID} />
@@ -344,7 +341,7 @@ export function PageViewPage({ space, pageID, readOnly }: PageViewProps) {
           <LockBanner
             state={lockHook.state}
             lockedByMe={lockHook.lockedByMe}
-            onUnlock={() => lockHook.unlock.mutate({})}
+            onUnlock={() => lockHook.unlock.mutate()}
           />
 
           <EditingBanner
