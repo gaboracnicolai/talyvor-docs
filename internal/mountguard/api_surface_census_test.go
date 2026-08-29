@@ -198,11 +198,15 @@ func serverRoutes(t *testing.T) (map[string]bool, map[string][]string) {
 // `/` is a suffix rather than a segment.
 
 var (
-	reAPILit    = regexp.MustCompile("`[^`]*`|\"/v1[^\"]*\"|'/v1[^']*'")
-	reAPIMethod = regexp.MustCompile(`method\s*:\s*["']([A-Za-z]+)["']`)
-	reAPIParam  = regexp.MustCompile(`\{[^}]*\}`)
-	reAPISuffix = regexp.MustCompile(`([^/])\{\}`)
-	reAPIHelper = regexp.MustCompile("const\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*\\([^)]*\\)\\s*=>\\s*\\n?\\s*`([^`]*)`")
+	reAPILit = regexp.MustCompile("`[^`]*`|\"/v1[^\"]*\"|'/v1[^']*'")
+	// a module that ISSUES a request: `apiRequest<T>(`, `apiRequest(`, a bare `fetch(`, or a
+	// `new WebSocket(` — the upgrade is served by a chi Get and `hooks/useCollab.ts` reaches
+	// `/v1/collab/{}/ws` with nothing else. Leaving it out cost exactly one route its only caller.
+	reIssuesRequest = regexp.MustCompile(`apiRequest\s*[<(]|\bfetch\s*\(|new\s+WebSocket\s*\(`)
+	reAPIMethod     = regexp.MustCompile(`method\s*:\s*["']([A-Za-z]+)["']`)
+	reAPIParam      = regexp.MustCompile(`\{[^}]*\}`)
+	reAPISuffix     = regexp.MustCompile(`([^/])\{\}`)
+	reAPIHelper     = regexp.MustCompile("const\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*\\([^)]*\\)\\s*=>\\s*\\n?\\s*`([^`]*)`")
 )
 
 type spaReq struct{ Verb, Path, File string }
@@ -328,6 +332,30 @@ func spaRequests(t *testing.T) []spaReq {
 		}
 		src := stripTSComments(string(raw))
 		rel, _ := filepath.Rel(root, p)
+
+		// ⚠ AND NEITHER IS A MODULE THAT ANALYSES THE CLIENT — the same reasoning as the test-file
+		// exclusion above, one step further out. `reAPILit` matches ANY `"/v1…"` string, so
+		// `api/requestSurface.ts` (which parses this SPA's own request sites for
+		// request-field.census.test.ts, and holds `"/v1"` as the chi mount base it prefixes Go
+		// routes with) entered the population and reported a phantom `GET /v1` — a 404 on a route
+		// nothing requests. A file that calls neither `apiRequest(` nor `fetch(` cannot issue a
+		// request at all, so it cannot issue one to an unregistered path.
+		//
+		// ⚠⚠ NARROWING A POPULATION IS THE DANGEROUS DIRECTION AND THE FIRST DRAFT OF THIS VERY
+		// EXCLUSION PROVED IT, ON ITSELF. It tested `strings.Contains(src, "apiRequest(")` — and
+		// every call in this client is written `apiRequest<Type>(…`, so the substring never
+		// appears and the predicate dropped TWENTY-FIVE files, i.e. the whole API client. It did
+		// NOT surface as a phantom 404 in direction (a); it surfaced three files later as three
+		// routes "with no SPA caller" in direction (b), which is the quieter half. The matcher is
+		// a regex over `apiRequest` followed by `<` or `(` for exactly that reason.
+		//
+		// MEASURED at d1bfd11 with the correct matcher, by raising minSPAFiles to 999 and reading
+		// the count out of the failure both ways: WITHOUT the exclusion the walk sees 92 verb+path
+		// pairs across 21 files; WITH it, 91 across 20. It drops exactly ONE file and exactly ONE
+		// pair — the phantom `GET /v1` — and 91 is the same pair count recorded at 97ba255.
+		if !reIssuesRequest.MatchString(src) {
+			return nil
+		}
 
 		helpers := map[string]string{}
 		for _, m := range reAPIHelper.FindAllStringSubmatch(src, -1) {

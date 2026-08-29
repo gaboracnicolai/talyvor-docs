@@ -35,11 +35,16 @@ export const analyticsApi = {
   recordView(
     spaceID: string,
     pageID: string,
+    // ⚠ NO `viewer_id`, NO `workspace_id`. `internal/analytics/handler.go RecordView`:
+    // *"the workspace AND the viewer both come from the resource this route already authorized —
+    // never the body… viewer_id was not overridden at all, and it feeds COUNT(DISTINCT viewer_id)
+    // / GROUP BY viewer_id — so the body could forge who read a page."* Both were fixed server-
+    // side and this type went on offering them; the caller's `viewer_id` was read from
+    // `docs_member_id`, a localStorage key NOTHING IN THIS SPA WRITES, so it was always the
+    // literal "anonymous" being sent to a handler that discards it.
     body: {
-      viewer_id?: string;
       viewer_name?: string;
       duration_sec: number;
-      workspace_id?: string;
     },
   ) {
     return apiRequest<{ ok: boolean }>(

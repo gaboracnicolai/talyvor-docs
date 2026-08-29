@@ -44,7 +44,7 @@ export function usePageLock(spaceID: string, pageID: string) {
   };
 
   const lock = useMutation({
-    mutationFn: () => pagelockApi.lock(spaceID, pageID, memberID),
+    mutationFn: () => pagelockApi.lock(spaceID, pageID),
     onSuccess: (s) => {
       // `s` can be undefined: on a network failure apiRequest queues the write and resolves
       // `undefined as T`. A 200 that carries a locked_by is the only thing worth learning from.
@@ -52,9 +52,11 @@ export function usePageLock(spaceID: string, pageID: string) {
       invalidate();
     },
   });
+  // ⚠ NO isAdmin ARGUMENT. It was passed as a body field the server has never read — see
+  // api/pagelock.ts. Whether THIS caller may force another member's lock is decided by the
+  // server's own IsAdminFromContext, which is the only place it can honestly be decided.
   const unlock = useMutation({
-    mutationFn: ({ isAdmin }: { isAdmin?: boolean } = {}) =>
-      pagelockApi.unlock(spaceID, pageID, { member_id: memberID, is_admin: isAdmin }),
+    mutationFn: () => pagelockApi.unlock(spaceID, pageID),
     onSuccess: invalidate,
   });
 

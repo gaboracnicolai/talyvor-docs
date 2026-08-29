@@ -21,11 +21,20 @@ export interface Permission {
   created_at: string;
 }
 
+/** The four keys `internal/permission/handler.go grant` decodes. Everything else on `Permission`
+ *  is server-assigned. */
+export type GrantBody = Pick<Permission, "subject_type" | "subject_id" | "access" | "workspace_id">;
+
 export const permissionsApi = {
   listSpace(spaceID: string) {
     return apiRequest<Permission[]>(`/v1/spaces/${spaceID}/permissions`);
   },
-  grantSpace(spaceID: string, body: Partial<Permission> & { access: AccessLevel }) {
+  // ⚠ NARROWER THAN Partial<Permission>, AND THE TYPE IS THE ONLY PLACE THAT SAYS SO. `grant`
+  // decodes exactly {subject_type, subject_id, access, workspace_id} and stamps workspace_id from
+  // the verified membership regardless. The other five Permission fields (id, resource_id,
+  // resource_type, granted_by, created_at) are server-assigned; offering them in the request type
+  // promised writes this endpoint has never accepted.
+  grantSpace(spaceID: string, body: GrantBody) {
     return apiRequest<Permission>(`/v1/spaces/${spaceID}/permissions`, {
       method: "POST",
       body,
@@ -39,7 +48,7 @@ export const permissionsApi = {
   listPage(spaceID: string, pageID: string) {
     return apiRequest<Permission[]>(`/v1/spaces/${spaceID}/pages/${pageID}/permissions`);
   },
-  grantPage(spaceID: string, pageID: string, body: Partial<Permission> & { access: AccessLevel }) {
+  grantPage(spaceID: string, pageID: string, body: GrantBody) {
     return apiRequest<Permission>(`/v1/spaces/${spaceID}/pages/${pageID}/permissions`, {
       method: "POST",
       body,

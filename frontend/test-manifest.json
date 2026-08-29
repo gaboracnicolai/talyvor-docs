@@ -2,6 +2,7 @@
   "files": {
     "src/api/client.offline-routing.test.ts": 15,
     "src/api/page.cached-required-keys.test.ts": 2,
+    "src/api/request-field.census.test.ts": 5,
     "src/api/route-response-type.census.test.ts": 3,
     "src/api/search.wire-census.test.ts": 4,
     "src/components/CommentsPanel.resolvedtab.test.tsx": 3,
@@ -38,6 +39,6 @@
     "src/sw/register.test.ts": 8,
     "src/sw/sw.test.ts": 7
   },
-  "totalFiles": 37,
-  "totalTests": 166
+  "totalFiles": 38,
+  "totalTests": 171
 }

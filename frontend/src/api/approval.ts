@@ -1,4 +1,4 @@
-import { apiRequest, qs } from "./client";
+import { apiRequest } from "./client";
 
 export type DocStatus =
   | "draft"
@@ -83,9 +83,15 @@ export const approvalApi = {
       { method: "POST" },
     );
   },
-  pending(workspaceID: string, reviewerID?: string) {
+  // ⚠ NO `reviewer_id`. The server RETIRED it for a security reason and its own comment says so:
+  // `internal/approval/handler.go Pending` — *"this route was ungated, took the reviewer from the
+  // QUERY STRING, and PREFERRED that value over the verified actor — so any member read another
+  // member's pending-approval queue with ?reviewer_id=victim."* The reviewer is now the caller's
+  // member id in the authorized workspace, and the parameter was ignored. Sending it made this
+  // signature advertise a capability the server refuses to have.
+  pending(workspaceID: string) {
     return apiRequest<PendingApproval[]>(
-      `/v1/workspaces/${workspaceID}/approvals/pending${qs({ reviewer_id: reviewerID })}`,
+      `/v1/workspaces/${workspaceID}/approvals/pending`,
     );
   },
 };
