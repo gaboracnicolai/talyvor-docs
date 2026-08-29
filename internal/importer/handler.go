@@ -25,9 +25,24 @@ func (h *Handler) WithAccess(a *spaceauth.Authorizer) *Handler {
 	return h
 }
 
-// maxUploadBytes caps any single import to a manageable size so a
-// malicious zip can't exhaust the box's memory. 200MB matches the
-// largest reasonable Confluence space export observed in the wild.
+// maxUploadBytes is ParseMultipartForm's maxMemory argument. 200MB matches the largest
+// reasonable Confluence space export observed in the wild.
+//
+// ⚠ IT IS NOT A CAP, AND THE COMMENT HERE USED TO SAY IT WAS. It read "caps any single import
+// to a manageable size so a malicious zip can't exhaust the box's memory", and MEASURED
+// (W3.54, 2026-08-29) that is false in both halves: with this constant temporarily set to
+// 64 KiB, a 2 MiB import — 32x over it — was accepted with 202 and fully imported through the
+// real handler chain. maxMemory decides only whether a file part lives in RAM or in a temp
+// file on disk; it never rejects and never truncates. upload_bound_claim_test.go pins that
+// semantics so this comment cannot drift back.
+//
+// ⚠⚠ AND THE MEMORY CLAUSE WAS THE LOAD-BEARING ONE: readUpload below reads the whole part
+// into `buf` with an unbounded loop, so the memory this constant was believed to protect is
+// bounded by what the client chooses to send, whatever this number is.
+//
+// ⚠ WHETHER THIS ROUTE SHOULD HAVE A REAL SIZE LIMIT IS AN OPEN DECISION, filed rather than
+// taken here: adding one changes a shipping endpoint, and imports that succeed today would
+// start failing at some size.
 const maxUploadBytes = 200 << 20
 
 func (h *Handler) Mount(r chi.Router) {
