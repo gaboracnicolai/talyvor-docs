@@ -32,7 +32,6 @@ GUARD = ROOT / "scripts" / "check-control-anchors.py"
 # Subjects. Chosen because each is a DIFFERENT stage of the detector.
 TARGET_OK = ROOT / "internal" / "analytics" / "store.go"        # a healthy, non-allowlisted arm
 HEALTHY_ANCHOR = "\tvisible := make([]ReadStats, 0, len(ranked))"
-DEAD_SCRIPT = ROOT / "scripts" / "w31-version-title-controls.py"  # a KNOWN_DEAD arm
 NOTANCHOR_SCRIPT = ROOT / "scripts" / "w31-classguard-blindness.py"  # a NOT_ANCHORS row
 STORE_GO = ROOT / "internal" / "page" / "store.go"
 # ⚠ THE VERDICT ARMS INSTALL THEIR OWN SUBJECT RATHER THAN BORROWING ONE.
@@ -118,29 +117,40 @@ def m_kill_healthy_anchor():
 
 
 def m_repair_dead_arm():
-    """C2 — a KNOWN_DEAD arm starts resolving again, at the SAME anchor.
+    """C2 — a KNOWN_DEAD arm resolves again, at the SAME anchor.
 
-    ⚠ THE FIRST VERSION REPOINTED THE SCRIPT'S ANCHOR CONSTANT AT A LIVE STRING
-    AND FIRED R3, NOT R2 — because changing the anchor changes its content hash,
-    so the entry stopped APPEARING rather than starting to resolve. Those are
-    two different rules and the arm was proving the wrong one. Repair means the
-    SAME anchor resolving, so this puts the dead text back into the target file.
+    ⚠ THIS ARM HAS BEEN WRONG TWICE, BOTH TIMES FOR A REASON THIS CAMPAIGN
+    EXISTS TO CATCH. First it repointed the subject script's anchor constant and
+    fired R3 rather than R2 — changing an anchor changes its hash, so the entry
+    stopped APPEARING instead of starting to RESOLVE, and the arm proved the
+    wrong rule. Then it borrowed its subject from whatever happened to be in
+    KNOWN_DEAD, and W6.43a repaired the last entry, so the list went empty and
+    the arm scored NOT CAUGHT with nothing about it looking wrong.
+
+    It now installs its own subject: a throwaway script whose anchor DOES occur
+    in its target, listed as known-dead. The guard must demand the entry be
+    deleted, because that list may only shrink.
     """
-    STORE_GO.write_text(STORE_GO.read_text()
-                        + "\n// C2 repair:\n//\t\t\tid, out.WorkspaceID, nextVer, out.Title, out.Content, updatedBy,\n")
+    _plant_probe("module github.com/talyvor/docs", declared=False, resolving=True)
 
 
 def m_delete_dead_row():
     """C3 — a KNOWN_DEAD row stops appearing at all (stale entry, or narrowing).
 
-    ⚠ THE FIRST VERSION DELETED THE WRONG ROW — a healthy one — and fired only
-    R5. Deleting an anchor is always visible to the floor; only deleting a
-    LISTED one is visible to R3, and R3 is what stops the allowlist rotting.
+    ⚠ THE FIRST VERSION DELETED A HEALTHY ROW AND FIRED ONLY R5; the second
+    renamed a constant in a real control script and went VOID once W6.43a
+    removed that constant. Deleting an anchor is always visible to the floor;
+    only a LISTED one is visible to R3, and R3 is what stops the allowlist
+    rotting into decoration.
+
+    It now lists a probe it does not create — precisely the stale-entry shape R3
+    is for — and depends on no other script's contents.
     """
-    src = DEAD_SCRIPT.read_text()
-    src = src.replace("SNAPSHOT_ARGS = ", "SNAPSHOT_ARGS_UNUSED_C3 = ", 1)
-    src = src.replace("(STORE, SNAPSHOT_ARGS,", "(STORE, CLOSED_SET,", 1)
-    DEAD_SCRIPT.write_text(src)
+    src = GUARD.read_text()
+    GUARD.write_text(src.replace(
+        "KNOWN_DEAD = {",
+        "KNOWN_DEAD = {\n    (%r, \"deadbeef0000\"): \"w643 probe that was never installed\"," % PROBE.name,
+        1))
 
 
 def m_delete_notanchor_row():
@@ -171,7 +181,7 @@ def m_blind_stage2():
         "        if len(out) < 3:\n            out.append({\"path\": obj[i], \"old\": old, \"want\": want})", 1))
 
 
-def _plant_probe(anchor, declared):
+def _plant_probe(anchor, declared, resolving=False):
     """Install a throwaway control script with ONE inert anchor, and list it as known-dead.
 
     The row points at go.mod with a literal that cannot occur there, so it is
@@ -180,6 +190,12 @@ def _plant_probe(anchor, declared):
     entry now resolves". The subject belongs to the rule being exercised, rather
     than being whichever entry the allowlist happens to contain today.
     """
+    # `resolving=True` means the anchor really DOES occur in go.mod, so the row is
+    # healthy while still being listed — which is what R2 is for. Otherwise the
+    # literal cannot occur there and the row is INERT by construction.
+    if resolving:
+        assert anchor in (ROOT / "go.mod").read_text(), \
+            "C2 is void: its probe anchor does not occur in go.mod, so nothing can RESOLVE"
     row = ("go.mod", anchor, "irrelevant-replacement", 1) if declared else \
           ("go.mod", anchor, "irrelevant-replacement")
     PROBE.write_text("EDITS = [%r]\n" % (row,))
@@ -234,8 +250,8 @@ def m_harmless_edit():
 
 ARMS = [
     ("C1", "a live non-allowlisted arm loses its anchor", [TARGET_OK], m_kill_healthy_anchor, {"R1"}),
-    ("C2", "a KNOWN_DEAD arm resolves again — the list may only shrink", [STORE_GO], m_repair_dead_arm, {"R2"}),
-    ("C3", "a KNOWN_DEAD row stops appearing", [DEAD_SCRIPT], m_delete_dead_row, {"R3"}),
+    ("C2", "a KNOWN_DEAD arm resolves again — the list may only shrink", [GUARD, PROBE], m_repair_dead_arm, {"R2"}),
+    ("C3", "a KNOWN_DEAD row stops appearing", [GUARD], m_delete_dead_row, {"R3"}),
     ("C4", "a NOT_ANCHORS row stops appearing", [NOTANCHOR_SCRIPT], m_delete_notanchor_row, {"R3"}),
     ("C5", "the EXEC stage is blinded", [GUARD], m_blind_stage1, {"R4"}),
     ("C6", "the HARVEST stage is blinded, exec untouched", [GUARD], m_blind_stage2, {"R5"}),
