@@ -83,6 +83,43 @@ jobs:
       # can still be APPLIED, not that it still CATCHES; the campaign is what proves that.)
       - name: toolchain control anchors must still apply
         run: python3 scripts/w635-toolchain-guard-controls.py --check-anchors --ci
+      # The step above asks ONE script whether its anchors still resolve. This one
+      # asks all 80 — and it found ten dead control arms in five scripts on the
+      # commit it was written against, the oldest dead for 168 commits.
+      #
+      # Every one was killed by the NEXT FIX to the function it guards: one day,
+      # same day, same day, three days, three days after the control was written.
+      # Two were dead the same day they were written. A control anchored on a line
+      # INSIDE the seam it watches is killed by precisely the event most likely to
+      # happen next, so this is a standing hazard rather than five accidents.
+      #
+      # It cannot use the per-script --check-anchors convention, because adopting
+      # that across 80 scripts is a scope call nobody has taken. Instead it EXECUTES
+      # each script's module-level definitions — no `if __name__` block, no bare
+      # call, nothing runs and nothing is written — and reads the resulting values,
+      # so Python resolves the anchors the way the script itself does. Pure string
+      # counting after that: ~1s, no mutation, no database, no `go test`.
+      #
+      # ⚠ IT PROVES A CONTROL CAN STILL BE APPLIED, NEVER THAT IT STILL CATCHES.
+      # The step below is what covers the second half.
+      - name: every control script's anchors must still resolve
+        run: python3 scripts/check-control-anchors.py --ci
+      # ⚠ AND THIS IS THE HALF THE ANCHOR CHECK CANNOT DO. The guard above passed
+      # on its first run, which is the condition this estate has three times shipped
+      # a guard that could not fail under. This campaign mutates a real file per
+      # rule, runs the guard, and reads WHICH RULE FIRED — not merely that the exit
+      # code moved, because six rules can fire at once and "it went red" does not
+      # say the right one did.
+      #
+      # It is in CI only because it is cheap: the guard needs no Postgres and no
+      # `go test`, so the whole 10-arm campaign is ~9s. The other control campaigns
+      # in this repo cannot be here for exactly that reason.
+      #
+      # It mutates tracked files and restores them in a `finally` AND from a SIGTERM
+      # handler; both directions were killed for real (handler present -> stranded
+      # nothing; handler removed -> stranded internal/analytics/store.go).
+      - name: the anchor guard must still catch
+        run: python3 scripts/w643-control-anchor-guard-controls-n4w8.py
       - name: gofmt (formatting must not drift)
         run: test -z "$(gofmt -l .)" || { echo "::error::unformatted files — run gofmt -w"; gofmt -l .; exit 1; }
       - run: go vet ./...
