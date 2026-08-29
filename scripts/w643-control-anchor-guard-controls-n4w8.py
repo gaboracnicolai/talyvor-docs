@@ -242,6 +242,54 @@ def m_delete_target_file():
     STORE_GO.unlink()
 
 
+def _plant_bare_probe(role):
+    """A probe with NO (path, old, new) row, so ONLY the bare-constant detector can see it.
+
+    `role="anchor"`    — the constant sits in `.replace(NAME, …)`, so the role pass calls it an
+                         anchor and the guard must report it INERT.
+    `role="replacement"` — it sits in `.replace(…, NAME)`. A replacement MUST NOT occur in the
+                         target, so reporting it would be a false positive; the guard must stay
+                         silent unless the role pass is blinded.
+    """
+    lit = "W643_BARE_PROBE_%s_NEVER_OCCURS = ()" % role.upper()
+    if role == "anchor":
+        body = 'TARGET = "go.mod"\nANCHOR = %r\n\n\ndef apply(text):\n    return text.replace(ANCHOR, "x")\n' % lit
+    else:
+        body = 'TARGET = "go.mod"\nREPL = %r\n\n\ndef apply(text):\n    return text.replace("module", REPL)\n' % lit
+    PROBE.write_text(body)
+
+
+def m_bare_detector_finds_it():
+    """C11 — the bare-constant detector reports an inert anchor-role constant.
+
+    Detector 1 cannot see this probe at all: there is no (path, old, new) row in it.
+    """
+    _plant_bare_probe("anchor")
+
+
+def m_role_pass_blinded():
+    """C12 — the role pass is what suppresses replacements, and here is the proof.
+
+    The probe holds a constant in REPLACEMENT position, which by construction cannot occur in the
+    target. With the role pass live the guard is silent (verified in both directions). Blinding it
+    — every constant treated as an anchor — turns that same probe into a finding. This is the
+    46-of-49 noise the measurement in W6.43b recorded, arriving one arm at a time.
+    """
+    _plant_bare_probe("replacement")
+    src = GUARD.read_text()
+    GUARD.write_text(src.replace(
+        '        if "anchor" not in roles.get(k, set()):',
+        '        if False:', 1))
+
+
+def m_bare_harvest_blinded():
+    """C13 — the bare detector's OWN harvest stage, blinded alone."""
+    src = GUARD.read_text()
+    GUARD.write_text(src.replace(
+        "def _anchor_shaped(v):",
+        "def _anchor_shaped(v):\n    return False", 1))
+
+
 def m_harmless_edit():
     """C9 — MUST STAY GREEN. An edit that touches no anchor must not red."""
     src = TARGET_OK.read_text()
@@ -258,6 +306,9 @@ ARMS = [
     ("C7", "the undeclared-want verdict is ignored", [GUARD, PROBE], m_verdict_always_ok, {"R2"}),
     ("C7b", "the declared-want verdict is ignored", [GUARD, PROBE], m_verdict_always_ok_declared, {"R2"}),
     ("C8", "a target file is deleted", [STORE_GO], m_delete_target_file, {"R1"}),
+    ("C11", "the bare-constant detector reports an inert anchor", [PROBE], m_bare_detector_finds_it, {"R1"}),
+    ("C12", "the role pass is blinded, so a REPLACEMENT reads as an anchor", [GUARD, PROBE], m_role_pass_blinded, {"R1"}),
+    ("C13", "the bare detector's harvest stage is blinded alone", [GUARD], m_bare_harvest_blinded, {"R7"}),
     ("C9", "MUST STAY GREEN: an edit that is nobody's anchor", [TARGET_OK], m_harmless_edit, set()),
 ]
 

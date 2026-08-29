@@ -56,17 +56,28 @@ an arm whose anchor resolves but whose mutation has become inert passes here.
 Only running the campaign proves that, and the campaign needs a real Postgres
 and a `go test` per arm, which is why it cannot live in this step.
 
-POPULATION BOUNDARY — THE NUMBER THAT KEEPS THIS HONEST
+POPULATION BOUNDARY — THE NUMBERS THAT KEEP THIS HONEST
 =======================================================
-52 of the 80 scripts are NOT reached, and that is printed on every run rather
-than buried. They are not anchorless: they keep their anchors as standalone
-module-level constants (`WPI_ANCHOR`, `ANCHOR_COST`, `ORIGINAL_SKIP`) while the
-anchor-to-FILE binding happens inside a function or a class instance, so there
-is no row for this detector to read. Measured over those 52: 14 declare exactly
-one module-level path constant (an unambiguous target), 29 declare more than one
-(a weaker "occurs in one of its declared targets" claim), 21 declare none. A
-second detector over them is real work with a real false-positive cost and is
-filed, not smuggled in here.
+Two detectors, 44 of 80 scripts reached, and every figure below prints on every run.
+
+  ROW detector      28 scripts, 204 anchors. Reads (…, path, old, new, …) rows out of a
+                    script's module-level values.
+  BARE detector     16 more scripts, 60 constants. For scripts with no such row, checks each
+                    anchor-shaped module-level constant against the script's declared targets —
+                    but ONLY those an ast pass can show are used in an ANCHOR position.
+  unclassified      69 constants have no observed role (two hops of indirection, or never passed
+                    to a string operation) and are NOT reported. This is deliberate
+                    under-reporting: the safe direction for a rule that reddens CI.
+  unreached         37 scripts yield neither a row nor a classified constant.
+
+⚠ THE BARE DETECTOR IS ONLY USABLE BECAUSE OF THE ROLE PASS, AND THAT WAS MEASURED. Without it,
+checking every anchor-shaped constant produced 49 findings over those scripts of which 46 were
+noise — DSNs, docker image tags, and above all REPLACEMENT values, which by construction must
+not occur in the target. W6.43 predicted precisely that and concluded the census was intractable.
+It is intractable BY LITERAL and tractable BY IDENTIFIER: the same string is undecidable, the
+name it is bound to is not. The 3 candidates that survived were all real, and are the W6.43b
+findings in w31-bodypage-attribution-controls.py and w31-changelog-delete-controls.py.
+
 """
 import argparse
 import ast
@@ -93,6 +104,14 @@ SOURCE_SUFFIXES = (".go", ".ts", ".tsx", ".js", ".jsx", ".sql", ".yaml", ".yml",
 # is "a row was harvested from it". Each gets its own floor and its own control.
 SCRIPTS_FLOOR = 28
 ANCHORS_FLOOR = 204
+# The second detector's own two stages get their own two floors, for the same reason.
+# ⚠ BOTH WERE SET FROM A MEASUREMENT, AND THE FIRST VALUE I WROTE WAS A GUESS THAT R6 CAUGHT ON
+# ITS FIRST RUN. I carried 25 over from the pre-role-filter census, where the same scripts were
+# counted before the anchor/replacement split removed most of their constants. A floor copied
+# from a different population is a floor that reds for no reason — or, one digit the other way,
+# one that can never fire.
+BARE_SCRIPTS_FLOOR = 16
+BARE_ANCHORS_FLOOR = 60
 
 # ── ROWS A HUMAN HAS READ AND CLASSIFIED AS NOT ANCHORS ──────────────────────
 # ⚠ THIS LIST EXISTS BECAUSE THE OBVIOUS ALTERNATIVE IS A RULE THAT CANNOT FAIL.
@@ -209,8 +228,127 @@ def harvest(obj, out, depth=0, seen=None):
         harvest(v, out, depth + 1, seen)
 
 
+# ── DETECTOR 2: ANCHORS THAT ARE BARE MODULE-LEVEL CONSTANTS ─────────────────
+# 52 of 80 scripts have no (…, path, old, new, …) row for the detector above. They are NOT
+# anchorless: they keep the anchor in a standalone module-level constant and bind it to a FILE
+# inside a function, so there is no row to read.
+#
+# ⚠ THE OBVIOUS VERSION OF THIS IS UNUSABLE AND THAT WAS MEASURED, NOT FEARED. Checking every
+# anchor-shaped constant against the script's declared targets produced 49 findings over those
+# 52 scripts, of which 46 were noise: DSNs, docker image tags, and above all REPLACEMENT values,
+# which by construction must NOT occur in the target. W6.43 predicted exactly this — "a control's
+# `new` value is a literal that must NOT be present, and it is indistinguishable from a stale
+# `old` that is ALSO not present".
+#
+# ⚠⚠ IT IS INDISTINGUISHABLE BY LITERAL. IT IS NOT INDISTINGUISHABLE BY IDENTIFIER. The scripts
+# reference these constants by NAME, so an ast pass can see which ARGUMENT POSITION each name is
+# used in — `x.replace(NAME, …)` is an anchor, `x.replace(…, NAME)` is a replacement. Resolving
+# one hop of the script's OWN helper functions (`mutate(path, old, new)`, `sub(old, new)`,
+# `patch(path, old, new)`) took the 49 down to 3 candidates, and ALL THREE were real: they are
+# the W6.43b findings in w31-bodypage-attribution-controls.py and w31-changelog-delete-controls.py.
+#
+# ⚠⚠⚠ ONLY `anchor`-ROLE CONSTANTS ARE REPORTED, WHICH MEANS THIS DETECTOR DELIBERATELY
+# UNDER-REPORTS. A constant used through two hops of indirection, or never passed to a string
+# operation this pass understands, has NO observed role and is NOT reported — it is counted and
+# printed instead. Under-reporting is the safe direction for a rule that reddens CI; the number
+# it cannot classify is the honest part and is on every run.
+ANCHOR_METHODS = {"count", "index", "find", "rfind", "startswith", "endswith", "split"}
+
+
+def _direct_roles(tree):
+    roles = {}
+
+    def add(node, role):
+        for n in ast.walk(node):
+            if isinstance(n, ast.Name):
+                roles.setdefault(n.id, set()).add(role)
+
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+            if n.func.attr == "replace":
+                if len(n.args) >= 1:
+                    add(n.args[0], "anchor")
+                if len(n.args) >= 2:
+                    add(n.args[1], "replacement")
+            elif n.func.attr in ANCHOR_METHODS and n.args:
+                add(n.args[0], "anchor")
+        if isinstance(n, ast.Compare) and isinstance(n.left, ast.Name):
+            for op in n.ops:
+                if isinstance(op, (ast.In, ast.NotIn)):
+                    roles.setdefault(n.left.id, set()).add("anchor")
+    return roles
+
+
+def _roles(tree):
+    """name -> observed roles, resolving ONE hop of locally-defined helper.
+
+    One hop, deliberately: a constant reached through two is left with no observed
+    role and therefore unreported, which is the same choice talyvor-suite's
+    `_writing_functions` made and for the same reason — guess less, count what
+    you could not decide.
+    """
+    roles = {k: set(v) for k, v in _direct_roles(tree).items()}
+    sigs = {}
+    for fn in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        inner = _direct_roles(fn)
+        m = {}
+        for i, a in enumerate(fn.args.args):
+            r = inner.get(a.arg, set())
+            if len(r) == 1:
+                m[i] = next(iter(r))
+        if m:
+            sigs[fn.name] = m
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in sigs:
+            for i, arg in enumerate(n.args):
+                if i in sigs[n.func.id]:
+                    for q in ast.walk(arg):
+                        if isinstance(q, ast.Name):
+                            roles.setdefault(q.id, set()).add(sigs[n.func.id][i])
+    return roles
+
+
+def _anchor_shaped(v):
+    if not isinstance(v, str) or path_shaped(v) or not (12 <= len(v) <= 4000):
+        return False
+    return any(c in v for c in "(){}=;:") or "\n" in v
+
+
+def bare_census(name, ns, src):
+    """Findings, anchors-considered, and the count this pass could NOT classify."""
+    paths, cands = [], []
+    for k, v in list(ns.items()):
+        if k.startswith("__"):
+            continue
+        if path_shaped(v):
+            paths.append(v)
+        elif _anchor_shaped(v):
+            cands.append((k, v))
+    targets = []
+    for pv in paths:
+        t = pv if os.path.isabs(pv) else os.path.join(REPO, pv)
+        if os.path.isfile(t):
+            targets.append((os.path.relpath(t, REPO), open(t, encoding="utf-8").read()))
+    if not targets or not cands:
+        return [], 0, 0
+    roles = _roles(ast.parse(src))
+    rows, considered, unclassified = [], 0, 0
+    for k, av in cands:
+        if "anchor" not in roles.get(k, set()):
+            unclassified += 1
+            continue
+        considered += 1
+        total = sum(tx.count(av) for _, tx in targets)
+        if total == 0:
+            rows.append({"script": name, "path": " | ".join(t for t, _ in targets),
+                         "want": None, "old": av, "sha": anchor_sha(av),
+                         "count": 0, "verdict": "INERT", "bare": True})
+    return rows, considered, unclassified
+
+
 def census(scripts_dir=SCRIPTS):
     results, unreached = [], []
+    bare_stats = [0, 0, 0]  # scripts, anchors considered, constants unclassified
     names = sorted(n for n in os.listdir(scripts_dir) if n.endswith(".py"))
     for name in names:
         path = os.path.join(scripts_dir, name)
@@ -236,7 +374,16 @@ def census(scripts_dir=SCRIPTS):
                 seen.add(k)
                 uniq.append(r)
         if not uniq:
-            unreached.append((name, "NO-ANCHOR-ROW-FOUND"))
+            src = open(path, encoding="utf-8").read()
+            rows, considered, unclassified = bare_census(name, ns, src)
+            if considered:
+                bare_stats[0] += 1
+                bare_stats[1] += considered
+            bare_stats[2] += unclassified
+            if rows:
+                results.extend(rows)
+            if not considered:
+                unreached.append((name, "NO-ANCHOR-ROW-AND-NO-CLASSIFIED-CONSTANT"))
             continue
         for r in uniq:
             target = r["path"] if os.path.isabs(r["path"]) else os.path.join(REPO, r["path"])
@@ -252,7 +399,7 @@ def census(scripts_dir=SCRIPTS):
                 else:
                     rec["verdict"] = "ok" if n == r["want"] else ("INERT" if n == 0 else "DRIFTED")
             results.append(rec)
-    return results, unreached, len(names) - 1  # -1: this file is not a control script
+    return results, unreached, len(names) - 1, bare_stats  # -1: this file is not a control script
 
 
 def main():
@@ -261,7 +408,7 @@ def main():
     ap.add_argument("--list", action="store_true", help="print every anchor, not only the failures")
     args = ap.parse_args()
 
-    results, unreached, population = census()
+    results, unreached, population, bare = census()
     scripts_reached = len(set(r["script"] for r in results))
     keyed = {(r["script"], r["sha"]): r for r in results}
 
@@ -299,10 +446,19 @@ def main():
     if len(results) < ANCHORS_FLOOR:
         failures.append("R5: the harvest stage found %d anchors, floor is %d — the detector narrowed"
                         % (len(results), ANCHORS_FLOOR))
+    if bare[0] < BARE_SCRIPTS_FLOOR:
+        failures.append("R6: the bare-constant detector reached %d scripts, floor is %d — it narrowed"
+                        % (bare[0], BARE_SCRIPTS_FLOOR))
+    if bare[1] < BARE_ANCHORS_FLOOR:
+        failures.append("R7: the bare-constant detector classified %d constants as anchors, floor "
+                        "is %d — the role pass narrowed" % (bare[1], BARE_ANCHORS_FLOOR))
 
     print("control-anchors: %d scripts in population, %d reached, %d NOT reached, "
           "%d anchors checked, %d not ok"
           % (population, scripts_reached, len(unreached), len(results), len(bad)))
+    print("control-anchors: bare-constant detector: %d more scripts, %d constants classified as "
+          "anchors, %d constants it could NOT classify and therefore did not report"
+          % (bare[0], bare[1], bare[2]))
 
     if args.list:
         for r in results:
