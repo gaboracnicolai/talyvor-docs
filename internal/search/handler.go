@@ -249,7 +249,25 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		sqlOffset = 0
 		window = offset + limit
 		// Clamped BEFORE the multiply so a caller-supplied offset cannot overflow the product.
-		if window > maxFetchRows {
+		//
+		// ⚠ AND `window < 0` IS THE SUM OVERFLOWING BEFORE THIS CLAMP CAN SEE IT, WHICH IS A
+		// SEPARATE DOOR FROM THE PRODUCT THE LINE ABOVE IS ABOUT. `offset` is bounded only below
+		// (`offset < 0 → 0`); the upper end is whatever strconv.Atoi returns, so offset+limit
+		// overflows for any offset past MaxInt64-limit, and `window > maxFetchRows` is FALSE for a
+		// negative number — the clamp is skipped entirely and the store is handed a negative
+		// limit. Both operands are non-negative here, so a negative sum can ONLY be overflow, and
+		// maxFetchRows is what every other offset that far out already resolves to.
+		//
+		// ⚠ REACHABLE WITHOUT KNOWING MaxInt64: `offset, _ := strconv.Atoi(...)` above discards
+		// the error, and Atoi returns MaxInt64 *with* ErrRange for a longer run of digits, so
+		// `offset=99999999999999999999` arrives here as MaxInt64 too.
+		//
+		// ⚠ IT WAS NOT REACHING POSTGRES, and the reason is not this line. page.Store.SearchWithRank
+		// and SemanticSearch.Search each independently correct `limit <= 0 → 10`, so the negative
+		// was absorbed one layer down and the route answered 200 either way — measured on real
+		// Postgres. Pinned by window_clamp_reach_test.go, which asserts the ARGUMENT rather than
+		// the status for exactly that reason.
+		if window > maxFetchRows || window < 0 {
 			window = maxFetchRows
 		}
 	}
