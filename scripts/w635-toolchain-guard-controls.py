@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """W6.35 control campaign — the toolchain floor and the go.mod↔ci.yaml lockstep."""
-import hashlib, os, signal, subprocess, sys
+import hashlib, os, pathlib, signal, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOMOD = os.path.join(ROOT, "go.mod")
@@ -110,8 +110,29 @@ CONTROLS = [
 ANCHOR_FLOOR = 8  # controls whose anchors are checked. A loop over an empty list checks nothing.
 
 
+def _test_sources():
+    """Every Go test source in the module, as one string.
+
+    ⚠ THE VACUITY RISK IS THE WHOLE REASON THIS IS A NAMED FUNCTION. If this walk ever returns
+    nothing, every test name below verifies FOR FREE against a tree it never read, and the check
+    reports a healthy campaign — the exact shape of the defect it exists to catch. The caller
+    asserts `func Test` appears at all; control E4 blinds this walk and requires a red.
+    """
+    out = []
+    for f in pathlib.Path(ROOT).rglob("*_test.go"):
+        try:
+            out.append(f.read_text(encoding="utf-8"))
+        except OSError:
+            pass
+    return "\n".join(out)
+
+
 def check_anchors(ci_mode):
     bad = []
+    sources = _test_sources()
+    if "func Test" not in sources:
+        bad.append("FLOOR: no Go test sources were read, so every expected-test name below would "
+                   "verify for free. The walk is broken, not the tree.")
     if len(CONTROLS) < ANCHOR_FLOOR:
         bad.append("FLOOR: only %d controls to check, floor is %d — a loop over a shrunken list "
                    "reports clean anchors rather than a missing campaign. If controls were "
@@ -129,11 +150,30 @@ def check_anchors(ci_mode):
                 "silently missing. Re-anchor it on something still unique; do NOT just raise the "
                 "expected count, which mutates every copy at once and stops distinguishing them."
                 % (name, n, os.path.basename(path), expect))
+        # ⚠ THE OTHER END A CONTROL ROTS FROM. A campaign breaks in two independent ways: the
+        # thing it MUTATES can drift, and the TEST IT EXPECTS TO BREAK can be renamed away.
+        # talyvor-code #76 is the demonstration — w420's C4 expected a test deleted in the same
+        # refactor that moved its anchor, and that rot stayed hidden behind the anchor one.
+        #
+        # ⚠⚠ AND HERE IT FAILS IN A DIRECTION THAT MISDIRECTS THE READER, WHICH IS WHY IT IS WORTH
+        # A GUARD RATHER THAN A NOTE. The campaign runs its expected catcher as
+        # `go test -run ^NAME$`. A name matching nothing runs ZERO tests and `go test` EXITS 0, so
+        # the harness reads it as "the guard did not fire" and prints MISSED — sending whoever
+        # reads it hunting for a hole in internal/toolchainguard that is not there.
+        for t in [x for x in (ctl[4], ctl[5]) if x]:
+            if ("func " + t + "(") not in sources:
+                print("       expects %-56s NO SUCH TEST" % t)
+                bad.append(
+                    "%s names %s as a test to run and no `func %s(` exists in this module. The "
+                    "campaign would run `go test -run ^%s$`, match nothing, exit 0, and report "
+                    "MISSED — which reads as a broken GUARD rather than a broken CONTROL."
+                    % (name, t, t, t))
     if bad:
         for b in bad:
             print(("::error::" if ci_mode else "") + b)
         return 1
-    print("anchor check: all %d control anchors still apply" % len(CONTROLS))
+    print("anchor check: all %d control anchors still apply and every expected test exists"
+          % len(CONTROLS))
     return 0
 
 
