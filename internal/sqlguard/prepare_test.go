@@ -197,9 +197,94 @@ func flatten(e ast.Expr, binds map[string]string) (string, bool) {
 
 var dbCall = map[string]bool{"Query": true, "QueryRow": true, "Exec": true}
 
+// driftSuspects returns one note per file whose R1/R5 failures carry the LINE-DRIFT signature.
+//
+// ⚠ IT IS DELIBERATELY CONSERVATIVE AND ONLY EVER ADDS A NOTE — it cannot suppress an R1 or an R5,
+// and there is no input on which it makes this guard catch less. The signature is: within ONE file,
+// N exemptions went orphaned AND exactly N blind sites came up unlisted. Any other shape (only
+// orphans, only unlisted, or unequal counts) is left undiagnosed rather than guessed at, because a
+// wrong cause printed confidently is worse than no cause at all — which is the failure this whole
+// note exists to undo.
+func driftSuspects(orphaned map[string][]string, unlisted map[string][]blindSite) []string {
+	var files []string
+	for f := range orphaned {
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	var out []string
+	for _, f := range files {
+		orphans, news := orphaned[f], unlisted[f]
+		if len(news) == 0 || len(news) != len(orphans) {
+			continue
+		}
+		var moved []string
+		for _, b := range news {
+			where := b.fn
+			if where == "" {
+				where = "file scope"
+			}
+			moved = append(moved, fmt.Sprintf("%s (in %s)", b.key, where))
+		}
+		out = append(out, fmt.Sprintf(
+			"%s%s: %d exemption(s) orphaned (%s) and exactly %d unlisted blind site(s) (%s). "+
+				"That is the signature of lines MOVING above these call sites, not of their SQL "+
+				"changing — check whether anything above them changed line count before touching "+
+				"the statements. ⚠ IF YOU ARE RUNNING A MUTATION HARNESS: make your arms "+
+				"LINE-PRESERVING, or this guard reds for free and a red that means nothing will "+
+				"be scored as a catch.",
+			driftNotePrefix, f, len(orphans), strings.Join(orphans, ", "), len(news),
+			strings.Join(moved, ", ")))
+	}
+	return out
+}
+
+// driftNotePrefix is named rather than inlined so the control that proves this note appears for a
+// drift — and NOT for a genuine change — has something stable to match on.
+const driftNotePrefix = "R1/R5 LINE DRIFT SUSPECTED in "
+
+// keyFile splits "path:line" back to its path. The exemption list is keyed by line and stays that
+// way; this only groups orphans per file so a drift signature can be recognised within one file.
+func keyFile(key string) string {
+	if i := strings.LastIndex(key, ":"); i >= 0 {
+		return key[:i]
+	}
+	return key
+}
+
+// funcName renders a FuncDecl the way a human reads it, receiver included, so a blind site can be
+// reported as "(*Store).SearchWithRank" rather than as a line number that has already moved.
+func funcName(fd *ast.FuncDecl) string {
+	if fd.Recv == nil || len(fd.Recv.List) == 0 {
+		return fd.Name.Name
+	}
+	var recv string
+	switch rt := fd.Recv.List[0].Type.(type) {
+	case *ast.StarExpr:
+		if id, ok := rt.X.(*ast.Ident); ok {
+			recv = "*" + id.Name
+		}
+	case *ast.Ident:
+		recv = rt.Name
+	}
+	if recv == "" {
+		return fd.Name.Name
+	}
+	return "(" + recv + ")." + fd.Name.Name
+}
+
+// blindSite is a call site whose SQL could not be read from source. It carries the ENCLOSING
+// FUNCTION as well as the line, and that is the whole point of the type: the exemption list is
+// keyed by line, so when lines move the key is worthless for telling a human WHICH call site an
+// orphaned entry meant. A function name survives a line shift; a line number does not.
+type blindSite struct {
+	key  string // "path:line" — still the exemption key, unchanged
+	file string
+	fn   string // enclosing func, e.g. "(*Store).SearchWithRank"; "" at file scope
+}
+
 // scan walks the non-test tree and returns the reconstructed statements plus the call sites it
 // could not reconstruct.
-func scan(t *testing.T, root string) (found []site, blind []string) {
+func scan(t *testing.T, root string) (found []site, blind []blindSite) {
 	t.Helper()
 	fset := token.NewFileSet()
 	var files int
@@ -225,7 +310,14 @@ func scan(t *testing.T, root string) (found []site, blind []string) {
 		files++
 		binds := stringBindings(f)
 		rel, _ := filepath.Rel(root, path)
+		// enclosing tracks the FuncDecl we are inside. ast.Inspect walks depth-first, so the most
+		// recent FuncDecl entered is the one a call belongs to; it is cleared on the way back out.
+		var enclosing string
 		ast.Inspect(f, func(n ast.Node) bool {
+			if fd, ok := n.(*ast.FuncDecl); ok {
+				enclosing = funcName(fd)
+				return true
+			}
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
@@ -242,7 +334,7 @@ func scan(t *testing.T, root string) (found []site, blind []string) {
 			key := fmt.Sprintf("%s:%d", rel, line)
 			sql, ok := flatten(call.Args[1], binds)
 			if !ok {
-				blind = append(blind, key)
+				blind = append(blind, blindSite{key: key, file: rel, fn: enclosing})
 				return true
 			}
 			found = append(found, site{key: key, sql: strings.Join(strings.Fields(sql), " "), file: rel, line: line})
@@ -258,7 +350,7 @@ func scan(t *testing.T, root string) (found []site, blind []string) {
 			"not the tree", files)
 	}
 	sort.Slice(found, func(i, j int) bool { return found[i].key < found[j].key })
-	sort.Strings(blind)
+	sort.Slice(blind, func(i, j int) bool { return blind[i].key < blind[j].key })
 	return found, blind
 }
 
@@ -280,22 +372,63 @@ func TestEveryStaticStatementResolvesAgainstTheRealSchema(t *testing.T) {
 		len(found), len(blind))
 
 	// R1 CLASSIFIED — a call site whose SQL cannot be read must be named, with a reason.
-	for _, k := range blind {
-		if _, ok := unreconstructable[k]; !ok {
-			t.Errorf("R1: %s builds its SQL in a way this guard cannot read, and is not in "+
-				"unreconstructable. Add it with the reason, or make the statement literal so it "+
-				"can be checked", k)
+	blindSet := map[string]bool{}
+	unlisted := map[string][]blindSite{} // file -> blind sites with no exemption
+	for _, b := range blind {
+		blindSet[b.key] = true
+		if _, ok := unreconstructable[b.key]; !ok {
+			unlisted[b.file] = append(unlisted[b.file], b)
 		}
 	}
 	// R5 NO STALE — an exemption that is no longer needed hides a statement from R2.
-	blindSet := map[string]bool{}
-	for _, k := range blind {
-		blindSet[k] = true
-	}
-	for k, why := range unreconstructable {
+	orphaned := map[string][]string{} // file -> exemption keys no longer blind
+	for k := range unreconstructable {
 		if !blindSet[k] {
+			orphaned[keyFile(k)] = append(orphaned[keyFile(k)], k)
+		}
+	}
+	for f := range orphaned {
+		sort.Strings(orphaned[f])
+	}
+
+	// ⚠ THE LINE-DRIFT DIAGNOSIS, AND IT CHANGES NOTHING ABOUT WHAT THIS GUARD CATCHES — R1 and R5
+	// still fail below, on exactly the same inputs. It changes only what the failure SAYS.
+	//
+	// The exemption list is keyed by "path:line". That is deliberate: editing an exempted call site
+	// SHOULD force a human to re-confirm the exemption. But a line key cannot tell "this call site
+	// changed" from "something above it changed line count", and those want opposite responses.
+	//
+	// ⚠ MEASURED, AND IT COST A CENSUS ITS ANSWER (W3.58, tab-p3w8): a mutation harness deleted a
+	// three-line block in internal/page/store.go, this guard red with R1 naming :1399 and R5 naming
+	// :1402, and BOTH MESSAGES WERE FALSE — nothing about the SQL had changed and no exemption was
+	// stale. The harness scored the red as its own arm being CAUGHT, and so reported two UNDEFENDED
+	// corrections as DEFENDED. The failure direction is the one that manufactures confidence.
+	//
+	// The signature is structural and is reported as a CANDIDATE cause, not asserted as fact: in one
+	// file, N exemptions went orphaned and N blind sites came up unlisted. The enclosing FUNCTION of
+	// each unlisted site is printed because a function name survives a line shift and a line number
+	// does not — it is what lets a reader confirm the pairing in one glance.
+	for _, note := range driftSuspects(orphaned, unlisted) {
+		t.Log(note)
+	}
+
+	for f, news := range unlisted {
+		for _, b := range news {
+			where := b.fn
+			if where == "" {
+				where = "file scope"
+			}
+			t.Errorf("R1: %s (in %s) builds its SQL in a way this guard cannot read, and is not in "+
+				"unreconstructable. Add it with the reason, or make the statement literal so it "+
+				"can be checked", b.key, where)
+		}
+		_ = f
+	}
+	for _, orphans := range orphaned {
+		for _, k := range orphans {
 			t.Errorf("R5: unreconstructable lists %s (%q) but that call site is reconstructable "+
-				"now, so the exemption is hiding it from the schema check. Remove the entry", k, why)
+				"now, so the exemption is hiding it from the schema check. Remove the entry",
+				k, unreconstructable[k])
 		}
 	}
 
