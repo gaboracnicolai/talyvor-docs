@@ -290,6 +290,32 @@ def m_bare_harvest_blinded():
         "def _anchor_shaped(v):\n    return False", 1))
 
 
+def m_dataclass_probe():
+    """C14 — a script using @dataclass must not vanish into the unreached bucket.
+
+    ⚠ THIS WAS A REAL BLIND SPOT AND IT REPORTED ITSELF AS A SHAPE PROBLEM.
+    `@dataclass` resolves its field types through `sys.modules[cls.__module__].__dict__`, so
+    exec'ing a script into a bare dict under a synthetic __name__ raises AttributeError — and the
+    guard filed the script under "unreached", indistinguishable from one that simply has no anchor
+    table. w31-tenancypredicate-census-5r8k.py was invisible for exactly that reason.
+
+    The probe carries a dataclass AND an inert row, so it can only be reported if the exec
+    succeeds. Before the fix this arm scores NOT CAUGHT; after it, R1.
+    """
+    # ⚠ `from __future__ import annotations` IS LOAD-BEARING AND THE FIRST VERSION OF THIS ARM
+    # OMITTED IT, SO IT SCORED CAUGHT WITH AND WITHOUT THE FIX. Plain annotations are real type
+    # objects and dataclasses never consults sys.modules for them; PEP 563 turns every annotation
+    # into a STRING, which is what forces the `sys.modules[cls.__module__].__dict__` lookup that
+    # fails. The real script this reproduces, w31-tenancypredicate-census-5r8k.py, has exactly
+    # this pair at lines 43 and 53. Verified in both directions: with the fix -> R1, without it
+    # -> no R1.
+    PROBE.write_text(
+        "from __future__ import annotations\n\n"
+        "from dataclasses import dataclass\n\n\n"
+        "@dataclass\nclass Edit:\n    path: str\n    old: str\n\n\n"
+        "EDITS = [(\"go.mod\", \"W643_DATACLASS_PROBE_NEVER_OCCURS\", \"x\", 1)]\n")
+
+
 def m_harmless_edit():
     """C9 — MUST STAY GREEN. An edit that touches no anchor must not red."""
     src = TARGET_OK.read_text()
@@ -309,6 +335,7 @@ ARMS = [
     ("C11", "the bare-constant detector reports an inert anchor", [PROBE], m_bare_detector_finds_it, {"R1"}),
     ("C12", "the role pass is blinded, so a REPLACEMENT reads as an anchor", [GUARD, PROBE], m_role_pass_blinded, {"R1"}),
     ("C13", "the bare detector's harvest stage is blinded alone", [GUARD], m_bare_harvest_blinded, {"R7"}),
+    ("C14", "a script using @dataclass is read, not silently skipped", [PROBE], m_dataclass_probe, {"R1"}),
     ("C9", "MUST STAY GREEN: an edit that is nobody's anchor", [TARGET_OK], m_harmless_edit, set()),
 ]
 
