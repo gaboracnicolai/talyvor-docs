@@ -63,9 +63,18 @@ PREMISES = ("PREMISE-SEM", "PREMISE-FT")
 
 SEM_LIMIT = "        LIMIT $3 OFFSET $5`,\n\t\tencoded, workspaceID, limit, spaceID, offset,\n"
 SEM_LIMIT_LINE = "        LIMIT $3 OFFSET $5`"
-SEM_CALL = "sem, semEr = h.semantic.Search(ctx, wsID, q, spaceID, fetchLimit, offset)"
-FT_CALL = "ft, ftEr = h.pages.SearchWithRank(r.Context(), wsID, q, spaceID, fetchLimit, offset)"
+SEM_CALL = "sem, semEr = h.semantic.Search(ctx, wsID, q, spaceID, fetchLimit, sqlOffset)"
+FT_CALL = "ft, ftEr = h.pages.SearchWithRank(r.Context(), wsID, q, spaceID, fetchLimit, sqlOffset)"
 CLAMP = "\tif offset < 0 {\n\t\toffset = 0\n\t}\n"
+
+# ⚠ THE SEAM THAT DECIDES A type=all PAGE MOVED, AND IT MOVED OUT OF SQL ENTIRELY.
+# 4417532 ("paging a merged search stranded the rows the merge had not seen") made the
+# two-source path fetch from row 0 with a WIDER window and apply the caller's offset AFTER the
+# merge and AFTER the access filter — the only place a position in the merged answer exists.
+# `sqlOffset` is therefore the caller's offset on a SINGLE-source search and hard 0 on type=all,
+# which handler.go says in its own comment. Everything below follows from that.
+MERGED_OFFSET = ("\tif twoSources {\n\t\tif offset >= len(rows) {\n\t\t\trows = rows[:0]\n"
+                 "\t\t} else {\n\t\t\trows = rows[offset:]\n\t\t}\n\t}\n")
 
 # (id, description, [(file, anchor, replacement), ...], predicted assertion tags, must-stay-green tags)
 CONTROLS = [
@@ -76,14 +85,28 @@ CONTROLS = [
         # file is how a harness applies half of itself: the second read would not see the first
         # write, and a partially reverted query is a different mutation from the one named here.
         [(SEMANTIC, SEM_LIMIT, "        LIMIT $3`,\n\t\tencoded, workspaceID, limit, spaceID,\n")],
-        ["SEM-PAGE2", "SEM-TAIL", "ALL-PAGE2"],
+        # ⚠ ALL-PAGE2 WAS PREDICTED HERE AND IS NOT REACHABLE FROM THIS MUTATION ANY MORE, AND
+        # THAT IS A FACT ABOUT THE PRODUCT RATHER THAN ABOUT THIS CONTROL. Since 4417532 the
+        # type=all path passes sqlOffset=0 to BOTH stores on purpose and pages after the merge,
+        # so no defect in the semantic query's OFFSET can move a type=all page. Measured: with
+        # the anchors mechanically re-pointed and nothing else changed, O1, O2 and O3 each fired
+        # SEM-PAGE2 and SEM-TAIL and NOT ALL-PAGE2 — three controls predicting an assertion none
+        # of them can produce. O6 below is what claims ALL-PAGE2 now.
+        ["SEM-PAGE2", "SEM-TAIL"],
         ["OVERCORRECT-SEM-P1", "OVERCORRECT-ALL-P1", "FT-REGRESSION"],
     ),
     (
         "O2",
         "THE CALL SITE, not the query: the handler passes a literal 0 to a store that pages correctly",
-        [(HANDLER, SEM_CALL, SEM_CALL.replace("fetchLimit, offset)", "fetchLimit, 0)"))],
-        ["SEM-PAGE2", "SEM-TAIL", "ALL-PAGE2"],
+        [(HANDLER, SEM_CALL, SEM_CALL.replace("fetchLimit, sqlOffset)", "fetchLimit, 0)"))],
+        # ⚠ ALL-PAGE2 WAS PREDICTED HERE AND IS NOT REACHABLE FROM THIS MUTATION ANY MORE, AND
+        # THAT IS A FACT ABOUT THE PRODUCT RATHER THAN ABOUT THIS CONTROL. Since 4417532 the
+        # type=all path passes sqlOffset=0 to BOTH stores on purpose and pages after the merge,
+        # so no defect in the semantic query's OFFSET can move a type=all page. Measured: with
+        # the anchors mechanically re-pointed and nothing else changed, O1, O2 and O3 each fired
+        # SEM-PAGE2 and SEM-TAIL and NOT ALL-PAGE2 — three controls predicting an assertion none
+        # of them can produce. O6 below is what claims ALL-PAGE2 now.
+        ["SEM-PAGE2", "SEM-TAIL"],
         ["OVERCORRECT-SEM-P1", "OVERCORRECT-ALL-P1", "FT-REGRESSION"],
     ),
     (
@@ -92,7 +115,14 @@ CONTROLS = [
         # The control that makes 'is the offset passed?' an inadequate question. A guard that
         # inspected the argument list — or a pgxmock WithArgs — passes this. Only reading ROWS fails it.
         [(SEMANTIC, SEM_LIMIT_LINE, "        LIMIT $3 OFFSET ($5::int * 0)`")],
-        ["SEM-PAGE2", "SEM-TAIL", "ALL-PAGE2"],
+        # ⚠ ALL-PAGE2 WAS PREDICTED HERE AND IS NOT REACHABLE FROM THIS MUTATION ANY MORE, AND
+        # THAT IS A FACT ABOUT THE PRODUCT RATHER THAN ABOUT THIS CONTROL. Since 4417532 the
+        # type=all path passes sqlOffset=0 to BOTH stores on purpose and pages after the merge,
+        # so no defect in the semantic query's OFFSET can move a type=all page. Measured: with
+        # the anchors mechanically re-pointed and nothing else changed, O1, O2 and O3 each fired
+        # SEM-PAGE2 and SEM-TAIL and NOT ALL-PAGE2 — three controls predicting an assertion none
+        # of them can produce. O6 below is what claims ALL-PAGE2 now.
+        ["SEM-PAGE2", "SEM-TAIL"],
         ["OVERCORRECT-SEM-P1", "OVERCORRECT-ALL-P1", "FT-REGRESSION"],
     ),
     (
@@ -121,9 +151,21 @@ CONTROLS = [
         "the offset reaches the semantic half only when type=semantic — the DEFAULT type stays broken",
         # ISOLATES ALL-PAGE2. One predicate spelled twice: the explicitly-asked-for type is fixed and
         # the type the frontend actually sends is not, which no type=semantic case can see.
-        [(HANDLER, SEM_CALL,
-          "semOffset := offset\n\t\t\tif kind == \"all\" {\n\t\t\t\tsemOffset = 0\n\t\t\t}\n\t\t\t"
-          + SEM_CALL.replace("fetchLimit, offset)", "fetchLimit, semOffset)"))],
+        # ⚠⚠ THIS CONTROL MUTATED THE PRODUCT INTO AN EXACT ALIAS OF ITSELF AND SCORED
+        # "NOT CAUGHT — fired nothing". Its original mutation inserted
+        #     semOffset := offset; if kind == "all" { semOffset = 0 }
+        # which is, character for character, what handler.go now does as `sqlOffset` (line 244:
+        # `sqlOffset := offset`, line 249: `sqlOffset = 0` under `twoSources`). 4417532 turned
+        # the DEFECT this control describes into the DESIGN. A byte-level void check passes it —
+        # the inserted lines really are new bytes — so nothing but running it and reading the
+        # tags could have found this.
+        #
+        # ⚠⚠⚠ SO THE ANCHOR WAS NEVER THE WHOLE PROBLEM, AND RE-POINTING IT WOULD HAVE SHIPPED A
+        # CONTROL THAT CANNOT FAIL. The mutation is re-aimed at the seam that decides a type=all
+        # page TODAY: the post-merge slice. Deleting it makes every type=all page start at row 0,
+        # which is the same user-visible defect the original described — the default search type
+        # stuck on page 1 — reached through the code that now causes it.
+        [(HANDLER, MERGED_OFFSET, MERGED_OFFSET.replace("\tif twoSources {", "\tif false {", 1))],
         ["ALL-PAGE2"],
         ["OVERCORRECT-SEM-P1", "OVERCORRECT-ALL-P1", "FT-REGRESSION", "SEM-PAGE2", "SEM-TAIL"],
     ),
@@ -133,7 +175,7 @@ CONTROLS = [
         # ISOLATES FT-REGRESSION, the must-stay-green of the pair. Every other assertion in the file
         # can be satisfied by the semantic rows alone, so without this control nothing says the
         # working half is still protected while the broken one is being fixed.
-        [(HANDLER, FT_CALL, FT_CALL.replace("fetchLimit, offset)", "fetchLimit, 0)"))],
+        [(HANDLER, FT_CALL, FT_CALL.replace("fetchLimit, sqlOffset)", "fetchLimit, 0)"))],
         ["FT-REGRESSION"],
         ["OVERCORRECT-SEM-P1", "OVERCORRECT-ALL-P1", "SEM-PAGE2", "SEM-TAIL", "ALL-PAGE2"],
     ),
