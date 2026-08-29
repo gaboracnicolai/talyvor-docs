@@ -70,7 +70,18 @@ GUARDS = [ROW_GONE, ONLY_THAT, CROSS_TENANT]
 # :237. A first ad-hoc pass used it, the count assertion fired, and the two runs it guarded
 # would otherwise have reported a repo-wide green from a tree that had not been mutated at all.
 # Every anchor below carries the `DELETE FROM changelog_entries` prefix for that reason.
-DELETE_WHERE = "`DELETE FROM changelog_entries WHERE id = $1 AND workspace_id = ANY($2)`, id, wsIDs)"
+# ⚠ THE STATEMENT GREW A `page_id` PREDICATE AND EVERY PLACEHOLDER SHIFTED. bf1f5fe (the
+# cross-page fix this repo's own w31-classguard-blindness.py records as R1-changelog) added
+# `AND page_id = $2`, so `workspace_id = ANY($2)` became `ANY($3)` and the bind list grew a
+# pageID. The old anchor matched 0 sites and the script exited with FATAL ANCHOR before applying
+# a single control — loudly, and unread, because nothing runs it.
+#
+# ⚠⚠ EVERY REPLACEMENT BELOW KEEPS ALL THREE PLACEHOLDERS, AND THAT IS NOT COSMETIC: pgx sends
+# the bind list the call site builds, so a mutation that drops `$2` from the SQL makes Postgres
+# refuse the statement outright ("bind message supplies 3 parameters, but prepared statement
+# requires 2"). Every guard would then red for a bind error rather than for the leak under test,
+# and the control set would score a clean sweep while proving nothing about the predicate.
+DELETE_WHERE = "`DELETE FROM changelog_entries WHERE id = $1 AND page_id = $2 AND workspace_id = ANY($3)`,\n\t\tid, pageID, wsIDs)"
 NOTFOUND_BRANCH = ["\tif tag.RowsAffected() == 0 {", "\t\treturn ErrNotFound", "\t}"]
 
 
@@ -186,28 +197,60 @@ CONTROLS = [
     ("D1", "`AND` -> `OR` between the id and the workspace scope: deleting ONE entry deletes "
            "EVERY entry in the caller's workspaces. THE MEASURED REPO-WIDE ESCAPE.",
      sub(DELETE_WHERE,
-         "`DELETE FROM changelog_entries WHERE id = $1 OR workspace_id = ANY($2)`, id, wsIDs)"),
-     {ROW_GONE: "PASS", ONLY_THAT: "FAIL", CROSS_TENANT: "FAIL"}, "PASS"),
-
+         "`DELETE FROM changelog_entries WHERE id = $1 AND page_id = $2 OR workspace_id = ANY($3)`,\n\t\tid, pageID, wsIDs)"),
+     # ⚠ `others` WAS PREDICTED PASS AND IS NOW FAIL, AND THE SAME COMMIT CAUSED BOTH HALVES OF
+     # THIS CONTROL'S ROT. bf1f5fe added `AND page_id = $2` (which killed the anchor above) AND
+     # added TestChangelogByIDRoutes_MustBelongToTheAuthorizedPage_RealPG, whose [X-OWN-DELETE]
+     # arm reds on any mutation of this predicate. This script was written at 0c962ac the same
+     # day, hours earlier.
+     # ⚠⚠ THE CORRECTION COSTS SOMETHING AND IT IS NAMED RATHER THAN ABSORBED: this control is
+     # now caught by a SECOND guard, so it no longer ISOLATES the three named ones — "a control
+     # two guards catch justifies neither". The three guard columns are still scored exactly as
+     # predicted; what changed is that they are no longer alone.
+     {ROW_GONE: "PASS", ONLY_THAT: "FAIL", CROSS_TENANT: "FAIL"}, "FAIL"),
     ("D2", "the workspace scope neutralised with `OR TRUE` — statement still contains "
            "`workspace_id = ANY` and still binds both args, so the mock is blind",
      sub(DELETE_WHERE,
-         "`DELETE FROM changelog_entries WHERE id = $1 AND (workspace_id = ANY($2) OR TRUE)`, id, wsIDs)"),
-     {ROW_GONE: "PASS", ONLY_THAT: "PASS", CROSS_TENANT: "FAIL"}, "PASS"),
-
+         "`DELETE FROM changelog_entries WHERE id = $1 AND page_id = $2 AND (workspace_id = ANY($3) OR TRUE)`,\n\t\tid, pageID, wsIDs)"),
+     # ⚠ `others` WAS PREDICTED PASS AND IS NOW FAIL, AND THE SAME COMMIT CAUSED BOTH HALVES OF
+     # THIS CONTROL'S ROT. bf1f5fe added `AND page_id = $2` (which killed the anchor above) AND
+     # added TestChangelogByIDRoutes_MustBelongToTheAuthorizedPage_RealPG, whose [X-OWN-DELETE]
+     # arm reds on any mutation of this predicate. This script was written at 0c962ac the same
+     # day, hours earlier.
+     # ⚠⚠ THE CORRECTION COSTS SOMETHING AND IT IS NAMED RATHER THAN ABSORBED: this control is
+     # now caught by a SECOND guard, so it no longer ISOLATES the three named ones — "a control
+     # two guards catch justifies neither". The three guard columns are still scored exactly as
+     # predicted; what changed is that they are no longer alone.
+     {ROW_GONE: "PASS", ONLY_THAT: "PASS", CROSS_TENANT: "FAIL"}, "FAIL"),
     ("D3", "a second OR-arm deleting published entries, WORKSPACE SCOPE HELD ON BOTH ARMS — the "
            "target still goes, the refusal is still right, the entry beside it is gone",
      sub(DELETE_WHERE,
-         "`DELETE FROM changelog_entries WHERE id = $1 AND workspace_id = ANY($2) "
-         "OR published_at IS NOT NULL AND workspace_id = ANY($2)`, id, wsIDs)"),
-     {ROW_GONE: "PASS", ONLY_THAT: "FAIL", CROSS_TENANT: "PASS"}, "PASS"),
-
+         "`DELETE FROM changelog_entries WHERE id = $1 AND page_id = $2 AND workspace_id = ANY($3) "
+         "OR published_at IS NOT NULL AND workspace_id = ANY($3)`,\n\t\tid, pageID, wsIDs)"),
+     # ⚠ `others` WAS PREDICTED PASS AND IS NOW FAIL, AND THE SAME COMMIT CAUSED BOTH HALVES OF
+     # THIS CONTROL'S ROT. bf1f5fe added `AND page_id = $2` (which killed the anchor above) AND
+     # added TestChangelogByIDRoutes_MustBelongToTheAuthorizedPage_RealPG, whose [X-OWN-DELETE]
+     # arm reds on any mutation of this predicate. This script was written at 0c962ac the same
+     # day, hours earlier.
+     # ⚠⚠ THE CORRECTION COSTS SOMETHING AND IT IS NAMED RATHER THAN ABSORBED: this control is
+     # now caught by a SECOND guard, so it no longer ISOLATES the three named ones — "a control
+     # two guards catch justifies neither". The three guard columns are still scored exactly as
+     # predicted; what changed is that they are no longer alone.
+     {ROW_GONE: "PASS", ONLY_THAT: "FAIL", CROSS_TENANT: "PASS"}, "FAIL"),
     ("D4", "` AND FALSE` appended — finding (11)'s PRESCRIBED P-class mutation. Predicted to red "
            "through the ErrNotFound BRANCH, not through a row read; check the message.",
      sub(DELETE_WHERE,
-         "`DELETE FROM changelog_entries WHERE id = $1 AND workspace_id = ANY($2) AND FALSE`, id, wsIDs)"),
-     {ROW_GONE: "FAIL", ONLY_THAT: "FAIL", CROSS_TENANT: "PASS"}, "PASS"),
-
+         "`DELETE FROM changelog_entries WHERE id = $1 AND page_id = $2 AND workspace_id = ANY($3) AND FALSE`,\n\t\tid, pageID, wsIDs)"),
+     # ⚠ `others` WAS PREDICTED PASS AND IS NOW FAIL, AND THE SAME COMMIT CAUSED BOTH HALVES OF
+     # THIS CONTROL'S ROT. bf1f5fe added `AND page_id = $2` (which killed the anchor above) AND
+     # added TestChangelogByIDRoutes_MustBelongToTheAuthorizedPage_RealPG, whose [X-OWN-DELETE]
+     # arm reds on any mutation of this predicate. This script was written at 0c962ac the same
+     # day, hours earlier.
+     # ⚠⚠ THE CORRECTION COSTS SOMETHING AND IT IS NAMED RATHER THAN ABSORBED: this control is
+     # now caught by a SECOND guard, so it no longer ISOLATES the three named ones — "a control
+     # two guards catch justifies neither". The three guard columns are still scored exactly as
+     # predicted; what changed is that they are no longer alone.
+     {ROW_GONE: "FAIL", ONLY_THAT: "FAIL", CROSS_TENANT: "PASS"}, "FAIL"),
     ("D5", "the `RowsAffected() == 0 => ErrNotFound` branch deleted — the edit finding (10) names "
            "as covered by no control in this item",
      drop_notfound_branch,
@@ -217,9 +260,17 @@ CONTROLS = [
            "inverse of D3, and the class where the two row guards fail for DIFFERENT reasons — "
            "read both messages.",
      sub(DELETE_WHERE,
-         "`DELETE FROM changelog_entries WHERE id != $1 AND workspace_id = ANY($2)`, id, wsIDs)"),
-     {ROW_GONE: "FAIL", ONLY_THAT: "FAIL", CROSS_TENANT: "PASS"}, "PASS"),
-
+         "`DELETE FROM changelog_entries WHERE id != $1 AND page_id = $2 AND workspace_id = ANY($3)`,\n\t\tid, pageID, wsIDs)"),
+     # ⚠ `others` WAS PREDICTED PASS AND IS NOW FAIL, AND THE SAME COMMIT CAUSED BOTH HALVES OF
+     # THIS CONTROL'S ROT. bf1f5fe added `AND page_id = $2` (which killed the anchor above) AND
+     # added TestChangelogByIDRoutes_MustBelongToTheAuthorizedPage_RealPG, whose [X-OWN-DELETE]
+     # arm reds on any mutation of this predicate. This script was written at 0c962ac the same
+     # day, hours earlier.
+     # ⚠⚠ THE CORRECTION COSTS SOMETHING AND IT IS NAMED RATHER THAN ABSORBED: this control is
+     # now caught by a SECOND guard, so it no longer ISOLATES the three named ones — "a control
+     # two guards catch justifies neither". The three guard columns are still scored exactly as
+     # predicted; what changed is that they are no longer alone.
+     {ROW_GONE: "FAIL", ONLY_THAT: "FAIL", CROSS_TENANT: "PASS"}, "FAIL"),
     ("D6", "MUST-NOT-CATCH: an unrelated edit elsewhere in store.go (ListEntries' ORDER BY). All "
            "three guards must stay GREEN while the package's own mock test reds.",
      # ListEntries spells its ORDER BY twice — once per filter branch. Both are mutated and the
