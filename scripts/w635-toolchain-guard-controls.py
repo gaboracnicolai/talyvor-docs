@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """W6.35 control campaign — the toolchain floor and the go.mod↔ci.yaml lockstep."""
-import hashlib, os, subprocess, sys
+import hashlib, os, signal, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOMOD = os.path.join(ROOT, "go.mod")
@@ -73,11 +73,46 @@ if not ok:
     sys.exit("not green before the campaign:\n" + out[-2000:])
 print("\nbaseline: GREEN\n")
 
+
+def restore_on_signal(snapshot):
+    """Put every snapshotted file back, then die of the signal we were sent.
+
+    A `finally` DOES NOT RUN ON SIGTERM. Measured in talyvor-suite (W1.7, 78c69c8): a 2-minute
+    command timeout killed a control mid-mutation and left a GATE REMOVED in the working tree,
+    with a green suite and a `git status` that showed only files the session had edited on
+    purpose. Reproduced on demand in 5de27e3 — same kill, same file: with a handler nothing was
+    stranded, without one the mutated file stayed.
+
+    Re-raising with SIG_DFL keeps the exit status honest: a caller that killed this process still
+    sees it die of that signal rather than exit 0 with a tidy tree. SIGKILL still strands and
+    nothing in Python can change that.
+
+    Deliberately self-contained rather than an import, so the next script is a paste. The
+    population and the rule live in scripts/check-restore-signal-handlers.py.
+    """
+    def handler(signum, _frame):
+        for path, blob in snapshot.items():
+            try:
+                open(path, "wb").write(blob)
+            except OSError:
+                pass
+        sys.stderr.write("\n!! signal %d — restored %d mutated file(s) before exiting\n"
+                         % (signum, len(snapshot)))
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, handler)
+
+
 results = []
 for ctl in CONTROLS:
     name, path, old, new, red, green, proves = ctl[:7]
     expect = ctl[7] if len(ctl) > 7 else 1
     backup = open(path).read()
+    # Installed AFTER the snapshot exists and re-installed each control, because `path` differs
+    # per control. The `finally` below is the normal path; this is the one a SIGTERM takes.
+    restore_on_signal({path: backup.encode("utf-8")})
     try:
         anchored(path, old, new, expect)
         red_ok, red_out = run(red)

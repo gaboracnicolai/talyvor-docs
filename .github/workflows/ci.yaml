@@ -52,6 +52,26 @@ jobs:
       # is non-empty, and the second invocation prints WHICH files so the failure is
       # actionable. Uses the toolchain's own gofmt, so "formatted" means one thing here and on
       # a developer's machine.
+      # A `finally` DOES NOT RUN ON SIGTERM, and 43 of this repo's control scripts mutate a
+      # tracked file and restore it in one. NONE installed a handler before this step.
+      #
+      # ⚠ ORG-LEVEL CLASS GUARD, NOT A DOCS GUARD — the same reasoning the compose-secrets and
+      # govulncheck jobs already state. The hazard was measured in talyvor-suite (W1.7, 78c69c8):
+      # a 2-minute command timeout killed a control mid-mutation and left deploy/decision-expiry.sh
+      # reading `if true; then` WHERE A GATE HAD BEEN, with a green suite and a `git status`
+      # showing only files the session had edited on purpose. Reproduced on demand in 5de27e3, and
+      # again HERE while porting this: same kill, and the file left mutated was go.mod.
+      #
+      # Estate-wide at f8e7236: 163 mutate-and-restore scripts, 3 protected — all three in the one
+      # repo that had been bitten. The script carries no Docs-specific knowledge and is meant to be
+      # copied into talyvor-track, talyvor-code and talyvor-lens alongside this step.
+      #
+      # The allowlist inside it may only SHRINK: R2 fails on an entry that has been fixed, R1 on a
+      # new unprotected script, R3 is a floor on the DETECTOR. Detection is `ast`, never grep — a
+      # regex counts the word "signal" in a COMMENT as a handler, and `grep -l finally:` counts 60
+      # scripts here where the real population is 43.
+      - name: control scripts must restore on SIGTERM, not only in a finally
+        run: python3 scripts/check-restore-signal-handlers.py --ci
       - name: gofmt (formatting must not drift)
         run: test -z "$(gofmt -l .)" || { echo "::error::unformatted files — run gofmt -w"; gofmt -l .; exit 1; }
       - run: go vet ./...
