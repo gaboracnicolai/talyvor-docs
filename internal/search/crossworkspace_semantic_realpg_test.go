@@ -9,7 +9,9 @@ package search
 // candidates and said so with an explicit caveat: "`search/handler.go#visibleTo` re-filters, so
 // measure before believing".
 //
-// MEASURED. `visibleTo` (handler.go:349) re-filters every row with `AuthorizePageRead`, and that
+// MEASURED. `visibleTo` (handler.go, cited by SYMBOL — the line number that stood here, 349, was
+// already 18 lines stale before the edit that moved it again) re-filters every row with
+// `AuthorizePageRead`, and that
 // is the SAME workspace-agnostic gate that made `analytics.GetWorkspaceStats`' predicates
 // load-bearing in #187. Its own doc comment: "resolved against every workspace the caller belongs
 // to. It cannot express which ONE of those workspaces the page is in, so a caller who is a member
