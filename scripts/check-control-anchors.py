@@ -31,7 +31,7 @@ SCRIPTS (nine remain; see W6.43a for what repairing one costs), none of which an
   w31-ask-error-controls.py        3 arms  anchor died 2026-08-10, 163 commits ago  ── REPAIRED, W6.43a
   w31-search-access-controls.py    2 arms  anchor died 2026-08-10, 168 commits ago  ── REPAIRED, W6.43a
   w31-search-offset-controls.py    2 arms  anchor died 2026-08-13,  99 commits ago  ── REPAIRED, W6.43a
-  w31-version-title-controls.py    2 arms  anchor died 2026-08-13, 123 commits ago
+  w31-version-title-controls.py    2 arms  anchor died 2026-08-13, 123 commits ago  ── REPAIRED, W6.43a
   w31-askgrounding-controls.py     1 arm   anchor MULTIPLIED 2026-08-11  ── REPAIRED, W6.43a
 
 ⚠ THE MECHANISM IS THE SAME IN ALL FIVE AND IT IS WORTH STATING, because it
@@ -126,11 +126,11 @@ NOT_ANCHORS = {
 #
 # Keyed (script, sha256(anchor)[:12]).
 KNOWN_DEAD = {
-    # internal/page/store.go — becf0f8 (2026-08-13) moved the version-snapshot
-    # INSERT out of this file entirely; `nextVer` no longer occurs in it at all.
-    # The five guard tests this control names ALL still exist.
-    ("w31-version-title-controls.py", "91d8ea44ab62"): "version-snapshot INSERT moved out of store.go by becf0f8",
-    ("w31-version-title-controls.py", "166908715fb9"): "nextVer++ block moved out of store.go by becf0f8",
+    # EMPTY, AND THAT IS A RESULT RATHER THAN AN ABSENCE OF LOOKING. All ten arms this
+    # guard found on the commit that introduced it were repaired under W6.43a, each by
+    # re-running its own campaign against a real Postgres and reading the red by assertion
+    # text. R1 fails on the next arm that dies, so an empty list is a claim the guard
+    # re-checks on every push rather than a decision to stop watching.
 }
 
 

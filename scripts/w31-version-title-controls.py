@@ -46,7 +46,15 @@ RESTORE = ("TestRestoreNewestVersion_LeavesTheLivePageUnchanged_RealPG", "DESTRU
 MOCK = ("TestUpdate_AppendsNewVersionOnContentChange", "")
 COMPANION = ("TestVersions_OwnerCanGetAndDiff_RealPG", "")
 
-SNAPSHOT_ARGS = "\t\t\tid, out.WorkspaceID, nextVer, out.Title, out.Content, updatedBy,"
+# ⚠ THE SNAPSHOT IS NO LONGER AN INLINE INSERT IN Update, AND THE OLD ANCHOR NAMED ITS ARGUMENT
+# LIST. becf0f8 ("overlapping saves no longer lose restore points", 2026-08-13) moved the write
+# into Store.appendVersion and derives the version number IN SQL —
+#     INSERT INTO page_versions (...) SELECT $1, $2, COALESCE(MAX(version),0)+1, $3, $4, $5
+# — so `nextVer` does not occur in this file at all any more and neither does the argument list.
+# THE SEAM ITSELF SURVIVED INTACT: the title and the content are still chosen at ONE call site,
+# still both taken from `out` (the row the UPDATE returned), and that choice is still exactly what
+# these controls mutate. The anchor is the call, and the replacements are whole call lines.
+APPEND_CALL = "\t\ts.appendVersion(ctx, id, out.WorkspaceID, out.Title, out.Content, updatedBy)"
 CLOSED_SET = "\t// The closed set is enforced on BOTH write paths"
 
 # The shipped defect, verbatim: a pre-update SELECT supplies the title while the content comes
@@ -73,9 +81,12 @@ CONTROLS = [
         # changing the arg without the pre-read does not compile either. The harness asserts both
         # anchors before either write and re-reads the file between them, so the second write
         # cannot silently erase the first.
+        # The pre-read still goes in ahead of the UPDATE (CLOSED_SET is at store.go:862, the
+        # UPDATE ... RETURNING at :917), which is what makes this a pre-update title rather than
+        # a second read of the row that was just written.
         "edits": [(STORE, CLOSED_SET, PRE_READ_BLOCK + CLOSED_SET, 1),
-                  (STORE, SNAPSHOT_ARGS,
-                   "\t\t\tid, out.WorkspaceID, nextVer, existing.Title, out.Content, updatedBy,", 1)],
+                  (STORE, APPEND_CALL,
+                   "\t\ts.appendVersion(ctx, id, out.WorkspaceID, existing.Title, out.Content, updatedBy)", 1)],
         "must_red": PAIRING,
         "also_red": [RESTORE, MOCK],
         "extra_green": [CONTENT_ONLY],
@@ -89,15 +100,15 @@ CONTROLS = [
         # yields "" and the snapshot records an empty name. This is the shape a fix written from
         # the request rather than from the result would take, and it is invisible to the guard
         # that caught the original defect.
-        # NOTE ON THE SECOND ANCHOR: `updatedBy, _ := updates["updated_by"].(string)` occurs
-        # TWICE in this function (the snapshot and the linker block), so the bare line is not a
-        # unique anchor and the harness refused it as an ANCHOR MISS rather than editing the
-        # wrong one. It is anchored to the preceding `nextVer++` here.
-        "edits": [(STORE, SNAPSHOT_ARGS,
-                   "\t\t\tid, out.WorkspaceID, nextVer, snapTitle, out.Content, updatedBy,", 1),
-                  (STORE, "\t\tnextVer++\n\n\t\tupdatedBy, _ := updates[\"updated_by\"].(string)",
-                   "\t\tnextVer++\n\n\t\tupdatedBy, _ := updates[\"updated_by\"].(string)\n"
-                   "\t\tsnapTitle, _ := updates[\"title\"].(string)", 1)],
+        # NOTE ON THE SECOND ANCHOR, KEPT BECAUSE THE HAZARD IT RECORDS IS STILL LIVE:
+        # `updatedBy, _ := updates["updated_by"].(string)` occurs TWICE in this function (the
+        # snapshot and the linker block), so the bare line is not a unique anchor and the harness
+        # refused it as an ANCHOR MISS rather than editing the wrong one. It used to be anchored
+        # to the preceding `nextVer++`, and becf0f8 deleted `nextVer` — so the declaration is now
+        # folded into the ONE call-site edit below, which needs no second anchor at all.
+        "edits": [(STORE, APPEND_CALL,
+                   "\t\tsnapTitle, _ := updates[\"title\"].(string)\n"
+                   "\t\ts.appendVersion(ctx, id, out.WorkspaceID, snapTitle, out.Content, updatedBy)", 1)],
         "must_red": CONTENT_ONLY,
         "also_red": [MOCK],
         "extra_green": [PAIRING],
@@ -119,8 +130,8 @@ CONTROLS = [
         # A correctly-shaped value from the wrong column, which is the failure mode the whole
         # W3.1 item has been chasing across five surfaces. Distinct from V1: it is not a lag, so
         # no amount of "compare against the previous row" reasoning finds it.
-        "edits": [(STORE, SNAPSHOT_ARGS,
-                   "\t\t\tid, out.WorkspaceID, nextVer, out.Slug, out.Content, updatedBy,", 1)],
+        "edits": [(STORE, APPEND_CALL,
+                   "\t\ts.appendVersion(ctx, id, out.WorkspaceID, out.Slug, out.Content, updatedBy)", 1)],
         "must_red": PAIRING,
         "also_red": [CONTENT_ONLY, MOCK],
         "extra_green": [],
@@ -136,9 +147,9 @@ CONTROLS = [
         # a literal "" and left `updatedBy` declared-and-unused, which Go rejects — a compile
         # error would have been scored as a caught mutation. strings.ToUpper keeps every symbol
         # live and still writes a different author than the one the save carried.
-        "edits": [(STORE, SNAPSHOT_ARGS,
-                   "\t\t\tid, out.WorkspaceID, nextVer, out.Title, out.Content, "
-                   "strings.ToUpper(updatedBy),", 1)],
+        "edits": [(STORE, APPEND_CALL,
+                   "\t\ts.appendVersion(ctx, id, out.WorkspaceID, out.Title, out.Content, "
+                   "strings.ToUpper(updatedBy))", 1)],
         "must_red": PAIRING,
         "expect": "NOT CAUGHT",
         "extra_green": [CONTENT_ONLY, RESTORE],
