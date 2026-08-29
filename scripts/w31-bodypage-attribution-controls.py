@@ -42,7 +42,16 @@ DSN = os.environ.get(
 )
 
 HANDLER = "internal/ai/handler.go"
-FILES = [HANDLER]
+# ⚠ THE SECOND LAYER. A cross-workspace ledger leak needs BOTH the handler gate AND the store's
+# join to fail, which is why no mutation of handler.go alone can claim A-LEAK-XWS-LEDGER or
+# A-LEAK-XWS-MONEY — see C9/C10 and the note on those two tags in C1/C4/C6.
+AI_SPEND = "internal/page/ai_spend.go"
+FILES = [HANDLER, AI_SPEND]
+
+# The store-side defence: the INSERT is fed by a CTE that only yields a row when the page is in
+# the workspace being billed.
+BIND_JOIN = "            SELECT 1 FROM pages WHERE id = $2 AND workspace_id = $3"
+BIND_JOIN_UNSCOPED = "            SELECT 1 FROM pages WHERE id = $2"
 AI_PKG = "./internal/ai/"
 
 # The pre-existing tests that must stay GREEN under every control except C7. Named, not counted:
@@ -104,7 +113,9 @@ def mutate(path, old, new, count=1):
 #
 # Each is (id, description, apply_fn, predicted_tags, predicted_blind_guards_green).
 
-GATE_CALL = """	if !h.attributable(w, r, in.PageID) {
+# ⚠ `attributable` GREW A `billWS` PARAMETER, SO ALL FOUR CALL SITES MOVED. The count of 4 that
+# C6 asserts is unchanged and was re-measured against the file rather than carried over.
+GATE_CALL = """	if !h.attributable(w, r, wsID, in.PageID) {
 		return
 	}
 """
@@ -141,24 +152,49 @@ EMPTY_BRANCH = """	if pageID == "" {
 	}
 """
 
-WRITE_CALL_SITE = """	if !h.attributable(w, r, in.PageID) {
+WRITE_CALL_SITE = """	if !h.attributable(w, r, wsID, in.PageID) {
 		return
 	}
 	out, err := h.engine.WriteWithAI(r.Context(), wsID, in.Prompt, in.Context, in.PageID)
 """
 
 WRITE_CALL_SITE_AFTER = """	out, err := h.engine.WriteWithAI(r.Context(), wsID, in.Prompt, in.Context, in.PageID)
-	if !h.attributable(w, r, in.PageID) {
+	if !h.attributable(w, r, wsID, in.PageID) {
 		return
 	}
 """
 
 
-def c1_restore_origin_main():
+# ⚠⚠⚠ THIS CONTROL READ A MOVING REFERENCE WHILE ITS OWN DOCSTRING NAMED A FIXED ONE.
+# It said "the real defect bytes as they shipped at 1581757" and then read the branch tip. The
+# moment the fix merged to main — the same pull request that added this control — the branch tip
+# became the FIXED file, so C1 restored the current code over itself: a byte-for-byte no-op that
+# could never fail again, and that drifts FURTHER from its stated subject with every commit
+# rather than closer.
+#
+# MEASURED at c403f5e: the branch tip's handler.go hashes af49245c…, which is the working tree
+# byte for byte, and C1 scored "want 14 tags, got []". 1581757 hashes 6e04e704… and contains
+# ZERO occurrences of `attributable` — it really is the shipped defect, exactly as the docstring
+# always said.
+#
+# ⚠ NO ANCHOR CENSUS CAN SEE THIS AND NEITHER CAN A BYTE-LEVEL VOID CHECK: there is no anchor,
+# the file is rewritten wholesale, and the write genuinely happens. What catches it is the arm
+# firing no tags, which is visible only to somebody running the campaign.
+#
+# The SHA is pinned, and asserted to DIFFER from the working tree before it is written, so this
+# arm now reports itself void instead of scoring a tag mismatch if the pin is ever wrong.
+DEFECT_SHA = "1581757"
+
+
+def c1_restore_shipped_defect():
     """The real defect bytes as they shipped at 1581757 — not a mutation I invented."""
-    r = sh(["git", "show", "origin/main:" + HANDLER])
+    r = sh(["git", "show", DEFECT_SHA + ":" + HANDLER])
     if r.returncode != 0 or not r.stdout:
-        raise SystemExit("C1: could not read origin/main:" + HANDLER)
+        raise SystemExit("C1: could not read %s:%s" % (DEFECT_SHA, HANDLER))
+    if r.stdout == (REPO / HANDLER).read_text():
+        raise SystemExit("C1 IS VOID: %s:%s is byte-identical to the working tree, so this arm "
+                         "restores the current code over itself and proves nothing."
+                         % (DEFECT_SHA, HANDLER))
     (REPO / HANDLER).write_text(r.stdout)
 
 
@@ -173,11 +209,17 @@ CONTROLS = [
     ),
     (
         "C1",
-        "RESTORE origin/main's handler.go — the defect exactly as it shipped, real bytes.",
-        c1_restore_origin_main,
+        "RESTORE 1581757's handler.go — the defect exactly as it shipped, real bytes.",
+        c1_restore_shipped_defect,
+        # ⚠ A-LEAK-XWS-LEDGER AND A-LEAK-XWS-MONEY WERE PREDICTED HERE AND CANNOT BE PRODUCED BY
+        # ANY MUTATION OF handler.go. Measured: C1 restores the ENTIRE pre-fix handler and still
+        # produces no ledger row for the foreign page. The leak is defended in depth and the
+        # second layer — BindAISpend's `SELECT 1 FROM pages WHERE id = $2 AND workspace_id = $3`
+        # — was added after this control set was written. C10 claims both tags by removing BOTH
+        # layers; C9 shows the store layer alone is not what refuses.
         {
             "A-LEAK-XWS/write", "A-LEAK-XWS/transform", "A-LEAK-XWS/translate",
-            "A-LEAK-XWS/suggest-title", "A-LEAK-XWS-LEDGER", "A-LEAK-XWS-MONEY",
+            "A-LEAK-XWS/suggest-title",
             "A-LEAK-PRIV/write", "A-LEAK-PRIV/transform", "A-LEAK-PRIV/translate",
             "A-LEAK-PRIV/suggest-title", "A-LEAK-PRIV-LEDGER", "A-LEAK-PRIV-MONEY",
             "A-UNWIRED", "A-UNWIRED-LEDGER",
@@ -215,7 +257,13 @@ CONTROLS = [
         "status assertion it sits next to does not. That pair is the whole point of splitting "
         "them, and I had not seen it until the harness printed it.",
         lambda: mutate(HANDLER, WRITE_CALL_SITE, WRITE_CALL_SITE_AFTER),
-        {"A-LEAK-XWS/write", "A-LEAK-XWS-LEDGER", "A-LEAK-XWS-MONEY",
+        # ⚠ A-LEAK-XWS-LEDGER AND A-LEAK-XWS-MONEY WERE PREDICTED HERE AND CANNOT BE PRODUCED BY
+        # ANY MUTATION OF handler.go. Measured: C1 restores the ENTIRE pre-fix handler and still
+        # produces no ledger row for the foreign page. The leak is defended in depth and the
+        # second layer — BindAISpend's `SELECT 1 FROM pages WHERE id = $2 AND workspace_id = $3`
+        # — was added after this control set was written. C10 claims both tags by removing BOTH
+        # layers; C9 shows the store layer alone is not what refuses.
+        {"A-LEAK-XWS/write",
          "A-LEAK-PRIV-LEDGER", "A-LEAK-PRIV-MONEY", "A-UNWIRED-LEDGER"},
         True,
     ),
@@ -232,8 +280,13 @@ CONTROLS = [
         "Gate Write only; leave Transform, Translate and SuggestTitle ungated. A per-route fix "
         "is the likeliest partial repair, and a guard that drove one route could not see it.",
         lambda: mutate(HANDLER, GATE_CALL, "", count=4) or mutate_reinstate_write(),
+        # ⚠ A-LEAK-XWS-LEDGER AND A-LEAK-XWS-MONEY WERE PREDICTED HERE AND CANNOT BE PRODUCED BY
+        # ANY MUTATION OF handler.go. Measured: C1 restores the ENTIRE pre-fix handler and still
+        # produces no ledger row for the foreign page. The leak is defended in depth and the
+        # second layer — BindAISpend's `SELECT 1 FROM pages WHERE id = $2 AND workspace_id = $3`
+        # — was added after this control set was written. C10 claims both tags by removing BOTH
+        # layers; C9 shows the store layer alone is not what refuses.
         {"A-LEAK-XWS/transform", "A-LEAK-XWS/translate", "A-LEAK-XWS/suggest-title",
-         "A-LEAK-XWS-LEDGER", "A-LEAK-XWS-MONEY",
          "A-LEAK-PRIV/transform", "A-LEAK-PRIV/translate", "A-LEAK-PRIV/suggest-title",
          "A-LEAK-PRIV-LEDGER", "A-LEAK-PRIV-MONEY"},
         True,
@@ -268,6 +321,30 @@ CONTROLS = [
         "always pass empty; a fix that simply required the field would break the editor.",
         lambda: mutate(HANDLER, EMPTY_BRANCH, ""),
         {"A-EMPTY"},
+        True,
+    ),
+    (
+        "C9",
+        "STORE LAYER ONLY: drop the workspace predicate from BindAISpend's CTE, leaving every "
+        "handler gate intact. MUST STAY GREEN, and that is the point — it shows the handler gate "
+        "alone still refuses, so C10's red is attributable to the pair rather than to this half.",
+        lambda: mutate(AI_SPEND, BIND_JOIN, BIND_JOIN_UNSCOPED),
+        set(),
+        True,
+    ),
+    (
+        "C10",
+        "BOTH LAYERS: move Write's gate after the completion AND drop BindAISpend's workspace "
+        "predicate. ⚠ THIS IS THE ONLY CONTROL THAT CAN CLAIM A-LEAK-XWS-LEDGER AND "
+        "A-LEAK-XWS-MONEY, AND IT WAS ADDED BECAUSE NOTHING CLAIMED THEM. C1, C4 and C6 all "
+        "predicted those two tags and none produced them, including C1, which restores the whole "
+        "pre-fix handler: the leak is defended in depth, and the second layer — BindAISpend's "
+        "`SELECT 1 FROM pages WHERE id = $2 AND workspace_id = $3` — was added after this control "
+        "set was written. A predicted-but-unproducible tag reads exactly like a working control.",
+        lambda: mutate(AI_SPEND, BIND_JOIN, BIND_JOIN_UNSCOPED) or
+                mutate(HANDLER, WRITE_CALL_SITE, WRITE_CALL_SITE_AFTER),
+        {"A-LEAK-XWS-LEDGER", "A-LEAK-XWS-MONEY", "A-LEAK-XWS/write",
+         "A-LEAK-PRIV-LEDGER", "A-LEAK-PRIV-MONEY", "A-UNWIRED-LEDGER"},
         True,
     ),
 ]
