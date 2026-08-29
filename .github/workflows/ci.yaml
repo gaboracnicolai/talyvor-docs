@@ -72,6 +72,17 @@ jobs:
       # scripts here where the real population is 43.
       - name: control scripts must restore on SIGTERM, not only in a finally
         run: python3 scripts/check-restore-signal-handlers.py --ci
+      # A control anchored on a literal that was unique WHEN WRITTEN goes inert the day a
+      # second copy appears — and the only thing that reports it is the control's own run,
+      # which is by hand. W3 of the toolchain campaign had been unable to fire since this
+      # very file grew a second `go-version` pin; the campaign printed `6/7 controls CAUGHT`
+      # and nothing noticed, because an inert control looks exactly like a passing one.
+      # The full campaign mutates tracked files and runs the guard suite once per control, so
+      # it cannot go here. The ANCHOR check is pure string counting over three files — no
+      # mutation, no `go test`, ~0.1s — and it is the half that rots. (It proves each control
+      # can still be APPLIED, not that it still CATCHES; the campaign is what proves that.)
+      - name: toolchain control anchors must still apply
+        run: python3 scripts/w635-toolchain-guard-controls.py --check-anchors --ci
       - name: gofmt (formatting must not drift)
         run: test -z "$(gofmt -l .)" || { echo "::error::unformatted files — run gofmt -w"; gofmt -l .; exit 1; }
       - run: go vet ./...
