@@ -56,12 +56,18 @@ WIRING_LINE = "\tsearchHandler.WithAccess(spaceauth.New(spaceStore, permStore).W
 
 SQL_TEMPLATE_FILTER = "          AND p.is_template = false"
 
-FETCH_BLOCK = """	fetchLimit := limit * maxFetchFactor
+# ⚠ `limit` BECAME `window` HERE IN 4417532, AND THE TWO ARE NOT SYNONYMS. `window` is how many
+# MERGED rows must exist before the caller's page can be cut out of them — `limit` for a single
+# source, `offset + limit` on type=all — so the over-fetch is now computed from the page BOUNDARY
+# rather than from the page SIZE. The control's claim is unchanged (ask the store for exactly the
+# window and the access filter turns a dropped row into a missing answer), and it is re-anchored
+# rather than re-worded, but a reader comparing this to the original should know the quantity moved.
+FETCH_BLOCK = """	fetchLimit := window * maxFetchFactor
 	if fetchLimit > maxFetchRows {
 		fetchLimit = maxFetchRows
 	}
 	if h.access == nil {
-		fetchLimit = limit
+		fetchLimit = window
 	}"""
 
 
@@ -120,7 +126,7 @@ CONTROLS = [
     (
         "C7",
         "the over-fetch is removed: the store is asked for exactly `limit`",
-        [(HANDLER, FETCH_BLOCK, "\tfetchLimit := limit")],
+        [(HANDLER, FETCH_BLOCK, "\tfetchLimit := window")],
         [G_PRIVATE, G_SEMANTIC],
         [G_WIRING],
     ),
@@ -153,8 +159,11 @@ CONTROLS_SPACE = [
     (
         "S3",
         "THE CALL SITE, not the query: the handler passes nil where it has a space_id",
-        [(HANDLER, "h.semantic.Search(ctx, wsID, q, spaceID, fetchLimit)",
-          "h.semantic.Search(ctx, wsID, q, nil, fetchLimit)")],
+        # The semantic call grew a sixth argument (sqlOffset) in 62aea6b the same day this
+        # control was written, and 4417532 renamed it again. The mutation is unchanged: pass nil
+        # where the handler has a space id.
+        [(HANDLER, "h.semantic.Search(ctx, wsID, q, spaceID, fetchLimit, sqlOffset)",
+          "h.semantic.Search(ctx, wsID, q, nil, fetchLimit, sqlOffset)")],
         [G_SPACE],
         [G_PRIVATE, G_SEMANTIC, G_WIRING],
     ),

@@ -35,6 +35,13 @@ HEALTHY_ANCHOR = "\tvisible := make([]ReadStats, 0, len(ranked))"
 DEAD_SCRIPT = ROOT / "scripts" / "w31-version-title-controls.py"  # a KNOWN_DEAD arm
 NOTANCHOR_SCRIPT = ROOT / "scripts" / "w31-classguard-blindness.py"  # a NOT_ANCHORS row
 STORE_GO = ROOT / "internal" / "page" / "store.go"
+# ⚠ THE VERDICT ARMS INSTALL THEIR OWN SUBJECT RATHER THAN BORROWING ONE.
+# C7 originally blinded the undeclared-`want` verdict branch and relied on whatever happened to
+# be in the guard's KNOWN_DEAD list taking that branch. It scored CAUGHT until W6.43a repaired
+# three scripts, after which every surviving entry declared a count — and the arm went VOID with
+# nothing about it looking wrong. An arm whose subject is a side effect of somebody else's list
+# is an arm that stops proving things silently, which is the whole subject of this campaign.
+PROBE = ROOT / "scripts" / "_w643_probe_do_not_commit.py"
 
 
 def restore_on_signal(snapshot):
@@ -66,6 +73,17 @@ def restore_on_signal(snapshot):
 
 def sha(path):
     return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+
+
+def anchor_sha(text):
+    """Must stay identical to check-control-anchors.anchor_sha.
+
+    Deliberately re-stated rather than imported: importing the guard would run
+    its module-level code inside the process that is about to mutate it, and a
+    key computed one way here and another way there would make the probe arms
+    quietly unprovable — the failure this whole campaign is about.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
 
 
 def run_guard():
@@ -153,14 +171,31 @@ def m_blind_stage2():
         "        if len(out) < 3:\n            out.append({\"path\": obj[i], \"old\": old, \"want\": want})", 1))
 
 
+def _plant_probe(anchor, declared):
+    """Install a throwaway control script with ONE inert anchor, and list it as known-dead.
+
+    The row points at go.mod with a literal that cannot occur there, so it is
+    INERT by construction; listing it makes the guard green. Blinding the verdict
+    branch it takes then makes it report `ok`, which R2 catches as "a known-dead
+    entry now resolves". The subject belongs to the rule being exercised, rather
+    than being whichever entry the allowlist happens to contain today.
+    """
+    row = ("go.mod", anchor, "irrelevant-replacement", 1) if declared else \
+          ("go.mod", anchor, "irrelevant-replacement")
+    PROBE.write_text("EDITS = [%r]\n" % (row,))
+    src = GUARD.read_text()
+    GUARD.write_text(src.replace(
+        "KNOWN_DEAD = {",
+        "KNOWN_DEAD = {\n    (%r, %r): \"w643 probe\"," % (PROBE.name, anchor_sha(anchor)), 1))
+
+
 def m_verdict_always_ok():
     """C7 — the UNDECLARED-`want` verdict is computed and then ignored.
 
-    Proves the verdict is CONSULTED rather than merely produced — the tautology
-    shape, where an instrument measures correctly and discards the result. It
-    reds through R2 rather than R1, and that is the stronger catch: the arms the
-    allowlist says are dead all start reporting healthy at once.
+    Proves the verdict is CONSULTED rather than merely produced: the tautology
+    shape, where an instrument measures correctly and discards the result.
     """
+    _plant_probe("W643_PROBE_UNDECLARED_NEVER_OCCURS", declared=False)
     src = GUARD.read_text()
     GUARD.write_text(src.replace(
         '                    rec["verdict"] = "INERT" if n == 0 else ("ok" if n == 1 else "AMBIGUOUS")',
@@ -170,11 +205,10 @@ def m_verdict_always_ok():
 def m_verdict_always_ok_declared():
     """C7b — the DECLARED-`want` verdict is computed and then ignored.
 
-    ⚠ THERE ARE TWO VERDICT BRANCHES AND BLINDING ONE LEAVES THE OTHER LIVE.
-    C7 alone passed while five known-dead arms kept reporting correctly, because
-    they declare an expected count and take the other branch. One arm per branch,
-    for the same reason there is one floor per stage.
+    ⚠ THERE ARE TWO VERDICT BRANCHES AND BLINDING ONE LEAVES THE OTHER LIVE,
+    for the same reason there is one floor per detector stage.
     """
+    _plant_probe("W643_PROBE_DECLARED_NEVER_OCCURS", declared=True)
     src = GUARD.read_text()
     GUARD.write_text(src.replace(
         '                    rec["verdict"] = "ok" if n == r["want"] else ("INERT" if n == 0 else "DRIFTED")',
@@ -205,8 +239,8 @@ ARMS = [
     ("C4", "a NOT_ANCHORS row stops appearing", [NOTANCHOR_SCRIPT], m_delete_notanchor_row, {"R3"}),
     ("C5", "the EXEC stage is blinded", [GUARD], m_blind_stage1, {"R4"}),
     ("C6", "the HARVEST stage is blinded, exec untouched", [GUARD], m_blind_stage2, {"R5"}),
-    ("C7", "the undeclared-want verdict is ignored", [GUARD], m_verdict_always_ok, {"R2"}),
-    ("C7b", "the declared-want verdict is ignored", [GUARD], m_verdict_always_ok_declared, {"R2"}),
+    ("C7", "the undeclared-want verdict is ignored", [GUARD, PROBE], m_verdict_always_ok, {"R2"}),
+    ("C7b", "the declared-want verdict is ignored", [GUARD, PROBE], m_verdict_always_ok_declared, {"R2"}),
     ("C8", "a target file is deleted", [STORE_GO], m_delete_target_file, {"R1"}),
     ("C9", "MUST STAY GREEN: an edit that is nobody's anchor", [TARGET_OK], m_harmless_edit, set()),
 ]
@@ -219,7 +253,9 @@ def main():
         return 2
     print("precondition: the guard is green on an unmodified tree\n")
 
-    snapshot = {p: p.read_bytes() for _, _, files, _, _ in ARMS for p in files}
+    snapshot = {p: p.read_bytes() for _, _, files, _, _ in ARMS for p in files if p.exists()}
+    # Files an arm CREATES have no pristine bytes; they are removed after it instead.
+    created = {p for _, _, files, _, _ in ARMS for p in files if not p.exists()}
     restore_on_signal(snapshot)
     tmp = tempfile.mkdtemp(prefix="w643-pristine-")
 
@@ -236,7 +272,7 @@ def main():
     passed = 0
     try:
         for cid, what, files, mutate, expect in ARMS:
-            before = {p: sha(p) for p in files}
+            before = {p: sha(p) for p in files if p.exists()}
             mutate()
 
             # VOID CHECK — the mutation must actually have moved the bytes.
@@ -244,19 +280,26 @@ def main():
             for p in files:
                 if not p.exists():
                     continue  # C8 deletes on purpose
-                if sha(p) == before[p]:
+                if p in before and sha(p) == before[p]:
                     void.append(p.name)
             if void and cid != "C8":
                 print("%s VOID — the mutation changed nothing in %s; the arm proves nothing"
                       % (cid, ", ".join(void)))
                 for p in files:
-                    shutil.copyfile(pristine(p), p)
+                    if p in created:
+                        p.unlink(missing_ok=True)
+                    else:
+                        shutil.copyfile(pristine(p), p)
                 continue
 
             rc, out = run_guard()
             fired = rules_fired(out)
 
             for p in files:
+                if p in created:
+                    p.unlink(missing_ok=True)
+                    assert not p.exists(), "CLEANUP FAILED for %s" % p
+                    continue
                 shutil.copyfile(pristine(p), p)
                 assert sha(p) == hashlib.sha256(snapshot[p]).hexdigest(), \
                     "RESTORE FAILED for %s — stop and inspect the tree" % p
@@ -278,6 +321,8 @@ def main():
             src = pristine(p)
             if os.path.exists(src):
                 shutil.copyfile(src, p)
+        for p in created:
+            p.unlink(missing_ok=True)
         shutil.rmtree(tmp, ignore_errors=True)
 
     print("\nw643 anchor-guard controls: %d/%d" % (passed, len(ARMS)))
