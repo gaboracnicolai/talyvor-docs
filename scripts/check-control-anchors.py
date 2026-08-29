@@ -30,7 +30,7 @@ SCRIPTS (nine remain; see W6.43a for what repairing one costs), none of which an
 
   w31-ask-error-controls.py        3 arms  anchor died 2026-08-10, 163 commits ago
   w31-search-access-controls.py    2 arms  anchor died 2026-08-10, 168 commits ago
-  w31-search-offset-controls.py    2 arms  anchor died 2026-08-13,  99 commits ago
+  w31-search-offset-controls.py    2 arms  anchor died 2026-08-13,  99 commits ago  ── REPAIRED, W6.43a
   w31-version-title-controls.py    2 arms  anchor died 2026-08-13, 123 commits ago
   w31-askgrounding-controls.py     1 arm   anchor MULTIPLIED 2026-08-11  ── REPAIRED, W6.43a
 
@@ -138,11 +138,6 @@ KNOWN_DEAD = {
     # commits have landed since.
     ("w31-search-access-controls.py", "4e3aa09009bc"): "fetchLimit block rewritten by 62aea6b",
     ("w31-search-access-controls.py", "eda5df12da53"): "semantic.Search signature grew `offset` in 62aea6b",
-
-    # internal/search/handler.go — the merged-search paging rewrite 4417532
-    # (2026-08-13) replaced both call sites this control anchors on.
-    ("w31-search-offset-controls.py", "59ab24f64a91"): "semantic call site replaced by 4417532",
-    ("w31-search-offset-controls.py", "4d82a1924a66"): "full-text call site replaced by 4417532",
 
     # internal/page/store.go — becf0f8 (2026-08-13) moved the version-snapshot
     # INSERT out of this file entirely; `nextVer` no longer occurs in it at all.
