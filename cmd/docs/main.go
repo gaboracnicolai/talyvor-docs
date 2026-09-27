@@ -659,7 +659,7 @@ func main() {
 		shareHandler.Mount(r)
 		shareHandler.MountPublic(r)
 		// Importer takes Confluence/Notion ZIP exports — far larger than any JSON body, so it
-		// gets its own cap (internal/importer already calls 200MB the largest reasonable
+		// gets its own cap (25MB by default, B18.42 — internal/importer once called 200MB the largest reasonable
 		// space export). This re-wraps the body for these two routes only; the /v1 cap above
 		// would reject a legitimate import.
 		r.Group(func(r chi.Router) {

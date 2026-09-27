@@ -27,6 +27,7 @@ package bodylimit
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 )
 
@@ -65,12 +66,26 @@ func Middleware(max int64, exempt func(path string) bool) func(http.Handler) htt
 	}
 }
 
-func writeTooLarge(w http.ResponseWriter, max int64) {
+func writeTooLarge(w http.ResponseWriter, max int64) { WriteTooLarge(w, max) }
+
+// WriteTooLarge answers 413 with a sentence a person can act on — how large is too large — beside
+// the machine-readable code and limit. Exported for a handler that meets the overflow mid-read (a
+// body with no or an understated Content-Length), so both layers refuse in the same words.
+func WriteTooLarge(w http.ResponseWriter, max int64) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusRequestEntityTooLarge)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"error":     "request body too large",
+		"error":     fmt.Sprintf("This upload is larger than %s, the most Docs accepts here. Nothing was saved.", sizeWords(max)),
 		"code":      "BODY_TOO_LARGE",
 		"max_bytes": max,
 	})
+}
+
+// sizeWords says a limit the way a person reads it: whole megabytes (of 2^20 bytes, the unit the
+// caps are written in) when it is one, bytes otherwise.
+func sizeWords(n int64) string {
+	if n > 0 && n%(1<<20) == 0 {
+		return fmt.Sprintf("%d MB", n>>20)
+	}
+	return fmt.Sprintf("%d bytes", n)
 }

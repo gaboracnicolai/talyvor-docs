@@ -53,7 +53,7 @@ var shippedDefaults = map[string]struct {
 	"DOCS_INDEX_RATE_BURST":      {"index burst", func(c *config.Config) any { return c.IndexRateBurst }, 10},
 	"DOCS_INDEX_STALENESS_SEC":   {"re-embed staleness window", func(c *config.Config) any { return c.IndexStalenessSec }, 5},
 	"DOCS_MAX_BODY_BYTES":        {"request body ceiling", func(c *config.Config) any { return c.MaxBodyBytes }, int64(4 << 20)},
-	"DOCS_MAX_IMPORT_BODY_BYTES": {"import body ceiling", func(c *config.Config) any { return c.MaxImportBodyBytes }, int64(200 << 20)},
+	"DOCS_MAX_IMPORT_BODY_BYTES": {"import body ceiling", func(c *config.Config) any { return c.MaxImportBodyBytes }, int64(25 << 20)}, // B18.42: 25MB, decided
 }
 
 // loadWithDefaults runs Load() with every defaulted key blanked, so what comes

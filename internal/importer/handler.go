@@ -3,10 +3,12 @@ package importer
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/talyvor/docs/internal/bodylimit"
 	"github.com/talyvor/docs/internal/spaceauth"
 )
 
@@ -25,8 +27,8 @@ func (h *Handler) WithAccess(a *spaceauth.Authorizer) *Handler {
 	return h
 }
 
-// maxUploadBytes is ParseMultipartForm's maxMemory argument. 200MB matches the largest
-// reasonable Confluence space export observed in the wild.
+// maxUploadBytes is ParseMultipartForm's maxMemory argument, kept equal to the import cap (25MB,
+// B18.42 — cfg.MaxImportBodyBytes, enforced by the bodylimit group main.go mounts these routes in).
 //
 // ⚠ IT IS NOT A CAP, AND THE COMMENT HERE USED TO SAY IT WAS. It read "caps any single import
 // to a manageable size so a malicious zip can't exhaust the box's memory", and MEASURED
@@ -40,10 +42,20 @@ func (h *Handler) WithAccess(a *spaceauth.Authorizer) *Handler {
 // into `buf` with an unbounded loop, so the memory this constant was believed to protect is
 // bounded by what the client chooses to send, whatever this number is.
 //
-// ⚠ WHETHER THIS ROUTE SHOULD HAVE A REAL SIZE LIMIT IS AN OPEN DECISION, filed rather than
-// taken here: adding one changes a shipping endpoint, and imports that succeed today would
-// start failing at some size.
-const maxUploadBytes = 200 << 20
+// The real limit is that group's MaxBytesReader: 25MB, decided in B18.42. A body over it is
+// refused with 413 — by bodylimit when Content-Length says so up front, and below (tooLarge) when
+// the overflow is only met mid-read.
+const maxUploadBytes = 25 << 20
+
+// tooLarge answers the import cap's 413 when readUpload stopped at it, in bodylimit's own words.
+func tooLarge(w http.ResponseWriter, err error) bool {
+	var mbe *http.MaxBytesError
+	if !errors.As(err, &mbe) {
+		return false
+	}
+	bodylimit.WriteTooLarge(w, mbe.Limit)
+	return true
+}
 
 func (h *Handler) Mount(r chi.Router) {
 	r.Post("/import/confluence", h.Confluence)
@@ -89,6 +101,9 @@ func readUpload(r *http.Request) (workspaceID, spaceID string, body []byte, err 
 
 func (h *Handler) Confluence(w http.ResponseWriter, r *http.Request) {
 	wsID, spaceID, body, err := readUpload(r)
+	if tooLarge(w, err) {
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "upload failed: "+err.Error())
 		return
@@ -121,6 +136,9 @@ func (h *Handler) Confluence(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Notion(w http.ResponseWriter, r *http.Request) {
 	wsID, spaceID, body, err := readUpload(r)
+	if tooLarge(w, err) {
+		return
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "upload failed: "+err.Error())
 		return
