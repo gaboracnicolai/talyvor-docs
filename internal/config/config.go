@@ -105,8 +105,8 @@ type Config struct {
 	//
 	// SIZING: MaxBodyBytes (4MB default) is far above any legitimate ProseMirror document —
 	// a 4MB page is ~4M characters — while bounding the pathological case. The importer is
-	// exempted to its own, much larger cap: it takes Confluence/Notion ZIP exports, and
-	// internal/importer already declares 200MB as the largest reasonable space export.
+	// exempted to its own, larger cap: it takes Confluence/Notion ZIP exports. That cap is 25MB
+	// (B18.42, decided): an import over it is refused with a plain 413 that says the limit.
 	MaxBodyBytes       int64
 	MaxImportBodyBytes int64
 
@@ -196,7 +196,7 @@ func Load() (*Config, error) {
 		IndexRateBurst:        getEnvInt("DOCS_INDEX_RATE_BURST", 10),
 		IndexStalenessSec:     getEnvInt("DOCS_INDEX_STALENESS_SEC", 5),
 		MaxBodyBytes:          int64(getEnvInt("DOCS_MAX_BODY_BYTES", 4<<20)),
-		MaxImportBodyBytes:    int64(getEnvInt("DOCS_MAX_IMPORT_BODY_BYTES", 200<<20)),
+		MaxImportBodyBytes:    int64(getEnvInt("DOCS_MAX_IMPORT_BODY_BYTES", 25<<20)),
 	}
 	if cfg.DatabaseURL == "" {
 		return nil, fmt.Errorf("%w: DOCS_DATABASE_URL", ErrMissingEnv)
