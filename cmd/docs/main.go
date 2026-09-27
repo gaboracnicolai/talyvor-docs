@@ -61,6 +61,7 @@ import (
 	"github.com/talyvor/docs/internal/pagelink"
 	"github.com/talyvor/docs/internal/pagelock"
 	"github.com/talyvor/docs/internal/permission"
+	"github.com/talyvor/docs/internal/pin"
 	"github.com/talyvor/docs/internal/ratelimit"
 	"github.com/talyvor/docs/internal/search"
 	"github.com/talyvor/docs/internal/sharing"
@@ -319,6 +320,8 @@ func main() {
 	// up further down (after its own NewHandler call).
 	lockStore := pagelock.NewStore(pool)
 	lockHandler := pagelock.NewHandler(lockStore)
+	// B18.41 — a member's pinned pages and recently opened pages, kept on the server.
+	pinHandler := pin.NewHandler(pin.NewStore(pool))
 	// Single-writer edit session (Option A's policy seam). The REST save guard becomes
 	// approvalOK AND manualLockOK AND editSessionOK via Compose — the edit-session ADDS the
 	// "who may write right now" decision without replacing the approval gate or the manual
@@ -442,6 +445,16 @@ func main() {
 	shareHandler.WithAccess(pageEnf)
 	blockHandler.WithAccess(pageEnf, blockEnf)
 	lockHandler.WithAccess(pageEnf)
+	// A pinned or recent page is listed only while its member may still view it — the same rule
+	// engine RequireAccess runs, through the non-HTTP entry point the MCP tools use.
+	pinHandler.WithAccess(pageEnf, func(ctx context.Context, memberID, pageID string) bool {
+		md, err := pageLooker(ctx, pageID)
+		if err != nil {
+			return false
+		}
+		lvl, err := permStore.CheckPage(ctx, memberID, pageID, md, authz.WorkspaceIDs(ctx))
+		return err == nil && permission.AtLeast(lvl, permission.AccessView)
+	})
 	editSessionHandler.WithAccess(pageEnf)
 	linkHandler.WithAccess(pageEnf)
 	analyticsHandler.WithAccess(pageEnf)
@@ -658,6 +671,7 @@ func main() {
 		exportHandler.Mount(r)
 		approvalHandler.Mount(r)
 		lockHandler.Mount(r)
+		pinHandler.Mount(r)
 		editSessionHandler.Mount(r)
 		commentHandler.Mount(r)
 		changelogHandler.Mount(r)

@@ -134,6 +134,7 @@ var ORDER_PREMISES = map[string]oexpected{
 	"internal/ai/handler.go#SuggestTitle":           {kindOrder, "AuthorizeWorkspace", 1, ""},
 	"internal/analytics/handler.go#WorkspaceStats":  {kindOrder, "AuthorizeWorkspace", 1, ""},
 	"internal/approval/handler.go#Pending":          {kindOrder, "AuthorizeWorkspace", 1, ""},
+	"internal/pin/handler.go#list":                  {kindOrder, "AuthorizeWorkspace", 1, ""},
 	"internal/changelog/handler.go#Feed":            {kindOrder, "AuthorizeWorkspace", 1, ""},
 	"internal/freshness/handler.go#Workspace":       {kindOrder, "AuthorizeWorkspace", 1, ""},
 	"internal/page/handler.go#Search":               {kindOrder, "AuthorizeWorkspace", 1, ""},

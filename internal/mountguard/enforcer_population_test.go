@@ -93,6 +93,8 @@ var noEnforcer = map[string]enfRow{
 	"changelog GET /workspaces/{wsID}/changelog/feed":                       {reaches: "AuthorizeWorkspace", why: "workspace-wide feed"},
 	"freshness GET /workspaces/{wsID}/freshness":                            {reaches: "AuthorizeWorkspace", why: "workspace roll-up"},
 	"page GET /workspaces/{wsID}/pages/search":                              {reaches: "AuthorizeWorkspace", why: "workspace-scoped query, no single page object"},
+	"pin GET /workspaces/{wsID}/pins":                                       {reaches: "AuthorizeWorkspace", why: "the caller's own pins; every page re-checked for View before it is listed (B18.41)"},
+	"pin GET /workspaces/{wsID}/recent-pages":                               {reaches: "AuthorizeWorkspace", why: "the caller's own recent pages; every page re-checked for View before it is listed (B18.41)"},
 	"page GET /workspaces/{wsID}/pages/stale":                               {reaches: "AuthorizeWorkspace", why: "workspace-scoped query"},
 	"search GET /workspaces/{wsID}/search":                                  {reaches: "AuthorizeWorkspace", why: "workspace-scoped query; the .With here is the RATE LIMITER, not a gate"},
 	"space GET /workspaces/{wsID}/spaces":                                   {reaches: "AuthorizeWorkspace", why: "lists the spaces themselves — no space id yet to enforce against"},
@@ -125,9 +127,9 @@ var noEnforcer = map[string]enfRow{
 // The split as it ships. A change to any of these three numbers is a change to the authorization
 // surface and has to be declared here, in this file, next to the row that moved.
 const (
-	wantRoutes   = 103
-	wantGated    = 71
-	wantDeclared = 32
+	wantRoutes   = 107 // B18.41: +4 — pin/unpin (enforcer-gated) and the two workspace lists (declared)
+	wantGated    = 73
+	wantDeclared = 34
 )
 
 func TestRoutePermissionEnforcers_ArePinnedAsAPopulation(t *testing.T) {
