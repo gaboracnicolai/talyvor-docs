@@ -498,6 +498,12 @@ var routesWithNoSPACaller = map[string]string{
 	"DELETE /v1/blocks/{}":       "NO CALLER ANYWHERE IN THE ESTATE — internal/block",
 	"POST /v1/import/confluence": "documented in this repo's README; no client calls it",
 	"POST /v1/import/notion":     "documented in this repo's README; no client calls it",
+	// internal/pin (B18.41) — built for talyvor-suite's Docs sidebar (B18.27, which follows it);
+	// this SPA shows no pinned or recent list of its own.
+	"PUT /v1/spaces/{}/pages/{}/pin":     "talyvor-suite's Docs sidebar, through its BFF (B18.27) — internal/pin",
+	"DELETE /v1/spaces/{}/pages/{}/pin":  "talyvor-suite's Docs sidebar, through its BFF (B18.27) — internal/pin",
+	"GET /v1/workspaces/{}/pins":         "talyvor-suite's Docs sidebar, through its BFF (B18.27) — internal/pin",
+	"GET /v1/workspaces/{}/recent-pages": "talyvor-suite's Docs sidebar, through its BFF (B18.27) — internal/pin",
 	"POST /v1/service/workspaces/{}/member-sync": "service-to-service — talyvor-suite's bff calls it " +
 		"(apps/bff/docs_membersync_test.go, deploy/FULL-STACK-DEPLOY.md)",
 	"GET /v1/workspaces/{}/changelog/feed": "named in talyvor-suite/BFF-GAPS.md as a gap; not yet called",
