@@ -13,16 +13,13 @@ interface InboxProps {
 // jumping into each page individually; for nuanced feedback they
 // open the page and use ApprovalPanel directly.
 export function ApprovalInboxPage({ workspaceID, onOpenPage }: InboxProps) {
-  const reviewerID = localStorage.getItem("docs_member_id") || "";
   const qc = useQueryClient();
   const pending = useQuery({
-    queryKey: ["approvals-pending", workspaceID, reviewerID],
-    // ⚠ SEE Sidebar.tsx: `reviewerID` is no longer sent, the server derives it, and the
-    // `enabled` gate below still keys on a localStorage value nothing writes — which is why this
-    // screen renders its "set docs_member_id" instruction instead of the caller's queue. Left as
-    // it is on purpose; turning it on is a product decision, not a wire cleanup.
+    queryKey: ["approvals-pending", workspaceID],
+    // B18.40 — the reviewer is the signed-in user; the server derives it (see Sidebar.tsx). This
+    // screen used to wait for a `docs_member_id` localStorage key nothing writes.
     queryFn: () => approvalApi.pending(workspaceID),
-    enabled: !!reviewerID,
+    enabled: !!workspaceID,
   });
 
   return (
@@ -34,9 +31,9 @@ export function ApprovalInboxPage({ workspaceID, onOpenPage }: InboxProps) {
           the page for a closer look.
         </p>
       </header>
-      {!reviewerID ? (
-        <p className="text-xs text-muted">
-          Set <code>docs_member_id</code> in local storage to use this view.
+      {pending.isError ? (
+        <p className="text-xs text-muted" role="status">
+          Couldn't load your approvals. Nothing is shown rather than an empty list that may be wrong.
         </p>
       ) : pending.isLoading ? (
         <p className="text-xs text-muted">Loading…</p>
@@ -48,12 +45,11 @@ export function ApprovalInboxPage({ workspaceID, onOpenPage }: InboxProps) {
             <PendingRow
               key={req.id}
               req={req}
-              reviewerID={reviewerID}
               workspaceID={workspaceID}
               onOpen={() => onOpenPage(req.space_id, req.page_id)}
               onDecided={() =>
                 qc.invalidateQueries({
-                  queryKey: ["approvals-pending", workspaceID, reviewerID],
+                  queryKey: ["approvals-pending", workspaceID],
                 })
               }
             />
@@ -71,7 +67,6 @@ function PendingRow({
   onDecided,
 }: {
   req: PendingApproval;
-  reviewerID: string;
   workspaceID: string;
   onOpen: () => void;
   onDecided: () => void;

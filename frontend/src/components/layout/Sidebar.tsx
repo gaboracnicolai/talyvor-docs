@@ -66,17 +66,13 @@ export function Sidebar({
   const needsReview =
     stale.data?.filter((r) => r.status === "stale" || r.status === "warning").length ?? 0;
 
-  const reviewerID = typeof window !== "undefined" ? localStorage.getItem("docs_member_id") || "" : "";
   const approvals = useQuery({
-    queryKey: ["approvals-pending", workspaceID, reviewerID],
-    // ⚠ `reviewerID` NO LONGER GOES ON THE WIRE — the server derives the reviewer from the
-    // verified membership (api/approval.ts says why). It is kept HERE, in the cache key and the
-    // gate below, DELIBERATELY AND NOT BECAUSE IT IS STILL NEEDED: `docs_member_id` is a
-    // localStorage key nothing in this SPA writes, so `enabled` is false for every real user and
-    // this badge has never rendered a count. Removing the gate would turn a dark surface on,
-    // which is a product decision — filed with its evidence rather than taken in a wire cleanup.
+    queryKey: ["approvals-pending", workspaceID],
+    // B18.40 — the reviewer is the signed-in user: the server derives it from the verified
+    // membership (api/approval.ts says why), so nothing here names one. This badge was gated on
+    // `docs_member_id`, a localStorage key nothing writes, and so had never shown a count.
     queryFn: () => approvalApi.pending(workspaceID),
-    enabled: !!reviewerID,
+    enabled: !!workspaceID,
     staleTime: 5 * 60_000,
   });
   const pendingApprovals = approvals.data?.length ?? 0;

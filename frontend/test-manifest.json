@@ -22,6 +22,7 @@
     "src/pages/Analytics.chartgaps.test.tsx": 4,
     "src/pages/Analytics.emptystate.test.tsx": 4,
     "src/pages/Analytics.leastread.test.tsx": 4,
+    "src/pages/ApprovalInbox.reviewer.test.tsx": 1,
     "src/pages/PageView.cost.test.tsx": 6,
     "src/pages/PageView.editsession.selfidentity.test.tsx": 3,
     "src/pages/PageView.editsession.test.tsx": 4,
@@ -39,6 +40,6 @@
     "src/sw/register.test.ts": 8,
     "src/sw/sw.test.ts": 7
   },
-  "totalFiles": 38,
-  "totalTests": 171
+  "totalFiles": 39,
+  "totalTests": 172
 }
