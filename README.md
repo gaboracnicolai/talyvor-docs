@@ -1,6 +1,11 @@
 # Talyvor Docs
 
-**AI-native knowledge base — the only docs tool that shows you what your documentation costs to implement.**
+**AI-native knowledge base that shows you what your documentation costs to implement — including the AI work your agents do.**
+
+A page's AI cost is the sum of the Track issues it embeds, and Track
+counts every model call an agent tags with `X-Talyvor-Issue` against
+that issue — so the work your agents do on a spec shows up on the
+spec itself.
 
 Talyvor Docs is the writing surface in the Talyvor suite (alongside
 Track for issues and Lens for AI cost telemetry). Spaces hold
