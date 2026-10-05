@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { ExternalLink, Lock } from "lucide-react";
 import { APIError } from "~/api/client";
 import { sharingApi, type PublicSharePayload } from "~/api/sharing";
+import { DocsBrand } from "~/components/ui/Brand";
 
 interface SharedPageProps {
   token: string;
@@ -53,12 +54,7 @@ export function SharedPage({ token }: SharedPageProps) {
   return (
     <div className="flex min-h-screen flex-col bg-bg text-text">
       <header className="flex items-center justify-between border-b border-border bg-surface px-4 py-2 text-xs">
-        <div className="flex items-center gap-2">
-          <span className="inline-flex h-5 w-5 items-center justify-center rounded bg-accent text-bg">
-            <span className="font-mono text-[10px] font-bold">T</span>
-          </span>
-          <span className="font-semibold">Talyvor Docs</span>
-        </div>
+        <DocsBrand size="sm" />
         <a
           href="https://talyvor.com"
           className="flex items-center gap-1 text-muted hover:text-text"

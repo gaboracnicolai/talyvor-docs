@@ -1,29 +1,41 @@
 import type { Config } from "tailwindcss";
 
-// Same dark-mode design tokens as Talyvor Track + Lens. The IBM Plex
-// Mono / Inter pairing is part of the Talyvor brand language.
+// Talyvor brand v4 tokens, the same as Talyvor Track. The values live in
+// src/styles/tokens.css (a verbatim copy of the brand folder's tokens.css);
+// every class here reads a --tv-* variable. color-mix keeps Tailwind's
+// opacity modifiers (bg-accent/30, hover:bg-border/40) working on a
+// variable colour.
+const tv = (name: string) =>
+  `color-mix(in srgb, var(--tv-${name}) calc(<alpha-value> * 100%), transparent)`;
+
 const config: Config = {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   darkMode: "class",
   theme: {
     extend: {
       colors: {
-        bg: "#0c0e12",
-        surface: "#13161c",
-        border: "#1e2330",
-        text: "#d4d8e2",
-        muted: "#8892a4",
-        accent: "#f0a030",
+        bg: tv("canvas"),
+        surface: tv("surface"),
+        raised: tv("raised"),
+        border: tv("line"),
+        "border-strong": tv("line-strong"),
+        text: tv("ink"),
+        muted: tv("ink-muted"),
+        label: tv("label"),
+        accent: tv("accent"),
+        "accent-hover": tv("accent-hover"),
+        "on-accent": tv("on-accent"),
+        "accent-tint": tv("accent-tint"),
         callout: {
-          info: "#3b82f6",
-          warning: "#f59e0b",
-          error: "#ef4444",
-          success: "#22c55e",
+          info: tv("accent"),
+          warning: tv("caution"),
+          error: tv("critical"),
+          success: tv("positive"),
         },
       },
       fontFamily: {
         mono: ["IBM Plex Mono", "ui-monospace", "monospace"],
-        sans: ["Inter", "system-ui", "sans-serif"],
+        sans: ["Space Grotesk", "system-ui", "sans-serif"],
       },
     },
   },

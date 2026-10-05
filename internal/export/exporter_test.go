@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -244,6 +245,44 @@ func TestToHTML_IncludesInlineCSSAndBody(t *testing.T) {
 	}
 	if !strings.Contains(html, "<title>Deploy Guide</title>") {
 		t.Fatal("HTML title missing")
+	}
+}
+
+// B29.19 — an exported page is in the Talyvor brand: every colour its stylesheet names is a brand v4
+// token (brand-v4/tokens/tokens.css), the teal accent is there in both themes, and the type is Space
+// Grotesk with IBM Plex Mono — not the old indigo, greys and system stack.
+func TestToHTML_UsesTheBrandPalette(t *testing.T) {
+	exp := newExporter(&fakePages{
+		byID: map[string]*model.Page{"pg-1": makePage("pg-1", "Deploy Guide", samplePM, nil, 1)},
+	}, &fakeSpaces{})
+	out, err := exp.ToHTML(context.Background(), "pg-1", []string{"ws-1"}, ExportOptions{IncludeTOC: true, Watermark: "DRAFT"})
+	if err != nil {
+		t.Fatalf("ToHTML: %v", err)
+	}
+	style := out[strings.Index(out, "<style>"):strings.Index(out, "</style>")]
+	brand := map[string]bool{
+		// dark
+		"#060A12": true, "#081220": true, "#0E1A2A": true, "#E6EEF7": true, "#7E93AB": true, "#90ACC0": true,
+		"#3AD6C0": true, "#55DFCC": true, "#0E2B2E": true, "#45C77F": true, "#D6A93C": true, "#F0685C": true,
+		"rgba(126,147,171,.18)": true, "rgba(126,147,171,.32)": true,
+		// light
+		"#F4F7FB": true, "#FFFFFF": true, "#46586E": true, "#646B79": true, "#0F7A6C": true, "#0A5F54": true,
+		"#C9E6E0": true, "#1D7A45": true, "#8A6A12": true, "#BF3B2E": true,
+		"rgba(6,10,18,.10)": true, "rgba(6,10,18,.20)": true,
+	}
+	colours := regexp.MustCompile(`#[0-9A-Fa-f]{3,8}\b|rgba?\([^)]*\)`).FindAllString(style, -1)
+	if len(colours) == 0 {
+		t.Fatal("the exported stylesheet names no colour at all")
+	}
+	for _, c := range colours {
+		if !brand[c] {
+			t.Errorf("exported stylesheet uses %s, which is not a brand v4 colour", c)
+		}
+	}
+	for _, want := range []string{"--tv-accent:#0F7A6C", "--tv-accent:#3AD6C0", `"Space Grotesk"`, `"IBM Plex Mono"`} {
+		if !strings.Contains(style, want) {
+			t.Errorf("exported stylesheet is missing %s", want)
+		}
 	}
 }
 

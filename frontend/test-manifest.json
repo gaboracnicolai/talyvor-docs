@@ -16,6 +16,7 @@
     "src/components/VersionHistory.test.tsx": 5,
     "src/components/database/DatabaseBlock.hiddencols.test.tsx": 9,
     "src/components/database/DatabaseBlock.view.test.tsx": 3,
+    "src/components/ui/Brand.test.tsx": 1,
     "src/hooks/useEditSession.lifecycle.test.tsx": 5,
     "src/hooks/useEditSession.test.ts": 5,
     "src/hooks/useSearch.offset.test.tsx": 3,
@@ -40,6 +41,6 @@
     "src/sw/register.test.ts": 8,
     "src/sw/sw.test.ts": 7
   },
-  "totalFiles": 39,
-  "totalTests": 172
+  "totalFiles": 40,
+  "totalTests": 173
 }

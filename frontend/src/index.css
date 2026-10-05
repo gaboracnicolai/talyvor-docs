@@ -1,17 +1,20 @@
+@import "./styles/tokens.css";
+@import "./styles/fonts.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
   body {
-    font-family: "Inter", system-ui, sans-serif;
+    font-family: var(--tv-font-sans);
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
   code,
   pre,
   .font-mono {
-    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-family: var(--tv-font-mono);
   }
 }
 
@@ -23,7 +26,7 @@
 .ProseMirror {
   outline: none;
   min-height: 200px;
-  caret-color: #f0a030;
+  caret-color: var(--tv-accent);
 }
 .ProseMirror p {
   margin: 0.5rem 0;
@@ -65,28 +68,28 @@
   width: 1rem;
   height: 1rem;
   border-radius: 3px;
-  border: 1.5px solid #8892a4;
+  border: 1.5px solid var(--tv-ink-muted);
 }
 .ProseMirror li.todo[data-checked="true"]::before {
-  background: #f0a030;
-  border-color: #f0a030;
+  background: var(--tv-accent);
+  border-color: var(--tv-accent);
 }
 .ProseMirror blockquote {
-  border-left: 3px solid #1e2330;
+  border-left: 3px solid var(--tv-line-strong);
   padding-left: 0.75rem;
   margin: 0.5rem 0;
-  color: #8892a4;
+  color: var(--tv-ink-muted);
 }
 .ProseMirror code {
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-  background: #1e2330;
+  font-family: var(--tv-font-mono);
+  background: var(--tv-raised);
   border-radius: 3px;
   padding: 0.1rem 0.3rem;
   font-size: 0.9em;
 }
 .ProseMirror pre {
-  background: #13161c;
-  border: 1px solid #1e2330;
+  background: var(--tv-surface);
+  border: 1px solid var(--tv-line);
   border-radius: 6px;
   padding: 1rem;
   margin: 0.75rem 0;
@@ -98,17 +101,17 @@
 }
 .ProseMirror hr {
   border: 0;
-  border-top: 1px solid #1e2330;
+  border-top: 1px solid var(--tv-line);
   margin: 1rem 0;
 }
 .ProseMirror a {
-  color: #f0a030;
+  color: var(--tv-accent);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 .ProseMirror mark {
-  background: rgba(240, 160, 48, 0.2);
-  color: #d4d8e2;
+  background: var(--tv-accent-tint);
+  color: var(--tv-ink);
   padding: 0 2px;
   border-radius: 2px;
 }
@@ -121,55 +124,55 @@
   border-left: 3px solid;
 }
 .ProseMirror .callout[data-tone="info"] {
-  border-color: #3b82f6;
-  background: rgba(59, 130, 246, 0.08);
+  border-color: var(--tv-accent);
+  background: color-mix(in srgb, var(--tv-accent) 8%, transparent);
 }
 .ProseMirror .callout[data-tone="warning"] {
-  border-color: #f59e0b;
-  background: rgba(245, 158, 11, 0.08);
+  border-color: var(--tv-caution);
+  background: color-mix(in srgb, var(--tv-caution) 8%, transparent);
 }
 .ProseMirror .callout[data-tone="error"] {
-  border-color: #ef4444;
-  background: rgba(239, 68, 68, 0.08);
+  border-color: var(--tv-critical);
+  background: color-mix(in srgb, var(--tv-critical) 8%, transparent);
 }
 .ProseMirror .callout[data-tone="success"] {
-  border-color: #22c55e;
-  background: rgba(34, 197, 94, 0.08);
+  border-color: var(--tv-positive);
+  background: color-mix(in srgb, var(--tv-positive) 8%, transparent);
 }
 .ProseMirror .issue-embed {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
   padding: 0.15rem 0.5rem;
-  border: 1px solid #1e2330;
+  border: 1px solid var(--tv-line);
   border-radius: 4px;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-family: var(--tv-font-mono);
   font-size: 0.85em;
-  background: #13161c;
+  background: var(--tv-surface);
 }
 
 /* ─── highlight.js token colors (lowlight) ──────────────── */
 .hljs-keyword,
 .hljs-tag,
 .hljs-literal {
-  color: #f0a030;
+  color: var(--tv-accent);
 }
 .hljs-string,
 .hljs-meta {
-  color: #22c55e;
+  color: var(--tv-positive);
 }
 .hljs-number,
 .hljs-built_in {
-  color: #3b82f6;
+  color: var(--tv-caution);
 }
 .hljs-comment {
-  color: #8892a4;
+  color: var(--tv-ink-muted);
   font-style: italic;
 }
 .hljs-name,
 .hljs-function .hljs-title,
 .hljs-attr {
-  color: #d4d8e2;
+  color: var(--tv-ink);
 }
 
 /* Remote-cursor decorations rendered by the collab plugin. */
@@ -189,7 +192,7 @@
   font-weight: 600;
   padding: 1px 4px;
   border-radius: 3px;
-  color: #0c0e12;
+  color: var(--tv-brand-obsidian);
   transform: translateY(2px);
   pointer-events: none;
 }
@@ -200,11 +203,11 @@
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #1e2330;
+  background: var(--tv-line-strong);
   border-radius: 5px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #2a3140;
+  background: var(--tv-ink-muted);
 }
 ::-webkit-scrollbar-track {
   background: transparent;

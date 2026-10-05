@@ -60,7 +60,7 @@ export function IssueSearchDialog({ open, onPick, onClose }: IssueSearchDialogPr
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 pt-32">
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-bg/80 pt-32">
       <div className="w-full max-w-lg overflow-hidden rounded-md border border-border bg-surface shadow-2xl">
         <div className="flex items-center gap-2 border-b border-border px-3 py-2">
           <Search size={14} className="text-muted" />

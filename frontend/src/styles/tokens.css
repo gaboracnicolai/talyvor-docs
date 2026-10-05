@@ -1,0 +1,34 @@
+/* Talyvor brand v4 — the 4 Oct 2026 board. Dark is the primary theme. */
+:root, [data-theme="dark"] {
+  --tv-canvas: #060A12;        /* Obsidian: page background */
+  --tv-surface: #081220;       /* Surface: panels, navigation, sidebar */
+  --tv-raised: #0E1A2A;        /* cards on surface */
+  --tv-line: rgba(126,147,171,.18);
+  --tv-line-strong: rgba(126,147,171,.32);
+  --tv-ink: #E6EEF7;           /* Frost: primary text */
+  --tv-ink-muted: #7E93AB;     /* Muted: secondary text */
+  --tv-label: #90ACC0;         /* Mist: spaced-caps eyebrows, taglines */
+  --tv-accent: #3AD6C0;        /* Teal: one primary action, the rule, active state */
+  --tv-accent-hover: #55DFCC;
+  --tv-on-accent: #060A12;
+  --tv-accent-tint: #0E2B2E;
+  --tv-positive: #45C77F; --tv-caution: #D6A93C; --tv-critical: #F0685C;
+}
+[data-theme="light"] {
+  --tv-canvas: #F4F7FB; --tv-surface: #FFFFFF; --tv-raised: #FFFFFF;
+  --tv-line: rgba(6,10,18,.10); --tv-line-strong: rgba(6,10,18,.20);
+  --tv-ink: #060A12; --tv-ink-muted: #46586E; --tv-label: #646B79;
+  --tv-accent: #0F7A6C; --tv-accent-hover: #0A5F54; --tv-on-accent: #FFFFFF; --tv-accent-tint: #C9E6E0;
+  --tv-positive: #1D7A45; --tv-caution: #8A6A12; --tv-critical: #BF3B2E;
+}
+:root {
+  /* the five board colours, identical in both themes, for brand graphics */
+  --tv-brand-obsidian: #060A12; --tv-brand-surface: #081220; --tv-brand-teal: #3AD6C0;
+  --tv-brand-frost: #E6EEF7; --tv-brand-muted: #7E93AB; --tv-brand-mist: #90ACC0; --tv-brand-white: #FAFBFC;
+  --tv-font-sans: "Space Grotesk", system-ui, sans-serif;   /* headlines and UI */
+  --tv-font-mono: "IBM Plex Mono", ui-monospace, monospace; /* data, code, every number that matters */
+  --tv-radius-sm: 6px; --tv-radius-md: 10px; --tv-radius-pill: 999px;
+  --tv-rule-w: 32px; --tv-rule-h: 2px;                      /* the teal rule under a heading */
+  --tv-eyebrow-size: 12px; --tv-eyebrow-tracking: .22em;    /* spaced caps */
+  --tv-verbs-size: 15px; --tv-verbs-tracking: .32em;        /* ROUTE / PROVE / REUSE / COMPOUND */
+}
