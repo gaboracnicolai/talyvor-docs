@@ -5,6 +5,7 @@
     "src/api/request-field.census.test.ts": 5,
     "src/api/route-response-type.census.test.ts": 3,
     "src/api/search.wire-census.test.ts": 4,
+    "src/components/AskAI.test.tsx": 5,
     "src/components/CommentsPanel.resolvedtab.test.tsx": 3,
     "src/components/EditingBanner.affordance.test.tsx": 3,
     "src/components/EditingBanner.test.tsx": 4,
@@ -41,6 +42,6 @@
     "src/sw/register.test.ts": 8,
     "src/sw/sw.test.ts": 7
   },
-  "totalFiles": 40,
-  "totalTests": 173
+  "totalFiles": 41,
+  "totalTests": 178
 }

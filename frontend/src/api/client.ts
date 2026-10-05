@@ -37,6 +37,11 @@ export class OfflineQueuedError extends Error {
 
 interface RequestOptions extends Omit<RequestInit, "body"> {
   body?: unknown;
+  // queueOffline: false makes a write that never reached the server REJECT instead of being
+  // queued for replay. For a request whose answer is only wanted now (Ask), the queue resolves
+  // `undefined` — the caller has nothing to show — and replays the call later, when nobody is
+  // waiting for the answer.
+  queueOffline?: boolean;
 }
 
 export function isOnline(): boolean {
@@ -129,7 +134,7 @@ async function writeCache(path: string, data: unknown): Promise<void> {
 }
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { body, headers, method = "GET", ...rest } = options;
+  const { body, headers, method = "GET", queueOffline = true, ...rest } = options;
   const token = localStorage.getItem("docs_api_key") ?? "";
 
   const init: RequestInit = {
@@ -156,6 +161,9 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     if (method === "GET") {
       const cached = await readCached<T>(path);
       if (cached !== null) return cached;
+      throw new APIError("offline", 0, "OFFLINE");
+    }
+    if (!queueOffline) {
       throw new APIError("offline", 0, "OFFLINE");
     }
     // Writes go into the queue for SyncManager to replay later.
