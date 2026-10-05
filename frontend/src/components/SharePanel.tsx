@@ -100,7 +100,7 @@ export function SharePanel({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-24"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-bg/70 pt-24"
       onClick={onClose}
     >
       <div

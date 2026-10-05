@@ -314,24 +314,34 @@ func (e *Exporter) ToMarkdown(ctx context.Context, pageID string, wsIDs []string
 
 // ─── HTML ────────────────────────────────────────────
 
-const htmlStyles = `body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;max-width:760px;margin:32px auto;padding:0 16px;color:#1a1a1a;line-height:1.6}
-h1,h2,h3{color:#111;line-height:1.25;margin-top:1.6em}
-h1{font-size:2em;border-bottom:1px solid #eee;padding-bottom:0.2em}
+// htmlStyles is the exported page in the Talyvor brand v4 palette
+// (brand-v4/tokens/tokens.css): the light theme on paper and by default, the
+// dark theme on a screen that asks for it. Space Grotesk and IBM Plex Mono are
+// named with system fallbacks and no font request goes out — an exported file
+// must open offline.
+const htmlStyles = `:root{--tv-canvas:#F4F7FB;--tv-surface:#FFFFFF;--tv-line:rgba(6,10,18,.10);--tv-line-strong:rgba(6,10,18,.20);--tv-ink:#060A12;--tv-ink-muted:#46586E;--tv-label:#646B79;--tv-accent:#0F7A6C;--tv-accent-tint:#C9E6E0}
+@media screen and (prefers-color-scheme:dark){:root{--tv-canvas:#060A12;--tv-surface:#081220;--tv-line:rgba(126,147,171,.18);--tv-line-strong:rgba(126,147,171,.32);--tv-ink:#E6EEF7;--tv-ink-muted:#7E93AB;--tv-label:#90ACC0;--tv-accent:#3AD6C0;--tv-accent-tint:#0E2B2E}}
+body{font-family:"Space Grotesk",system-ui,sans-serif;max-width:760px;margin:32px auto;padding:0 16px;background:var(--tv-canvas);color:var(--tv-ink);line-height:1.6}
+h1,h2,h3{color:var(--tv-ink);font-weight:500;letter-spacing:-0.01em;line-height:1.25;margin-top:1.6em}
+h1{font-size:2em;padding-bottom:0.3em}
+h1::after{content:"";display:block;width:32px;height:2px;margin-top:0.35em;background:var(--tv-accent)}
 h2{font-size:1.4em}
-h3{font-size:1.15em}
+h3{font-size:1.15em;font-weight:600}
 p{margin:0.8em 0}
-code{font-family:"SF Mono",Menlo,monospace;background:#f4f4f4;padding:1px 4px;border-radius:3px;font-size:0.9em}
-pre{background:#f4f4f4;padding:12px;border-radius:4px;overflow:auto}
-pre code{background:transparent;padding:0}
-blockquote{border-left:3px solid #6366f1;padding-left:12px;color:#555;margin:1em 0;font-style:italic}
+a{color:var(--tv-accent)}
+mark{background:var(--tv-accent-tint);color:var(--tv-ink)}
+code{font-family:"IBM Plex Mono",ui-monospace,monospace;background:var(--tv-surface);border:1px solid var(--tv-line);padding:1px 4px;border-radius:3px;font-size:0.9em}
+pre{background:var(--tv-surface);border:1px solid var(--tv-line);padding:12px;border-radius:6px;overflow:auto}
+pre code{background:transparent;border:0;padding:0}
+blockquote{border-left:3px solid var(--tv-accent);padding-left:12px;color:var(--tv-ink-muted);margin:1em 0;font-style:italic}
 ul,ol{padding-left:1.4em}
-hr{border:0;border-top:1px solid #ddd;margin:2em 0}
-.meta{color:#888;font-size:0.85em;margin-bottom:2em}
-.toc{background:#f9f9fb;border:1px solid #e5e5ea;padding:12px 18px;border-radius:6px;margin-bottom:2em}
-.toc h2{font-size:1em;margin:0 0 6px}
+hr{border:0;border-top:1px solid var(--tv-line-strong);margin:2em 0}
+.meta{font-family:"IBM Plex Mono",ui-monospace,monospace;color:var(--tv-ink-muted);font-size:0.85em;margin-bottom:2em}
+.toc{background:var(--tv-surface);border:1px solid var(--tv-line);padding:12px 18px;border-radius:10px;margin-bottom:2em}
+.toc h2{font-size:12px;font-weight:500;letter-spacing:0.22em;text-transform:uppercase;color:var(--tv-label);margin:0 0 6px}
 .toc ul{margin:0;padding-left:1.2em}
-.watermark{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-30deg);font-size:6em;color:rgba(0,0,0,0.05);pointer-events:none;z-index:-1}
-footer{margin-top:3em;padding-top:1em;border-top:1px solid #eee;color:#888;font-size:0.85em;text-align:center}`
+.watermark{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-30deg);font-size:6em;color:var(--tv-line);pointer-events:none;z-index:-1}
+footer{margin-top:3em;padding-top:1em;border-top:1px solid var(--tv-line);color:var(--tv-label);font-size:0.85em;text-align:center}`
 
 func (e *Exporter) ToHTML(ctx context.Context, pageID string, wsIDs []string, opts ExportOptions) (string, error) {
 	pages, err := e.gatherPages(ctx, pageID, wsIDs, opts.IncludeChildren)
@@ -565,6 +575,21 @@ func wrapMarks(text string, marks []any) string {
 
 // ─── PDF ─────────────────────────────────────────────
 
+// The PDF's colours are the light brand v4 palette (paper is light):
+// ink #060A12, ink-muted #46586E, label #646B79, canvas #F4F7FB, and
+// line-strong rgba(6,10,18,.20) laid over white.
+type pdfColour [3]int
+
+func (c pdfColour) rgb() (int, int, int) { return c[0], c[1], c[2] }
+
+var (
+	pdfInk        = pdfColour{0x06, 0x0A, 0x12}
+	pdfInkMuted   = pdfColour{0x46, 0x58, 0x6E}
+	pdfLabel      = pdfColour{0x64, 0x6B, 0x79}
+	pdfCanvas     = pdfColour{0xF4, 0xF7, 0xFB}
+	pdfLineStrong = pdfColour{0xCD, 0xCE, 0xD0}
+)
+
 func (e *Exporter) ToPDF(ctx context.Context, pageID string, wsIDs []string, opts ExportOptions, w io.Writer) error {
 	pages, err := e.gatherPages(ctx, pageID, wsIDs, opts.IncludeChildren)
 	if err != nil {
@@ -577,7 +602,7 @@ func (e *Exporter) ToPDF(ctx context.Context, pageID string, wsIDs []string, opt
 	root := pages[0]
 	pdf.SetHeaderFunc(func() {
 		pdf.SetFont("Arial", "", 9)
-		pdf.SetTextColor(120, 120, 120)
+		pdf.SetTextColor(pdfInkMuted.rgb())
 		pdf.CellFormat(0, 8, ensureASCII(root.Title), "", 0, "L", false, 0, "")
 		pdf.CellFormat(0, 8, root.UpdatedAt.Format("2 Jan 2006"), "", 1, "R", false, 0, "")
 		pdf.Ln(2)
@@ -585,7 +610,7 @@ func (e *Exporter) ToPDF(ctx context.Context, pageID string, wsIDs []string, opt
 	pdf.SetFooterFunc(func() {
 		pdf.SetY(-12)
 		pdf.SetFont("Arial", "I", 8)
-		pdf.SetTextColor(150, 150, 150)
+		pdf.SetTextColor(pdfLabel.rgb())
 		pdf.CellFormat(0, 6, "Exported from Talyvor Docs", "", 0, "L", false, 0, "")
 		pdf.CellFormat(0, 6, fmt.Sprintf("Page %d", pdf.PageNo()), "", 0, "R", false, 0, "")
 	})
@@ -593,7 +618,7 @@ func (e *Exporter) ToPDF(ctx context.Context, pageID string, wsIDs []string, opt
 	pdf.AddPage()
 	if opts.IncludeTOC {
 		pdf.SetFont("Arial", "B", 14)
-		pdf.SetTextColor(0, 0, 0)
+		pdf.SetTextColor(pdfInk.rgb())
 		pdf.CellFormat(0, 8, "Table of Contents", "", 1, "L", false, 0, "")
 		pdf.SetFont("Arial", "", 11)
 		for _, p := range pages {
@@ -652,7 +677,7 @@ func renderPDFHeading(pdf *fpdf.Fpdf, level int, text string) {
 		size = 11
 	}
 	pdf.SetFont("Arial", "B", size)
-	pdf.SetTextColor(20, 20, 20)
+	pdf.SetTextColor(pdfInk.rgb())
 	pdf.MultiCell(0, size*0.6, ensureASCII(text), "", "L", false)
 	pdf.Ln(1)
 }
@@ -683,18 +708,19 @@ func renderPDFBlocks(pdf *fpdf.Fpdf, raw any) {
 			renderPDFHeading(pdf, level, plainTextOf(node["content"]))
 		case "paragraph":
 			pdf.SetFont("Arial", "", 11)
-			pdf.SetTextColor(40, 40, 40)
+			pdf.SetTextColor(pdfInk.rgb())
 			pdf.MultiCell(0, 5.5, ensureASCII(plainTextOf(node["content"])), "", "L", false)
 			pdf.Ln(2)
 		case "code_block":
 			pdf.SetFont("Courier", "", 10)
-			pdf.SetTextColor(20, 20, 20)
-			pdf.SetFillColor(245, 245, 247)
+			pdf.SetTextColor(pdfInk.rgb())
+			pdf.SetFillColor(pdfCanvas.rgb())
+			pdf.SetDrawColor(pdfLineStrong.rgb())
 			pdf.MultiCell(0, 5, ensureASCII(plainTextOf(node["content"])), "1", "L", true)
 			pdf.Ln(2)
 		case "blockquote":
 			pdf.SetFont("Arial", "I", 11)
-			pdf.SetTextColor(80, 80, 80)
+			pdf.SetTextColor(pdfInkMuted.rgb())
 			renderPDFBlocks(pdf, node["content"])
 		case "bullet_list", "ordered_list":
 			items, _ := node["content"].([]any)

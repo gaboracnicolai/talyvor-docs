@@ -32,7 +32,7 @@ const TONE: Record<EntryType, { emoji: string; label: string; classes: string }>
   security: {
     emoji: "🔒",
     label: "Security",
-    classes: "border-purple-500/40 bg-purple-500/15 text-purple-300",
+    classes: "border-label/40 bg-label/15 text-label",
   },
 };
 

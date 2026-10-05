@@ -22,6 +22,7 @@ import { freshnessApi } from "~/api/freshness";
 import { approvalApi } from "~/api/approval";
 import type { Page, Space } from "~/api/types";
 import { Input } from "~/components/ui/Input";
+import { DocsBrand } from "~/components/ui/Brand";
 
 interface SidebarProps {
   // Route surface lives in App.tsx; the sidebar just calls these
@@ -80,10 +81,7 @@ export function Sidebar({
   return (
     <aside className="flex h-screen w-64 shrink-0 flex-col border-r border-border bg-surface">
       <div className="flex h-12 items-center gap-2 border-b border-border px-3">
-        <div className="flex h-6 w-6 items-center justify-center rounded bg-accent text-bg">
-          <span className="font-mono text-xs font-bold">T</span>
-        </div>
-        <span className="text-sm font-semibold">Talyvor Docs</span>
+        <DocsBrand />
       </div>
 
       <nav className="flex-1 overflow-y-auto p-2">
@@ -210,7 +208,7 @@ function SpaceRow({
       <div
         className={clsx(
           "flex w-full items-center gap-1 rounded px-2 py-1 text-sm",
-          active ? "bg-bg text-text" : "text-muted hover:bg-bg hover:text-text",
+          active ? "bg-accent-tint text-accent" : "text-muted hover:bg-bg hover:text-text",
         )}
       >
         <button onClick={() => setOpen((o) => !o)} className="text-muted">
@@ -236,7 +234,7 @@ function SpaceRow({
                 className={clsx(
                   "flex w-full items-center gap-1 rounded px-2 py-0.5 text-left text-xs",
                   activePageID === p.id
-                    ? "bg-bg text-text"
+                    ? "bg-accent-tint text-accent"
                     : "text-muted hover:bg-bg/60 hover:text-text",
                 )}
               >

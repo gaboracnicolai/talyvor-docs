@@ -210,16 +210,24 @@ func (h *Handler) PublicHandler() http.Handler {
 	return r
 }
 
-const publicCSS = `body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;max-width:780px;margin:32px auto;padding:0 16px;color:#1a1a1a;line-height:1.6}
-nav.crumbs{font-size:0.85em;color:#777;margin-bottom:1.5em}
-nav.crumbs a{color:#555;text-decoration:none}
-h1,h2,h3{color:#111;line-height:1.25}
-h1{font-size:2em;border-bottom:1px solid #eee;padding-bottom:0.2em}
-a{color:#3a4ad9}
+// publicCSS is a published docs site in the Talyvor brand v4 palette
+// (brand-v4/tokens/tokens.css): dark by default, as the brand is, and light for
+// a reader whose system asks for it. Space Grotesk and IBM Plex Mono are named
+// with system fallbacks and no font request goes out.
+const publicCSS = `:root{--tv-canvas:#060A12;--tv-line:rgba(126,147,171,.18);--tv-ink:#E6EEF7;--tv-ink-muted:#7E93AB;--tv-label:#90ACC0;--tv-accent:#3AD6C0}
+@media (prefers-color-scheme:light){:root{--tv-canvas:#F4F7FB;--tv-line:rgba(6,10,18,.10);--tv-ink:#060A12;--tv-ink-muted:#46586E;--tv-label:#646B79;--tv-accent:#0F7A6C}}
+body{font-family:"Space Grotesk",system-ui,sans-serif;max-width:780px;margin:32px auto;padding:0 16px;background:var(--tv-canvas);color:var(--tv-ink);line-height:1.6}
+code,pre{font-family:"IBM Plex Mono",ui-monospace,monospace}
+nav.crumbs{font-size:12px;letter-spacing:0.22em;text-transform:uppercase;color:var(--tv-label);margin-bottom:1.5em}
+nav.crumbs a{color:var(--tv-label);text-decoration:none}
+h1,h2,h3{color:var(--tv-ink);font-weight:500;letter-spacing:-0.01em;line-height:1.25}
+h1{font-size:2em;padding-bottom:0.3em}
+h1::after{content:"";display:block;width:32px;height:2px;margin-top:0.35em;background:var(--tv-accent)}
+a{color:var(--tv-accent)}
 .page-list{list-style:none;padding:0;margin:0}
-.page-list li{padding:8px 0;border-bottom:1px solid #f0f0f0}
+.page-list li{padding:8px 0;border-bottom:1px solid var(--tv-line)}
 .page-list li a{font-size:1.05em;font-weight:500}
-footer{margin-top:4em;padding-top:1em;border-top:1px solid #eee;color:#999;font-size:0.8em;text-align:center}
+footer{margin-top:4em;padding-top:1em;border-top:1px solid var(--tv-line);color:var(--tv-label);font-size:0.8em;text-align:center}
 `
 
 func renderHTMLShell(w http.ResponseWriter, title, body string) {

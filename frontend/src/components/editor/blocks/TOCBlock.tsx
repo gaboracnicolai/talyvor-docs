@@ -13,14 +13,14 @@ export function createTOCNodeView(_node: unknown, view: EditorView): NodeView {
   const dom = document.createElement("div");
   dom.className = "toc-block";
   dom.style.cssText = [
-    "background:var(--surface,#13161c)",
-    "border-left:3px solid var(--accent,#f0a030)",
+    "background:var(--tv-surface)",
+    "border-left:3px solid var(--tv-accent)",
     "padding:12px 16px",
     "margin:12px 0",
     "max-width:480px",
     "border-radius:6px",
     "font-size:12px",
-    "color:var(--text,#e6e8eb)",
+    "color:var(--tv-ink)",
   ].join(";");
 
   const paint = () => {

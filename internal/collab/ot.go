@@ -125,16 +125,18 @@ const historyCap = 100
 
 // presenceColors cycles through a palette so each connected client
 // gets a visually distinct cursor. Eight colours covers the vast
-// majority of multi-editor sessions; beyond that we wrap.
+// majority of multi-editor sessions; beyond that we wrap. Every one is
+// a Talyvor brand v4 colour (brand-v4/tokens/tokens.css), and each
+// reads behind the Obsidian label text the editor draws on it.
 var presenceColors = []string{
-	"#f0a030", // accent
-	"#3b82f6",
-	"#22c55e",
-	"#ec4899",
-	"#a78bfa",
-	"#f59e0b",
-	"#ef4444",
-	"#06b6d4",
+	"#3AD6C0", // accent (Teal)
+	"#D6A93C", // caution
+	"#45C77F", // positive
+	"#90ACC0", // label (Mist)
+	"#F0685C", // critical
+	"#E6EEF7", // ink (Frost)
+	"#55DFCC", // accent-hover
+	"#7E93AB", // ink-muted
 }
 
 // ─── engine ─────────────────────────────────────────────────
