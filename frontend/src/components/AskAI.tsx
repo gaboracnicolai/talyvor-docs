@@ -3,6 +3,26 @@ import { Sparkles, X, Loader2 } from "lucide-react";
 import { aiApi, type AIAskResponse } from "~/api/ai";
 import { APIError } from "~/api/client";
 
+// ASK_TIMEOUT_MS bounds how long one Ask may stay "Thinking…". The server already ends every
+// request at 30 s (middleware.Timeout in cmd/docs/main.go); the 5 s on top lets its own error
+// arrive first, and this one covers a request that never comes back at all.
+export const ASK_TIMEOUT_MS = 35_000;
+
+// askErrorMessage turns a failed Ask into the sentence the panel shows. Every failure gets one.
+function askErrorMessage(e: unknown, timedOut: boolean): string {
+  if (timedOut) {
+    return `Ask got no answer within ${ASK_TIMEOUT_MS / 1000} seconds and stopped waiting. Try again.`;
+  }
+  if (!(e instanceof APIError)) return "Ask didn't answer. Try again.";
+  if (e.code === "AI_UNAVAILABLE") {
+    return "AI not configured. Set DOCS_LENS_URL + DOCS_LENS_API_KEY.";
+  }
+  if (e.code === "OFFLINE") return "Couldn't reach Docs. Check your connection and try again.";
+  if (e.status === 429) return "Too many questions at once. Wait a minute and try again.";
+  if (e.status === 504) return "Ask took too long to answer. Try again.";
+  return `Ask didn't answer: ${e.message || `error ${e.status}`}.`;
+}
+
 interface AskAIProps {
   workspaceId: string;
 }
@@ -18,6 +38,9 @@ export function AskAI({ workspaceId }: AskAIProps) {
   const [answer, setAnswer] = useState<AIAskResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const inFlight = useRef<AbortController | null>(null);
+
+  useEffect(() => () => inFlight.current?.abort(), []);
 
   // Cmd+Shift+A toggle. Bound to window so the shortcut works
   // regardless of focus state.
@@ -39,25 +62,35 @@ export function AskAI({ workspaceId }: AskAIProps) {
   }, [open]);
 
   const ask = async () => {
-    if (!question.trim() || loading) return;
+    if (loading) return;
+    if (!question.trim()) {
+      setAnswer(null);
+      setError("Type a question first.");
+      inputRef.current?.focus();
+      return;
+    }
+    const controller = new AbortController();
+    inFlight.current = controller;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, ASK_TIMEOUT_MS);
     setLoading(true);
     setError(null);
     setAnswer(null);
     try {
-      const res = await aiApi.ask(workspaceId, { question });
-      setAnswer(res);
-    } catch (e) {
-      // Lens unavailable surfaces as a 503 from the server. We don't
-      // expose the raw status to the user — the response body
-      // already says "AI unavailable. Check Lens configuration." but
-      // we re-message in case the call never made it that far
-      // (offline, server down).
-      if (e instanceof APIError && e.code === "AI_UNAVAILABLE") {
-        setError("AI not configured. Set DOCS_LENS_URL + DOCS_LENS_API_KEY.");
+      const res = await aiApi.ask(workspaceId, { question }, controller.signal);
+      if (!res || !res.answer?.trim()) {
+        setError("Ask came back without an answer. Try again.");
       } else {
-        setError("Something went wrong asking the AI.");
+        setAnswer({ answer: res.answer, sources: res.sources ?? [] });
       }
+    } catch (e) {
+      setError(askErrorMessage(e, timedOut));
     } finally {
+      clearTimeout(timer);
+      if (inFlight.current === controller) inFlight.current = null;
       setLoading(false);
     }
   };
@@ -82,7 +115,7 @@ export function AskAI({ workspaceId }: AskAIProps) {
   }
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex w-96 flex-col rounded-md border border-border bg-surface shadow-xl">
+    <div className="fixed bottom-4 right-4 z-50 flex w-96 max-w-[calc(100vw-2rem)] flex-col rounded-md border border-border bg-surface shadow-xl">
       <header className="flex items-center justify-between border-b border-border px-3 py-2">
         <div className="flex items-center gap-1 text-xs font-semibold">
           <Sparkles size={12} className="text-accent" />
@@ -109,7 +142,7 @@ export function AskAI({ workspaceId }: AskAIProps) {
         />
         <button
           onClick={() => void ask()}
-          disabled={loading || !question.trim()}
+          disabled={loading}
           className="rounded bg-accent px-2 py-1 text-xs text-bg hover:opacity-90 disabled:opacity-40"
         >
           {loading ? <Loader2 size={12} className="animate-spin" /> : "Ask"}
@@ -117,7 +150,11 @@ export function AskAI({ workspaceId }: AskAIProps) {
       </div>
 
       <div className="max-h-72 overflow-y-auto px-3 pb-3 text-xs">
-        {error ? <div className="text-callout-error">{error}</div> : null}
+        {error ? (
+          <div role="alert" className="text-callout-error">
+            {error}
+          </div>
+        ) : null}
         {loading && !answer ? (
           <div className="text-muted">Thinking…</div>
         ) : null}

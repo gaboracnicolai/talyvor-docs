@@ -37,10 +37,12 @@ export const aiApi = {
       body,
     });
   },
-  ask(workspaceID: string, body: { question: string }) {
+  ask(workspaceID: string, body: { question: string }, signal?: AbortSignal) {
     return apiRequest<AIAskResponse>(`/v1/workspaces/${workspaceID}/ai/ask`, {
       method: "POST",
       body,
+      signal,
+      queueOffline: false,
     });
   },
   suggestTitle(
