@@ -104,7 +104,12 @@ type PageState struct {
 	// have disconnected (Leave removes them from clients) before the 5s tick fires, and the answer
 	// must not depend on whether they are still on the socket.
 	SnapshotBy string
-	clients    map[string]*CollabClient
+	// savedVersion is the Version the AutoSaver last persisted. It lives on the page state, not in
+	// the saver, so it goes away with the state it describes: a page opened again after its state was
+	// released starts over at Version 0, and a high-water mark kept by the saver skipped every save
+	// of the new session until its version overtook the old one.
+	savedVersion int
+	clients      map[string]*CollabClient
 }
 
 // PresenceInfo is the wire shape for presence broadcasts and the
@@ -144,6 +149,10 @@ var presenceColors = []string{
 type OTEngine struct {
 	mu    sync.RWMutex
 	pages map[string]*PageState
+	// onIdle is called, outside mu, when the last client leaves a page whose latest snapshot has not
+	// been saved yet. The AutoSaver installs it (NewAutoSaver) so an edit made inside the autosave
+	// window is written at disconnect instead of being dropped with the page state.
+	onIdle func(pageID string)
 }
 
 func NewOTEngine() *OTEngine {
@@ -184,19 +193,63 @@ func (e *OTEngine) Snapshot(pageID string) (string, int, string) {
 	return st.Snapshot, st.Version, st.SnapshotBy
 }
 
-// DirtyPages returns the IDs of pages whose snapshots have been
-// updated since the previous auto-save tick. The caller is expected
-// to consume the result and call MarkClean once a save completes.
+// unsavedSnapshot is Snapshot for a page whose snapshot has not been saved yet; ok is false when
+// there is nothing to save.
+func (e *OTEngine) unsavedSnapshot(pageID string) (snap string, ver int, by string, ok bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	st := e.pages[pageID]
+	if st == nil || !st.unsaved() {
+		return "", 0, "", false
+	}
+	return st.Snapshot, st.Version, st.SnapshotBy, true
+}
+
+// DirtyPages returns the IDs of pages whose snapshot is newer than the version last saved. The
+// caller saves each one and reports it with MarkSaved.
 func (e *OTEngine) DirtyPages() []string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	out := make([]string, 0, len(e.pages))
 	for id, st := range e.pages {
-		if st.Snapshot != "" {
+		if st.unsaved() {
 			out = append(out, id)
 		}
 	}
 	return out
+}
+
+func (st *PageState) unsaved() bool { return st.Snapshot != "" && st.Version > st.savedVersion }
+
+// MarkSaved records that the snapshot at version ver reached the database. A page nobody is
+// connected to any more is released once its last snapshot is saved.
+func (e *OTEngine) MarkSaved(pageID string, ver int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st := e.pages[pageID]
+	if st == nil {
+		return
+	}
+	if ver > st.savedVersion {
+		st.savedVersion = ver
+	}
+	if len(st.clients) == 0 && !st.unsaved() {
+		delete(e.pages, pageID)
+	}
+}
+
+// DropIdle releases a page nobody is connected to, saved or not. The AutoSaver calls it when the
+// retry of a disconnect-time save fails too, so a page whose save can never succeed (deleted, or
+// locked by someone else) does not stay in memory for ever.
+func (e *OTEngine) DropIdle(pageID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st := e.pages[pageID]
+	if st == nil || len(st.clients) != 0 {
+		return false
+	}
+	delete(e.pages, pageID)
+	return true
 }
 
 // ─── Join / Leave ───────────────────────────────────────────
@@ -244,15 +297,24 @@ func (e *OTEngine) Join(pageID, clientID, memberID, memberName string) (*CollabC
 }
 
 func (e *OTEngine) Leave(pageID, clientID string) {
+	if save := e.leave(pageID, clientID); save != nil {
+		save(pageID)
+	}
+}
+
+// leave removes the client and returns onIdle when the page is now idle with an unsaved snapshot
+// to write. It holds mu; Leave calls onIdle after it is released, because the save is a database
+// round trip and every other page's traffic waits on mu.
+func (e *OTEngine) leave(pageID, clientID string) func(string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	st := e.pages[pageID]
 	if st == nil {
-		return
+		return nil
 	}
 	c, ok := st.clients[clientID]
 	if !ok {
-		return
+		return nil
 	}
 	close(c.send)
 	delete(st.clients, clientID)
@@ -265,10 +327,19 @@ func (e *OTEngine) Leave(pageID, clientID string) {
 	for _, other := range st.clients {
 		trySend(other.send, leftMsg)
 	}
-	// Drop empty page state so memory doesn't grow forever.
-	if len(st.clients) == 0 {
-		delete(e.pages, pageID)
+	if len(st.clients) != 0 {
+		return nil
 	}
+	// Last client gone. The state used to be dropped right here, and with it any change made since
+	// the last 5s autosave tick: the author's last few seconds of typing were ACKed and then lost.
+	// Keep an unsaved snapshot until onIdle has written it (MarkSaved releases the page); drop
+	// everything else so memory doesn't grow for ever. With no saver wired nobody would ever write
+	// it, so it is dropped as before.
+	if st.unsaved() && e.onIdle != nil {
+		return e.onIdle
+	}
+	delete(e.pages, pageID)
+	return nil
 }
 
 // ─── Apply ──────────────────────────────────────────────────

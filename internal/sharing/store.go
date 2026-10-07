@@ -1,15 +1,21 @@
 // Package sharing owns public-link sharing — the surface that turns
-// a single page into a tokenised URL anyone can open. Tokens are
-// UUIDs (non-sequential) and passwords are bcrypt-hashed; the API
-// never serialises the hash.
+// a single page into a tokenised URL anyone can open. A token is a
+// random nonce plus an HMAC of it under a server key; only the nonce
+// is stored, so a token is refused unless this server signed it and
+// the share_links table alone does not hold a working link.
+// Passwords are bcrypt-hashed; the API never serialises the hash.
 package sharing
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -36,6 +42,19 @@ const bcryptCost = 10
 // deletion.
 var ErrShareLinkNotFound = errors.New("sharing: share link not found for page")
 
+// ErrInvalidToken is returned by Validate for a token this server did not sign: a changed nonce, a
+// changed or missing signature. It is refused before any lookup, and the handler answers it with
+// the same 404 as an unknown link.
+var ErrInvalidToken = errors.New("sharing: invalid token")
+
+// signedNoncePrefix marks a nonce minted since tokens were signed. Such a nonce is accepted only with
+// its signature, so cutting the signature off a token does not leave a working bare one. A bare
+// token without the prefix is a link made before signing, and only the lookup can judge it.
+const signedNoncePrefix = "s1_"
+
+// shareKeyLabel keeps the share-token key apart from every other use of the secret it is derived from.
+const shareKeyLabel = "talyvor-docs share-token v1"
+
 type ShareLink struct {
 	ID           string                 `json:"id"`
 	PageID       string                 `json:"page_id"`
@@ -58,7 +77,10 @@ type pgxDB interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-type Store struct{ pool pgxDB }
+type Store struct {
+	pool pgxDB
+	key  []byte // HMAC key for share tokens; nil means Create refuses and signed tokens are refused
+}
 
 func NewStore(pool *pgxpool.Pool) *Store {
 	var db pgxDB
@@ -69,6 +91,57 @@ func NewStore(pool *pgxpool.Pool) *Store {
 }
 
 func newStore(db pgxDB) *Store { return &Store{pool: db} }
+
+// WithSigningSecret sets the secret share tokens are signed under. main.go passes
+// GATEWAY_AUTH_SECRET, which every deployment already has; the key is an HMAC of a fixed label under
+// it, so the secret itself never signs anything. Rotating that secret retires every share link.
+func (s *Store) WithSigningSecret(secret string) *Store {
+	s.key = nil
+	if secret != "" {
+		m := hmac.New(sha256.New, []byte(secret))
+		m.Write([]byte(shareKeyLabel))
+		s.key = m.Sum(nil)
+	}
+	return s
+}
+
+func (s *Store) mac(nonce string) []byte {
+	m := hmac.New(sha256.New, s.key)
+	m.Write([]byte(nonce))
+	return m.Sum(nil)
+}
+
+// sign turns a stored nonce into the token a share URL carries.
+func (s *Store) sign(nonce string) string {
+	return nonce + "." + base64.RawURLEncoding.EncodeToString(s.mac(nonce))
+}
+
+// nonceOf returns the stored nonce a presented token names, or false for a token this server did not
+// sign. See signedNoncePrefix for the bare case.
+func (s *Store) nonceOf(token string) (string, bool) {
+	nonce, sig, signed := strings.Cut(token, ".")
+	if !signed {
+		return token, token != "" && !strings.HasPrefix(token, signedNoncePrefix)
+	}
+	if s.key == nil || nonce == "" {
+		return "", false
+	}
+	// Strict: the last character of a 32-byte MAC carries two spare bits, and a lenient decoder
+	// ignores them, so four spellings of one signature would all verify.
+	got, err := base64.RawURLEncoding.Strict().DecodeString(sig)
+	if err != nil {
+		return "", false
+	}
+	return nonce, hmac.Equal(got, s.mac(nonce))
+}
+
+// present puts the signed token on a link read from the database, which holds only the nonce.
+func (s *Store) present(l *ShareLink) *ShareLink {
+	if l != nil && s.key != nil {
+		l.Token = s.sign(l.Token)
+	}
+	return l
+}
 
 const cols = `id, page_id, workspace_id, token, access, expires_at, password_hash, view_count, created_by, created_at`
 
@@ -95,15 +168,14 @@ func stripHash(l *ShareLink) *ShareLink {
 	return l
 }
 
-// newToken returns a 128-bit-entropy hex token. Not strictly a UUID
-// in the v4 sense, but indistinguishable to an attacker — and we
-// avoid the uuid dependency for a single call site.
-func newToken() (string, error) {
+// newNonce returns a 128-bit-entropy hex nonce with the signed-era prefix. It is what share_links.token
+// stores; the URL carries it signed (sign).
+func newNonce() (string, error) {
 	var buf [16]byte
 	if _, err := rand.Read(buf[:]); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(buf[:]), nil
+	return signedNoncePrefix + hex.EncodeToString(buf[:]), nil
 }
 
 // Create generates a token + persists the share link. If password
@@ -117,7 +189,10 @@ func (s *Store) Create(ctx context.Context, pageID, workspaceID, createdBy strin
 	if !validShareAccess[access] {
 		return nil, fmt.Errorf("sharing: access %q not allowed for share link", access)
 	}
-	token, err := newToken()
+	if s.key == nil {
+		return nil, errors.New("sharing: no signing key")
+	}
+	token, err := newNonce()
 	if err != nil {
 		return nil, fmt.Errorf("sharing: token: %w", err)
 	}
@@ -141,11 +216,11 @@ func (s *Store) Create(ctx context.Context, pageID, workspaceID, createdBy strin
 	if err != nil {
 		return nil, fmt.Errorf("sharing: insert: %w", err)
 	}
-	return stripHash(link), nil
+	return s.present(stripHash(link)), nil
 }
 
-// Validate looks up a token, checks expiry + password, and bumps
-// the view counter. Returns the link (without its password hash)
+// Validate checks the token's signature, looks up its nonce, checks
+// expiry + password, and bumps the view counter. Returns the link (without its password hash)
 // on success. Specific error strings ("expired", "password") let
 // the handler map to user-friendly responses without leaking
 // internals.
@@ -153,9 +228,13 @@ func (s *Store) Validate(ctx context.Context, token, password string) (*ShareLin
 	if s.pool == nil {
 		return nil, errors.New("sharing: no pool")
 	}
+	nonce, ok := s.nonceOf(token)
+	if !ok {
+		return nil, ErrInvalidToken
+	}
 	row := s.pool.QueryRow(ctx,
 		`SELECT `+cols+` FROM share_links WHERE token = $1`,
-		token,
+		nonce,
 	)
 	link, err := scan(row)
 	if err != nil {
@@ -204,7 +283,7 @@ func (s *Store) ListByPage(ctx context.Context, pageID string) ([]ShareLink, err
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, *stripHash(l))
+		out = append(out, *s.present(stripHash(l)))
 	}
 	return out, rows.Err()
 }

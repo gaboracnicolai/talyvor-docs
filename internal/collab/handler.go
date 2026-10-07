@@ -69,6 +69,10 @@ const (
 	readWait = 60 * time.Second
 	// writeWait bounds per-message write timeouts.
 	writeWait = 10 * time.Second
+	// defaultReadLimit caps one inbound frame. A `change` frame carries the whole document as its
+	// snapshot, so the cap is the REST body cap (DOCS_MAX_BODY_BYTES, 4 MB by default), which main.go
+	// passes in through WithReadLimit. Without a limit gorilla buffers a frame of any size in memory.
+	defaultReadLimit int64 = 4 << 20
 )
 
 // LockGuard is the narrow lock-check the collab handler delegates
@@ -79,14 +83,15 @@ type LockGuard interface {
 }
 
 type Handler struct {
-	engine   *OTEngine
-	guard    LockGuard
-	access   SessionResolver
-	upgrader websocket.Upgrader
+	engine    *OTEngine
+	guard     LockGuard
+	access    SessionResolver
+	upgrader  websocket.Upgrader
+	readLimit int64
 }
 
 func NewHandler(engine *OTEngine) *Handler {
-	h := &Handler{engine: engine}
+	h := &Handler{engine: engine, readLimit: defaultReadLimit}
 	// Default to same-origin. A handler built without WithAllowedOrigins is therefore
 	// restrictive, not permissive — the previous package-level upgrader defaulted open.
 	h.upgrader = baseUpgrader
@@ -99,6 +104,15 @@ func NewHandler(engine *OTEngine) *Handler {
 // where the SPA and API share a hostname. A split-origin dev setup lists its SPA origin.
 func (h *Handler) WithAllowedOrigins(origins []string) *Handler {
 	h.upgrader.CheckOrigin = originChecker(origins)
+	return h
+}
+
+// WithReadLimit sets the largest inbound frame, in bytes. A bigger frame closes the socket with
+// 1009 (message too big). Zero or less keeps the default.
+func (h *Handler) WithReadLimit(n int64) *Handler {
+	if n > 0 {
+		h.readLimit = n
+	}
 	return h
 }
 
@@ -215,6 +229,9 @@ func (h *Handler) writePump(ctx context.Context, conn *websocket.Conn, c *Collab
 
 func (h *Handler) readPump(ctx context.Context, conn *websocket.Conn, pageID string, c *CollabClient, canEdit bool, cancel context.CancelFunc) {
 	defer cancel()
+	// An oversized frame makes ReadMessage fail after gorilla has sent close 1009, so the loop
+	// below returns and ServeWS closes the socket.
+	conn.SetReadLimit(h.readLimit)
 	_ = conn.SetReadDeadline(time.Now().Add(readWait))
 	conn.SetPongHandler(func(string) error {
 		_ = conn.SetReadDeadline(time.Now().Add(readWait))
