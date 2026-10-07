@@ -89,6 +89,7 @@ var mainWiredConfig = map[string][]string{
 	"ListenAddr":            {"http.Server{}.Addr", "listenHostname()"},
 	"MaxBodyBytes":          {".WithReadLimit()", "bodylimit.Middleware()", "bodylimit.Middleware()"},
 	"MaxImportBodyBytes":    {"bodylimit.Middleware()"},
+	"MetricsToken":          {"metrics.Handler()"},
 	"SearchRateBurst":       {"ratelimit.New()"},
 	"SearchRatePerMin":      {"ratelimit.New()"},
 	"SlogLevel":             {"cfg.SlogLevel()"},

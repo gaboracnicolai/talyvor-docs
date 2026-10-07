@@ -50,6 +50,9 @@ services:
       - DOCS_TRACK_URL=${DOCS_TRACK_URL:-}
       - DOCS_TRACK_API_KEY=${DOCS_TRACK_API_KEY:-}
       - DOCS_LOG_LEVEL=${DOCS_LOG_LEVEL:-info}
+      # Bearer token for GET /metrics. Unset ⇒ /metrics 401s every request. >= 16 chars when
+      # set, or Docs refuses to boot.
+      - DOCS_METRICS_TOKEN=${DOCS_METRICS_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy

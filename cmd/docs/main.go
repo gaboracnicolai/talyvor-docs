@@ -585,7 +585,7 @@ func main() {
 	dbChecker := dbhealth.New(pool, 5*time.Second)
 	r.Get("/readyz", dbChecker.ReadyHandler())
 
-	r.Handle("/metrics", metrics.Handler())
+	r.Handle("/metrics", metrics.Handler(cfg.MetricsToken)) // bearer-only (DOCS_METRICS_TOKEN)
 
 	// MCP (SEC-4 model b, mirroring Track): behind the SAME gatewayauth + authz chain as /v1.
 	// A tool call reaches dispatch only with a valid transit proof + verified identity; the

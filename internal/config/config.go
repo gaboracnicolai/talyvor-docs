@@ -127,6 +127,11 @@ type Config struct {
 	// env, so every deployment accepted every origin. Set it only for a split-origin setup,
 	// e.g. DOCS_ALLOWED_ORIGINS=http://localhost:5174 for the dev frontend.
 	AllowedOrigins []string
+
+	// MetricsToken is the bearer token a Prometheus scraper presents to GET /metrics
+	// (DOCS_METRICS_TOKEN). OPTIONAL: unset ⇒ /metrics 401s every request. If SET it must be
+	// >= MinGatewayAuthSecretLen, failing at boot rather than serving behind a guessable token.
+	MetricsToken string
 }
 
 // MinGatewayAuthSecretLen mirrors Track — a short shared secret is brute-forceable, so a
@@ -187,6 +192,7 @@ func Load() (*Config, error) {
 		DefaultWorkspaceID:    getEnv("DOCS_DEFAULT_WORKSPACE", "default"),
 		GatewayAuthSecret:     os.Getenv("GATEWAY_AUTH_SECRET"),
 		AllowedOrigins:        splitList(os.Getenv("DOCS_ALLOWED_ORIGINS")),
+		MetricsToken:          os.Getenv("DOCS_METRICS_TOKEN"),
 		AIRatePerMin:          getEnvFloat("DOCS_AI_RATE_PER_MIN", 30),
 		AIRateBurst:           getEnvInt("DOCS_AI_RATE_BURST", 10),
 		SearchRatePerMin:      getEnvFloat("DOCS_SEARCH_RATE_PER_MIN", 240),
@@ -213,6 +219,9 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("%w: GATEWAY_AUTH_SECRET is a PUBLISHED placeholder from this "+
 			"repo and is permanently compromised — it is in git history, so it cannot be made "+
 			"secret again. Generate a fresh value: openssl rand -hex 32", ErrMissingEnv)
+	}
+	if cfg.MetricsToken != "" && len(cfg.MetricsToken) < MinGatewayAuthSecretLen {
+		return nil, fmt.Errorf("%w: DOCS_METRICS_TOKEN, if set, must be >= %d chars", ErrMissingEnv, MinGatewayAuthSecretLen)
 	}
 	return cfg, nil
 }

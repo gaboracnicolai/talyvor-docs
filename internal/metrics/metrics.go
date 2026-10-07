@@ -1,8 +1,14 @@
 // Package metrics exposes Prometheus counters + histograms.
+//
+// /metrics is never public: Handler serves it only to a scraper holding the bearer token
+// (DOCS_METRICS_TOKEN), the same rule Track's /metrics follows.
 package metrics
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
 	"net/http"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -59,7 +65,7 @@ var (
 	PagesCreated = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Name: "docs_pages_created_total",
-			Help: "Pages created, by any route (REST, MCP, template, import); deliberately unlabelled — /metrics is unauthenticated.",
+			Help: "Pages created, by any route (REST, MCP, template, import); deliberately unlabelled — space ids are tenant identifiers.",
 		},
 	)
 )
@@ -68,4 +74,31 @@ func init() {
 	prometheus.MustRegister(APIRequests, APILatency, PagesCreated)
 }
 
-func Handler() http.Handler { return promhttp.Handler() }
+// Handler returns the /metrics HTTP handler for the default registry, served only to a
+// request carrying `Authorization: Bearer <token>`. Anything else is 401. An empty token
+// means no scraper is configured, so every request is 401 — without that explicit check
+// ConstantTimeCompare("", "") would admit a request that sends no token at all.
+func Handler(token string) http.Handler {
+	inner := promhttp.Handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(r, token) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="metrics"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+}
+
+func authorized(r *http.Request, token string) bool {
+	if token == "" {
+		return false
+	}
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return false
+	}
+	g := sha256.Sum256([]byte(got))
+	want := sha256.Sum256([]byte(token))
+	return subtle.ConstantTimeCompare(g[:], want[:]) == 1
+}
