@@ -98,27 +98,14 @@ func TestGrant_RejectsInvalidAccess(t *testing.T) {
 	}
 }
 
-func TestGrant_RejectsTeamSubjectType(t *testing.T) {
-	// A team grant is INERT: resolveAccess skips subject_type="team" (the host can't resolve team
-	// membership), so a persisted team grant silently grants nothing — the worst state, because it
-	// tells an admin they shared when they didn't. Reject it at write time so the failure is loud.
-	// The ExpectExec is allowed so the ONLY source of a non-nil err is the write-time validation we
-	// add — not an unexpected-call mock error (RED without it: team reaches the INSERT and succeeds).
-	//
-	// `.Maybe()` IS LOAD-BEARING AND IS WHY THIS TEST IS THE ONE THAT PUSHED BACK. Every expectation
-	// in this package is now verified on the constructor, and this is the single place in the repo
-	// that registers one it EXPECTS NOT TO BE CONSUMED. Without Maybe the check reds this test for
-	// the opposite of its meaning: "the INSERT never happened" is the result it exists to prove.
-	// Deleting the expectation instead would be worse — a team grant reaching the INSERT would then
-	// produce an unexpected-call error, err would be non-nil, and the assertion below would pass for
-	// exactly the wrong reason.
-	//
-	// ⚠ AND IT HAD TO MOVE FROM ExpectExec TO ExpectQuery WITH Grant's RETURNING, FOR THAT SAME
-	// REASON. An Exec expectation left behind here would no longer match the statement Grant runs,
-	// so a team grant that reached the INSERT would fail as an unexpected Query() — non-nil err —
-	// and this test would go green while proving nothing. The mechanism the expectation names is
-	// part of the guard, not boilerplate.
+func TestGrant_RejectsTeamTheGranterDoesNotManage(t *testing.T) {
+	// A team grant is accepted only from the team's manager in the grant's workspace; anything else
+	// is refused before the INSERT. `.Maybe()` on the INSERT: the result this test proves is that it
+	// never happens.
 	store, pool := newMockStore(t)
+	pool.ExpectQuery(`SELECT EXISTS \(SELECT 1 FROM teams WHERE id = \$1 AND workspace_id = \$2 AND created_by = \$3\)`).
+		WithArgs("t-eng", "ws-1", "u-admin").
+		WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(false))
 	pool.ExpectQuery(`INSERT INTO permissions`).
 		WithArgs("space", "sp-1", "team", "t-eng", "view", "ws-1", "u-admin").
 		WillReturnRows(grantRows("perm-team", time.Now())).Maybe()
@@ -128,8 +115,7 @@ func TestGrant_RejectsTeamSubjectType(t *testing.T) {
 		Access: AccessView, WorkspaceID: "ws-1", GrantedBy: "u-admin",
 	})
 	if err == nil {
-		t.Fatal("Grant accepted subject_type=team — team grants are inert (resolveAccess skips them); " +
-			"want a write-time rejection so an admin is not told a share happened when it did not")
+		t.Fatal("Grant accepted a team the granter does not manage")
 	}
 }
 
@@ -153,13 +139,13 @@ func TestGrant_AcceptsEveryone(t *testing.T) {
 }
 
 func TestResolveAccess_TeamGrant_IsIgnored(t *testing.T) {
-	// Characterization lock: even a team grant whose subject_id equals the caller confers nothing.
-	// This is why team grants are removed at write time (above) rather than left to mislead.
+	// A team grant confers nothing on a caller who is not on the team — even one whose member id
+	// happens to equal the team id.
 	got := resolveAccess(resourceContext{Type: ResourceSpace, Private: true}, "t-eng", []Permission{
 		{SubjectType: "team", SubjectID: "t-eng", Access: AccessAdmin},
 	})
 	if got != AccessNone {
-		t.Fatalf("team grant conferred %q, want none (team is not resolved on the per-member path)", got)
+		t.Fatalf("team grant conferred %q on a non-member, want none", got)
 	}
 }
 

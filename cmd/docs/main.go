@@ -67,6 +67,7 @@ import (
 	"github.com/talyvor/docs/internal/sharing"
 	"github.com/talyvor/docs/internal/space"
 	"github.com/talyvor/docs/internal/spaceauth"
+	"github.com/talyvor/docs/internal/team"
 	"github.com/talyvor/docs/internal/templatelib"
 	"github.com/talyvor/docs/internal/trackintegration"
 	"github.com/talyvor/docs/migrations"
@@ -322,6 +323,8 @@ func main() {
 	lockHandler := pagelock.NewHandler(lockStore)
 	// B18.41 — a member's pinned pages and recently opened pages, kept on the server.
 	pinHandler := pin.NewHandler(pin.NewStore(pool))
+	// B28.446 — the teams a page or space can be shared with; a team grant applies to its members.
+	teamHandler := team.NewHandler(team.NewStore(pool))
 	// Single-writer edit session (Option A's policy seam). The REST save guard becomes
 	// approvalOK AND manualLockOK AND editSessionOK via Compose — the edit-session ADDS the
 	// "who may write right now" decision without replacing the approval gate or the manual
@@ -673,6 +676,7 @@ func main() {
 		approvalHandler.Mount(r)
 		lockHandler.Mount(r)
 		pinHandler.Mount(r)
+		teamHandler.Mount(r)
 		editSessionHandler.Mount(r)
 		commentHandler.Mount(r)
 		changelogHandler.Mount(r)
