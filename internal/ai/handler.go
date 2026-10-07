@@ -197,9 +197,9 @@ func writeAIErr(w http.ResponseWriter, err error) {
 		})
 		return
 	}
-	// Bucket everything else as a degraded-AI condition. We log the
-	// underlying error one level up so operators can diagnose, but
-	// don't bubble it to the user.
+	// Bucket everything else as a degraded-AI condition. The underlying error is logged here so
+	// operators can see why, but never bubbled to the user.
+	slog.Warn("ai: lens call failed", slog.String("err", err.Error()))
 	writeJSON(w, http.StatusBadGateway, map[string]string{
 		"error": userMessage,
 		"code":  "AI_FAILED",

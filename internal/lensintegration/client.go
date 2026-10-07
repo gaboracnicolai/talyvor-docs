@@ -39,10 +39,11 @@ type tokenProvider interface {
 }
 
 func New(lensURL, apiKey string) *Client {
+	// A call made while Lens restarts waits for it rather than failing. See restart.go.
 	return &Client{
 		lensURL:    strings.TrimRight(lensURL, "/"),
 		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: defaultTimeout},
+		httpClient: &http.Client{Timeout: defaultTimeout, Transport: RestartTolerant(nil)},
 	}
 }
 

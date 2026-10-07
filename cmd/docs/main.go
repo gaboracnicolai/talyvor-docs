@@ -185,7 +185,11 @@ func main() {
 	// one per workspace, so every Lens DATA-path call is attributed + rate-limited to its real
 	// tenant. Before this, Docs sent the admin key on the data path and every tenant collapsed
 	// into one shared rate-limit bucket + the "default" spend bucket (see internal/lenscreds).
-	lensProvider := lenscreds.New(cfg.LensURL, cfg.LensAPIKey, lenscreds.Options{})
+	// The mint, like every completion, waits out a Lens restart instead of failing the AI call
+	// that needed the token (internal/lensintegration/restart.go).
+	lensProvider := lenscreds.New(cfg.LensURL, cfg.LensAPIKey, lenscreds.Options{
+		HTTP: &http.Client{Timeout: 10 * time.Second, Transport: lensintegration.RestartTolerant(nil)},
+	})
 	lensClient := lensintegration.New(cfg.LensURL, cfg.LensAPIKey).WithTokenProvider(lensProvider)
 	semSearch := search.New(lensClient, pool).WithLensURL(cfg.LensURL).WithTokenProvider(lensProvider)
 	// Throttle the per-save embed path — the largest uncontrolled Lens consumer. The store's
