@@ -11,8 +11,8 @@ import (
 )
 
 // ScrapeCounter returns the current value of a plain (unlabelled) counter AS AN OPERATOR
-// WOULD READ IT — by driving the SHIPPED /metrics handler (metrics.Handler(), the exact
-// http.Handler cmd/docs/main.go mounts) and parsing the exposition text it answers with.
+// WOULD READ IT — by driving the SHIPPED /metrics handler (metrics.Handler, the exact
+// http.Handler cmd/docs/main.go mounts, with a scraper's bearer token) and parsing the exposition text it answers with.
 //
 // ⚠ IT SCRAPES RATHER THAN READING THE COUNTER OBJECT, and that is the point. A test that
 // reads `metrics.PagesCreated` through the client library asserts that a variable moved; the
@@ -27,8 +27,11 @@ import (
 // in this repository pass against a metric that had stopped existing.
 func ScrapeCounter(t *testing.T, name string) float64 {
 	t.Helper()
+	const token = "testutil-scrape-token-0123456789"
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
 	rr := httptest.NewRecorder()
-	metrics.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metrics.Handler(token).ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("testutil: /metrics answered HTTP %d, want 200", rr.Code)
 	}
