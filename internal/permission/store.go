@@ -8,12 +8,11 @@
 //
 //  1. "Workspace owner" can't be derived; we honour the contract by
 //     treating the resource's creator as admin.
-//  2. Team membership can't be resolved (teams live upstream and are
-//     never propagated to Check), so team-based grants are NOT
-//     supported: resolveAccess ignores subject_type="team", and Grant
-//     REJECTS it at write time so an inert grant can't be persisted and
-//     mislead an admin into thinking they shared something. Only
-//     "member" and "everyone" subject types are honored.
+//  2. Teams are Docs's own (internal/team, B28.446): Check loads the
+//     caller's teams in the resource's workspace from team_members
+//     whenever it meets a subject_type="team" grant, and Grant accepts a
+//     team only from the member who manages it, in the grant's workspace. "member",
+//     "everyone" and "team" are the honored subject types.
 package permission
 
 import (
@@ -51,12 +50,9 @@ var validAccessForGrant = map[AccessLevel]bool{
 }
 
 // validSubjectType enumerates the subject types the rule engine actually honors (resolveAccess).
-// "team" is deliberately EXCLUDED: Docs cannot resolve team membership (teams live upstream and are
-// never propagated to Check), so resolveAccess skips a team grant — it would persist and grant
-// nothing. Rejecting it at write time turns that silent lie ("you shared this") into a loud error.
-// A grant with any other subject type was equally inert on the read path.
+// A grant with any other subject type would persist and grant nothing, so Grant rejects it.
 var validSubjectType = map[string]bool{
-	"member": true, "everyone": true,
+	"member": true, "everyone": true, "team": true,
 }
 
 type Permission struct {
@@ -144,9 +140,28 @@ func (s *Store) Grant(ctx context.Context, p Permission) (*Permission, error) {
 		return nil, errors.New("permission: subject required")
 	}
 	if !validSubjectType[p.SubjectType] {
-		// Only member/everyone are honored by resolveAccess; "team" (and anything else) is inert, so
-		// persisting it would tell the admin a share happened when it did not. Fail loud instead.
-		return nil, fmt.Errorf("permission: unsupported subject_type %q (only \"member\" and \"everyone\" are honored)", p.SubjectType)
+		// Anything else is inert in resolveAccess, so persisting it would tell the admin a share
+		// happened when it did not. Fail loud instead.
+		return nil, fmt.Errorf("permission: unsupported subject_type %q (only \"member\", \"everyone\" and \"team\" are honored)", p.SubjectType)
+	}
+	if p.SubjectType == "team" && p.Access == AccessAdmin {
+		// Admin lets its holder re-share the resource, and a team's roster is one member's to change:
+		// a team grant stops at edit, so nobody gets to hand out access through a roster.
+		return nil, errors.New("permission: a team can be given view, comment or edit, not admin")
+	}
+	if p.SubjectType == "team" {
+		// Only the team's manager may grant it: whoever controls the roster controls who the grant
+		// reaches, so granting someone else's team would let them add themselves to this resource
+		// afterwards. A team from another workspace (or none) is refused the same way.
+		var manages bool
+		if err := s.pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM teams WHERE id = $1 AND workspace_id = $2 AND created_by = $3)`,
+			p.SubjectID, p.WorkspaceID, p.GrantedBy).Scan(&manages); err != nil {
+			return nil, fmt.Errorf("permission: grant: %w", err)
+		}
+		if !manages {
+			return nil, fmt.Errorf("permission: you can share only with a team you manage in this workspace")
+		}
 	}
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO permissions (resource_type, resource_id, subject_type, subject_id, access, workspace_id, granted_by)
@@ -302,17 +317,22 @@ func rank(a AccessLevel) int {
 //  4. Otherwise none.
 //
 // "Highest" means the AccessLevel with the largest rank() value;
-// explicit member grants and "everyone" grants both contribute.
+// explicit member grants, "everyone" grants and grants to a team the
+// member is on all contribute.
 func resolveAccess(res resourceContext, memberID string, perms []Permission) AccessLevel {
+	return resolveAccessForTeams(res, memberID, nil, perms)
+}
+
+// resolveAccessForTeams is resolveAccess for a member on the teams in memberTeams (team ids in the
+// resource's workspace).
+func resolveAccessForTeams(res resourceContext, memberID string, memberTeams map[string]bool, perms []Permission) AccessLevel {
 	if memberID != "" && memberID == res.CreatedBy {
 		return AccessAdmin
 	}
 	best := AccessNone
 	consider := func(p Permission) {
-		// "member" must match exactly; "everyone" always matches. "team" (and any other subject
-		// type) confers NOTHING: Docs can't resolve team membership, so a team grant is inert —
-		// which is why Grant now rejects it at write time. Legacy team rows already in the table
-		// fall through to the default and are ignored here, exactly as before.
+		// "member" must match exactly; "everyone" always matches; "team" matches a team the
+		// member is on.
 		switch p.SubjectType {
 		case "member":
 			if p.SubjectID != memberID {
@@ -320,8 +340,12 @@ func resolveAccess(res resourceContext, memberID string, perms []Permission) Acc
 			}
 		case "everyone":
 			// match
+		case "team":
+			if !memberTeams[p.SubjectID] {
+				return
+			}
 		default:
-			// team, or anything else the write-side allow-list no longer permits: not applicable.
+			// anything the write-side allow-list does not permit: not applicable.
 			return
 		}
 		if rank(p.Access) > rank(best) {
@@ -355,7 +379,46 @@ func (s *Store) Check(ctx context.Context, memberID string, res resourceContext,
 	if err != nil {
 		return AccessNone, err
 	}
-	return resolveAccess(res, memberID, perms), nil
+	teams, err := s.memberTeams(ctx, res, memberID, perms)
+	if err != nil {
+		return AccessNone, err
+	}
+	return resolveAccessForTeams(res, memberID, teams, perms), nil
+}
+
+// memberTeams returns the teams memberID is on in the resource's workspace — read only when a team
+// grant is actually in play, so a check with none costs no extra query.
+func (s *Store) memberTeams(ctx context.Context, res resourceContext, memberID string, perms []Permission) (map[string]bool, error) {
+	if memberID == "" || res.WorkspaceID == "" || !hasTeamGrant(perms, res.SpacePerms) {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT team_id FROM team_members WHERE workspace_id = $1 AND member_id = $2`,
+		res.WorkspaceID, memberID)
+	if err != nil {
+		return nil, fmt.Errorf("permission: member teams: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
+func hasTeamGrant(lists ...[]Permission) bool {
+	for _, l := range lists {
+		for _, p := range l {
+			if p.SubjectType == "team" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CheckSpace and CheckPage are the NON-HTTP entry points to the same rule engine the RequireAccess

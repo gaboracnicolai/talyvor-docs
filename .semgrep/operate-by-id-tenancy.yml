@@ -190,7 +190,7 @@ rules:
             - pattern: chi.URLParam($R, $P)
             - metavariable-regex:
                 metavariable: $P
-                regex: ^"(pageID|id|dbID|spaceID|version|templateID|rowID|issueID|blockID|viewID|token|slug|requestID|permID|other)"$
+                regex: ^"(pageID|id|dbID|spaceID|version|templateID|rowID|issueID|blockID|viewID|token|slug|requestID|permID|other|teamID|memberID)"$
 
   - id: docs-by-id-write-requires-workspace-scope-sprintf
     languages: [go]

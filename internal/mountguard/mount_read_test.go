@@ -95,6 +95,7 @@ var routeFloor = map[string]int{
 	"pagelink":         3,
 	"pagelock":         3,
 	"pin":              4,
+	"team":             4,
 	"permission":       6,
 	"search":           1,
 	"sharing":          4,
