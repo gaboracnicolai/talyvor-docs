@@ -144,6 +144,11 @@ func (s *Store) Grant(ctx context.Context, p Permission) (*Permission, error) {
 		// happened when it did not. Fail loud instead.
 		return nil, fmt.Errorf("permission: unsupported subject_type %q (only \"member\", \"everyone\" and \"team\" are honored)", p.SubjectType)
 	}
+	if p.SubjectType == "team" && p.Access == AccessAdmin {
+		// Admin lets its holder re-share the resource, and a team's roster is one member's to change:
+		// a team grant stops at edit, so nobody gets to hand out access through a roster.
+		return nil, errors.New("permission: a team can be given view, comment or edit, not admin")
+	}
 	if p.SubjectType == "team" {
 		// Only the team's manager may grant it: whoever controls the roster controls who the grant
 		// reaches, so granting someone else's team would let them add themselves to this resource

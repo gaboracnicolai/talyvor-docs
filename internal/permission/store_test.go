@@ -119,6 +119,19 @@ func TestGrant_RejectsTeamTheGranterDoesNotManage(t *testing.T) {
 	}
 }
 
+func TestGrant_RejectsAdminForATeam(t *testing.T) {
+	// Admin would let a roster one member controls re-share the resource; refused before any query.
+	store, _ := newMockStore(t)
+	_, err := store.Grant(context.Background(), Permission{
+		ResourceType: ResourceSpace, ResourceID: "sp-1",
+		SubjectType: "team", SubjectID: "t-eng",
+		Access: AccessAdmin, WorkspaceID: "ws-1", GrantedBy: "u-admin",
+	})
+	if err == nil {
+		t.Fatal("Grant gave a team admin")
+	}
+}
+
 func TestGrant_AcceptsEveryone(t *testing.T) {
 	// The removal must not over-reject: "everyone" is a real, honored subject type.
 	store, pool := newMockStore(t)

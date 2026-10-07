@@ -206,7 +206,8 @@ export function SharePanel({
                 onChange={(e) => setTeamRole(e.target.value as AccessLevel)}
                 className="rounded border border-border bg-bg px-1 py-1 text-xs"
               >
-                {(["view", "comment", "edit", "admin"] as AccessLevel[]).map((a) => (
+                {/* No admin: a team grant stops at edit (permission.Store.Grant). */}
+                {(["view", "comment", "edit"] as AccessLevel[]).map((a) => (
                   <option key={a} value={a}>
                     {ROLE_LABELS[a]}
                   </option>
