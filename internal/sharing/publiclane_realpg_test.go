@@ -100,7 +100,7 @@ func publicLaneChain(t *testing.T, d *testutil.DB) http.Handler {
 		}, nil
 	}
 
-	h := sharing.NewHandler(sharing.NewStore(d.Pool), loader).WithAccess(pageEnf)
+	h := sharing.NewHandler(sharing.NewStore(d.Pool).WithSigningSecret(publicLaneSecret), loader).WithAccess(pageEnf)
 
 	r := chi.NewRouter()
 	r.Route("/v1", func(r chi.Router) {
@@ -133,7 +133,7 @@ func newPublicLaneFixture(t *testing.T, d *testutil.DB) *publicLaneFixture {
 		t.Fatalf("seed page content: %v", err)
 	}
 	return &publicLaneFixture{
-		srv: publicLaneChain(t, d), store: sharing.NewStore(d.Pool),
+		srv: publicLaneChain(t, d), store: sharing.NewStore(d.Pool).WithSigningSecret(publicLaneSecret),
 		pageID: pageID, ws: ws, author: author, body: body,
 	}
 }

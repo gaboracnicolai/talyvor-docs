@@ -364,7 +364,7 @@ func main() {
 	// Permissions + public sharing.
 	permStore := permission.NewStore(pool)
 	permHandler := permission.NewHandler(permStore)
-	shareStore := sharing.NewStore(pool)
+	shareStore := sharing.NewStore(pool).WithSigningSecret(cfg.GatewayAuthSecret) // share tokens are signed; see WithSigningSecret
 	shareHandler := sharing.NewHandler(shareStore, func(ctx context.Context, pageID string) (*sharing.PublicPage, error) {
 		p, err := pageStore.GetByID(ctx, pageID)
 		if err != nil || p == nil {
@@ -544,6 +544,7 @@ func main() {
 	// permission.CheckPage). A view-only member may connect (cursor/presence) but cannot mutate.
 	collabHandler := collab.NewHandler(otEngine).WithGuard(lockStore).
 		WithAllowedOrigins(cfg.AllowedOrigins).
+		WithReadLimit(cfg.MaxBodyBytes). // a change frame carries the whole document, like PATCH /pages
 		WithAccess(collab.NewPermissionSession(permStore, pageLooker, authzResolver))
 	// updated_by is the member whose change produced this snapshot, resolved from the socket's
 	// verified identity (see OTEngine.Snapshot). It is load-bearing, not attribution garnish:

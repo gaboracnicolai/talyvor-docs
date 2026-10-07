@@ -79,7 +79,7 @@ func a3Chain(d *testutil.DB) http.Handler {
 		space.NewHandler(spaceStore).WithAccess(spaceEnf).Mount(r)
 		page.NewHandler(pageStore, d.Pool).WithAccess(pageEnf, spaceEnf).Mount(r)
 		comment.NewHandler(comment.NewStore(d.Pool)).WithAccess(pageEnf).Mount(r)
-		sharing.NewHandler(sharing.NewStore(d.Pool), nil).WithAccess(pageEnf).Mount(r)
+		sharing.NewHandler(sharing.NewStore(d.Pool).WithSigningSecret("a3-share-signing-secret"), nil).WithAccess(pageEnf).Mount(r)
 		block.NewHandler(block.NewStore(d.Pool)).WithAccess(pageEnf, blockEnf).Mount(r)
 		export.NewHandler(export.New(pageStore, spaceStore)).WithAccess(pageEnf).Mount(r)
 		permission.NewHandler(permStore).WithAccess(spaceEnf, pageEnf).Mount(r)

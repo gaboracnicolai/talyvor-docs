@@ -10,6 +10,8 @@ import (
 	"github.com/pashagolub/pgxmock/v4"
 )
 
+const mockSigningSecret = "share-token-test-secret-0123456789"
+
 func newMockStore(t *testing.T) (*Store, pgxmock.PgxPoolIface) {
 	t.Helper()
 	pool, err := pgxmock.NewPool()
@@ -34,7 +36,7 @@ func newMockStore(t *testing.T) (*Store, pgxmock.PgxPoolIface) {
 			t.Errorf("unmet or mismatched pgxmock expectations: %v", err)
 		}
 	})
-	return newStore(pool), pool
+	return newStore(pool).WithSigningSecret(mockSigningSecret), pool
 }
 
 func TestCreate_GeneratesUUIDTokenAndStoresRow(t *testing.T) {
