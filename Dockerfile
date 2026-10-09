@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Stage 1 — build the Go binary on Alpine. We use the same major-
 # minor as go.mod so the produced binary matches local dev.
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /src
 

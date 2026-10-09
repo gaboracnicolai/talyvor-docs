@@ -5,8 +5,8 @@
 //
 // There are two version numbers and nothing but a person keeps them equal:
 //
-//	go.mod `toolchain go1.26.6`      LOCAL builds and the Docker build
-//	ci.yaml `go-version: "1.26.6"`   every CI job
+//	go.mod `toolchain go1.26.9`      LOCAL builds and the Docker build
+//	ci.yaml `go-version: "1.26.9"`   every CI job
 //
 // ⚠ THE DIRECTIVE DOES NOT REACH CI. actions/setup-go exports GOTOOLCHAIN=local, so each job runs
 // exactly the version its pin installed and go.mod's floor is never auto-fetched there. That is not

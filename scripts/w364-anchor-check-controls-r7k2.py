@@ -57,7 +57,7 @@ def check() -> tuple[bool, str]:
     return r.returncode == 0, r.stdout + r.stderr
 
 
-TEST_PIN = '          go-version: "1.26.6"\n          cache: true\n'
+TEST_PIN = '          go-version: "1.26.9"\n          cache: true\n'
 
 CONTROLS = [
     ("A1 a THIRD copy of the test-job pin appears", CI,

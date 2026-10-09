@@ -29,11 +29,11 @@ WHY = "TestTheFloorsRationaleNamesTheAdvisories"
 
 CONTROLS = [
     ("W1 the toolchain directive deleted", GOMOD,
-     "\ntoolchain go1.26.6\n", "\n", MOD, LCK,
+     "\ntoolchain go1.26.9\n", "\n", MOD, LCK,
      "removing it restores nine reachable stdlib advisories to local and Docker builds"),
 
     ("W2 the shipped pin lowered below the floor", GOMOD,
-     "toolchain go1.26.6", "toolchain go1.26.5", MOD, LCK,
+     "toolchain go1.26.9", "toolchain go1.26.5", MOD, LCK,
      "1.26.5 leaves eight of the nine reachable"),
 
     # ⚠ W3 WAS ONE CONTROL AND IT HAD BEEN UNABLE TO RUN. Its anchor was the bare
@@ -55,13 +55,13 @@ CONTROLS = [
     # `cache: false`) rather than by the comment above it, because the comments are prose that
     # gets edited and the cache setting is a functional difference between the two jobs.
     ("W3a the CI pin lowered below the floor — test job", CI,
-     '          go-version: "1.26.6"\n          cache: true\n',
+     '          go-version: "1.26.9"\n          cache: true\n',
      '          go-version: "1.25"\n          cache: true\n', LCK, MOD,
      "the number that actually governs the gofmt gate and the real-PG suite is compared, not "
      "trusted — track's W6.34 lesson"),
 
     ("W3b the CI pin lowered below the floor — vuln job", CI,
-     '          go-version: "1.26.6"\n          cache: false\n',
+     '          go-version: "1.26.9"\n          cache: false\n',
      '          go-version: "1.25"\n          cache: false\n', LCK, MOD,
      "govulncheck grades the stdlib against the toolchain it runs under, so this pin is a "
      "separate claim from the test job's and had never been controlled at all"),
