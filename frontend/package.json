@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "rm -f .vitest-report.json && vitest run --reporter=default --reporter=json --outputFile=.vitest-report.json && node scripts/check-test-manifest.mjs",
     "test:accept": "node scripts/check-test-manifest.mjs --update",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "audit": "node scripts/audit.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.62.0",
@@ -48,5 +49,8 @@
     "typescript": "^5.7.2",
     "vite": "^6.0.3",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "postcss-selector-parser": "^7.1.6"
   }
 }
